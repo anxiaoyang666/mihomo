@@ -21,7 +21,7 @@ CONFIG_FILE = f"{MIHOMO_DIR}/config.yaml"
 LOG_FILE = "/var/log/mihomo.log"
 BACKUP_DIR = f"{MIHOMO_DIR}/backup"
 MANAGER_DIR = f"{MIHOMO_DIR}/manager"
-PANEL_VERSION = "0.1.2"
+PANEL_VERSION = "0.1.3"
 DEFAULT_PANEL_REPO_URL = "https://github.com/anxiaoyang666/mihomo.git"
 DEFAULT_PANEL_BRANCH = "main"
 PANEL_BACKUP_KEEP_COUNT = 3
@@ -224,7 +224,7 @@ def remote_panel_version(settings=None):
     raw_url = github_raw_app_url(settings["repo_url"], settings["branch"])
     if not raw_url:
         return {"success": False, "latest_version": "", "source": "", "message": "当前只支持 GitHub 仓库地址。"}
-    ok, text, source = read_url_text([f"https://gh-proxy.com/{raw_url}", raw_url], timeout=15)
+    ok, text, source = read_url_text([raw_url, f"https://gh-proxy.com/{raw_url}"], timeout=15)
     if ok:
         version = parse_panel_version(text)
         if version:
@@ -268,7 +268,7 @@ def download_panel_source(tmpdir):
     if not archive_url:
         return False, "当前只支持 GitHub 仓库地址。", None, settings
     zip_path = os.path.join(tmpdir, "mihomo-panel.zip")
-    ok, source = download_file([f"https://gh-proxy.com/{archive_url}", archive_url], zip_path)
+    ok, source = download_file([archive_url, f"https://gh-proxy.com/{archive_url}"], zip_path)
     if not ok:
         return False, "下载升级包失败：\n" + source, None, settings
     try:
