@@ -21,7 +21,7 @@ CONFIG_FILE = f"{MIHOMO_DIR}/config.yaml"
 LOG_FILE = "/var/log/mihomo.log"
 BACKUP_DIR = f"{MIHOMO_DIR}/backup"
 MANAGER_DIR = f"{MIHOMO_DIR}/manager"
-PANEL_VERSION = "0.1.0"
+PANEL_VERSION = "0.1.1"
 DEFAULT_PANEL_REPO_URL = "https://github.com/anxiaoyang666/mihomo.git"
 DEFAULT_PANEL_BRANCH = "main"
 PANEL_BACKUP_KEEP_COUNT = 3
@@ -433,7 +433,10 @@ def index():
 @app.route('/api/status')
 @login_required
 def get_status():
-    return jsonify({"running": subprocess.run("systemctl is-active mihomo", shell=True).returncode == 0})
+    return jsonify({
+        "running": subprocess.run("systemctl is-active mihomo", shell=True).returncode == 0,
+        "panel_version": PANEL_VERSION,
+    })
 
 @app.route('/api/panel-upgrade-source')
 @login_required

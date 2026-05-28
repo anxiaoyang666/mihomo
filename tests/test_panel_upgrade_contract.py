@@ -20,7 +20,7 @@ class MihomoPanelUpgradeContractTest(unittest.TestCase):
     def test_panel_upgrade_backend_contract_exists(self):
         text = app_source()
 
-        self.assertIn('PANEL_VERSION = "0.1.0"', text)
+        self.assertIn('PANEL_VERSION = "0.1.1"', text)
         self.assertIn("DEFAULT_PANEL_REPO_URL", text)
         self.assertIn("def panel_version_tuple", text)
         self.assertIn("def panel_upgrade_state", text)
@@ -46,12 +46,20 @@ class MihomoPanelUpgradeContractTest(unittest.TestCase):
     def test_panel_upgrade_ui_contract_exists(self):
         text = index_source()
 
-        self.assertIn("panelRepo", text)
-        self.assertIn("panelBranch", text)
-        self.assertIn("panelCurrent", text)
-        self.assertIn("panelLatest", text)
+        self.assertIn("versionText", text)
+        self.assertIn("versionLabel", text)
+        self.assertIn("versionPopover", text)
+        self.assertIn("versionPopoverCurrent", text)
+        self.assertIn("versionPopoverState", text)
+        self.assertIn("versionPopoverUpgrade", text)
         self.assertIn("loadPanelUpgradeSource", text)
         self.assertIn("confirmUpgradePanel", text)
+        self.assertIn("handlePanelVersionClick", text)
+        self.assertIn("renderVersionPopover", text)
+        self.assertIn("toggleVersionPopover", text)
+        self.assertIn("versionPopover.classList.toggle('show'", text)
+        self.assertIn("document.addEventListener('click'", text)
+        self.assertIn("version-dot", text)
         self.assertIn("upgrade_panel", text)
         self.assertIn("setTimeout(() => location.reload(), 5000)", text)
 
@@ -62,6 +70,8 @@ class MihomoPanelUpgradeContractTest(unittest.TestCase):
         match = re.search(r'(?m)^PANEL_VERSION = "(\d+)\.(\d+)\.(\d+)"$', app_source())
 
         self.assertIsNotNone(match)
+        version = tuple(int(part) for part in match.groups())
+        self.assertGreaterEqual(version, (0, 1, 1))
 
 
 if __name__ == "__main__":

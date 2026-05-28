@@ -148,6 +148,148 @@
         .log-msg { color: #dcdcdc; word-break: break-all; }
 
         .logo-img { width: 32px; height: 32px; border-radius: 8px; margin-right: 10px; vertical-align: middle; }
+        .brand-copy { min-width: 0; }
+        .brand-title { font-size: 1.35rem; font-weight: 650; line-height: 1.1; }
+        .brand-version {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            min-height: 26px;
+            border: 0;
+            border-radius: 999px;
+            background: rgba(13,110,253,.08);
+            color: #0d6efd;
+            padding: 0 10px;
+            font: inherit;
+            font-size: 12px;
+            font-weight: 500;
+            line-height: 1;
+            text-align: left;
+            cursor: pointer;
+            gap: 6px;
+            max-width: 150px;
+        }
+        .brand-version.has-update {
+            color: #b45309;
+            background: #fffbeb;
+        }
+        [data-theme="dark"] .brand-version.has-update {
+            color: #fbbf24;
+            background: rgba(245,158,11,.14);
+        }
+        .version-dot {
+            width: 7px;
+            height: 7px;
+            display: none;
+            border-radius: 999px;
+            background: #f59e0b;
+            box-shadow: 0 0 0 0 rgba(245,158,11,.42);
+            flex: 0 0 auto;
+        }
+        .brand-version.has-update .version-dot {
+            display: inline-block;
+            animation: versionPulse 1.6s ease-in-out infinite;
+        }
+        @keyframes versionPulse {
+            0%, 100% { transform: scale(.92); box-shadow: 0 0 0 0 rgba(245,158,11,.42); }
+            50% { transform: scale(1.08); box-shadow: 0 0 0 6px rgba(245,158,11,0); }
+        }
+        .brand-version:focus-visible {
+            outline: 2px solid rgba(13,110,253,.35);
+            outline-offset: 3px;
+        }
+        .version-popover {
+            position: fixed;
+            left: 22px;
+            top: 78px;
+            z-index: 1100;
+            width: 280px;
+            max-width: calc(100vw - 32px);
+            display: none;
+            overflow: hidden;
+            border: 1px solid var(--border-color);
+            border-radius: 12px;
+            background: var(--bg-card);
+            box-shadow: 0 16px 34px rgba(16,24,40,.13);
+        }
+        .version-popover.show { display: block; }
+        .version-popover-head {
+            min-height: 52px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 12px;
+            padding: 0 16px;
+            border-bottom: 1px solid var(--border-color);
+        }
+        .version-popover-title {
+            margin: 0;
+            font-size: 15px;
+            font-weight: 650;
+            letter-spacing: 0;
+        }
+        .version-popover-refresh {
+            width: 44px;
+            min-width: 44px;
+            min-height: 44px;
+            padding: 0;
+            border: 0;
+            color: var(--text-muted);
+            background: transparent;
+            font-size: 20px;
+        }
+        .version-popover-body {
+            display: grid;
+            justify-items: center;
+            gap: 9px;
+            padding: 20px 18px 18px;
+        }
+        .version-popover-current {
+            display: flex;
+            align-items: center;
+            gap: 9px;
+            color: var(--text-main);
+            font-size: 26px;
+            line-height: 1;
+            font-weight: 600;
+        }
+        .version-popover-check {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            width: 24px;
+            height: 24px;
+            border-radius: 999px;
+            color: #16a34a;
+            background: #dcfce7;
+            font-size: 15px;
+            font-weight: 700;
+        }
+        .version-popover-state {
+            color: var(--text-muted);
+            font-size: 14px;
+            text-align: center;
+        }
+        .version-popover-actions {
+            display: flex;
+            gap: 10px;
+            margin-top: 10px;
+            flex-wrap: wrap;
+            justify-content: center;
+        }
+        .version-popover-actions button {
+            min-height: 40px;
+            border: 0;
+            color: var(--text-muted);
+            background: transparent;
+            font-size: 14px;
+        }
+        .version-popover-actions button.soft {
+            color: #b45309;
+            background: #fffbeb;
+            border-radius: 999px;
+            padding: 0 14px;
+        }
         textarea#config-editor { font-family: 'Consolas', monospace; font-size: 13px; background-color: var(--input-bg); color: var(--text-main); border: none; }
         .version-pill { display: inline-flex; align-items: center; min-height: 28px; border-radius: 999px; padding: 0 10px; background: rgba(13,110,253,.08); color: #0d6efd; font-size: 12px; font-weight: 600; max-width: 100%; overflow-wrap: anywhere; }
         .panel-upgrade-meta { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
@@ -182,11 +324,36 @@
     <div class="sidebar-logo-area d-flex justify-content-between align-items-center mb-5 px-2">
         <div class="d-flex align-items-center">
             <img src="/static/logo.png" alt="Logo" class="logo-img">
-            <h3 class="fw-bold text-primary m-0" style="font-size: 1.5rem;">Mihomo</h3>
+            <div class="brand-copy">
+                <h3 class="brand-title text-primary m-0">Mihomo</h3>
+                <button type="button" class="brand-version mt-1" id="versionText" onclick="handlePanelVersionClick()" aria-label="查看 Mihomo 面板版本">
+                    <span id="versionLabel">正在读取状态</span>
+                    <span class="version-dot" aria-hidden="true"></span>
+                </button>
+            </div>
         </div>
         <button class="btn btn-sm btn-outline-secondary border-0" onclick="toggleTheme()" title="切换深色模式">
             <i class="bi bi-moon-stars-fill" id="theme-icon-pc"></i>
         </button>
+    </div>
+    <div class="version-popover" id="versionPopover" role="dialog" aria-label="Mihomo 面板版本">
+        <div class="version-popover-head">
+            <h3 class="version-popover-title">当前版本</h3>
+            <button type="button" class="version-popover-refresh" aria-label="刷新版本" onclick="refreshPanelVersionPopover()">
+                <i class="bi bi-arrow-clockwise"></i>
+            </button>
+        </div>
+        <div class="version-popover-body">
+            <div class="version-popover-current">
+                <span id="versionPopoverCurrent">v--</span>
+                <span class="version-popover-check" id="versionPopoverIcon">✓</span>
+            </div>
+            <div class="version-popover-state" id="versionPopoverState">正在检测版本</div>
+            <div class="version-popover-actions">
+                <button type="button" onclick="openPanelRelease()">查看发布</button>
+                <button type="button" class="soft" id="versionPopoverUpgrade" onclick="closeVersionPopover(); confirmUpgradePanel();" style="display:none;">升级面板</button>
+            </div>
+        </div>
     </div>
     
     <div class="nav flex-column nav-pills me-3" id="mainTab" role="tablist">
@@ -223,7 +390,7 @@
                 </div>
             </div>
             <div class="row g-4">
-                <div class="col-md-6">
+                <div class="col-md-12">
                     <div class="card h-100">
                         <div class="card-header"><i class="bi bi-lightning-charge"></i> 快捷入口</div>
                         <div class="card-body d-grid gap-3">
@@ -235,39 +402,6 @@
                                 <div class="fw-bold"><i class="bi bi-geo-alt"></i> 更新 Geo 数据库</div>
                                 <div class="small opacity-75">立即更新 IP 库</div>
                             </button>
-                        </div>
-                    </div>
-                </div>
-                <div class="col-md-6">
-                    <div class="card h-100">
-                        <div class="card-header d-flex justify-content-between align-items-center">
-                            <span><i class="bi bi-cloud-arrow-up"></i> 面板在线升级</span>
-                            <span class="version-pill" id="panelCurrent">v--</span>
-                        </div>
-                        <div class="card-body">
-                            <div class="panel-upgrade-meta mb-3">
-                                <div>
-                                    <div class="small text-muted mb-1">远端版本</div>
-                                    <div class="version-pill" id="panelLatest">未检测</div>
-                                </div>
-                                <div>
-                                    <div class="small text-muted mb-1">分支</div>
-                                    <div class="version-pill" id="panelBranch">--</div>
-                                </div>
-                                <div style="grid-column: 1 / -1;">
-                                    <div class="small text-muted mb-1">仓库</div>
-                                    <div class="version-pill" id="panelRepo">--</div>
-                                </div>
-                            </div>
-                            <div class="small text-muted mb-3" id="panelUpgradeHint">只更新 Mihomo Web 面板、脚本和服务文件，不覆盖 .env、config.yaml 和运行数据。</div>
-                            <div class="d-flex gap-2 flex-wrap">
-                                <button class="btn btn-outline-primary" onclick="loadPanelUpgradeSource()">
-                                    <i class="bi bi-arrow-repeat"></i> 检测版本
-                                </button>
-                                <button class="btn btn-warning" onclick="confirmUpgradePanel()">
-                                    <i class="bi bi-cloud-download"></i> 升级面板
-                                </button>
-                            </div>
                         </div>
                     </div>
                 </div>
@@ -547,6 +681,10 @@
     // === 双变量独立存储逻辑 ===
     let cachedUrlRaw = "";
     let cachedUrlAirport = "";
+    let panelLatestVersion = "";
+    let panelCurrentVersion = "";
+    let panelUpdateAvailable = false;
+    let panelRepoUrl = "";
 
     function toggleModeDesc() {
         const isAirport = document.getElementById('mode_airport').checked;
@@ -773,9 +911,72 @@
         if (el) el.textContent = value || '--';
     }
 
+    function renderVersionPopover(state) {
+        const current = state?.current_version || panelCurrentVersion || '--';
+        const latest = state?.latest_version || panelLatestVersion || '';
+        const hasUpdate = Boolean(state?.update_available || panelUpdateAvailable);
+        const checked = state ? Boolean(state.check_success) : Boolean(panelLatestVersion || panelCurrentVersion);
+        const currentEl = document.getElementById('versionPopoverCurrent');
+        const iconEl = document.getElementById('versionPopoverIcon');
+        const stateEl = document.getElementById('versionPopoverState');
+        const upgradeEl = document.getElementById('versionPopoverUpgrade');
+        if (currentEl) currentEl.textContent = 'v' + current;
+        if (iconEl) {
+            iconEl.textContent = hasUpdate ? '!' : '✓';
+            iconEl.style.color = hasUpdate ? '#b45309' : '#16a34a';
+            iconEl.style.background = hasUpdate ? '#fffbeb' : '#dcfce7';
+        }
+        if (stateEl) {
+            stateEl.textContent = hasUpdate
+                ? '发现新版本 v' + latest
+                : (checked ? '已是最新版本' : '正在检测版本');
+        }
+        if (upgradeEl) upgradeEl.style.display = hasUpdate ? '' : 'none';
+    }
+
+    function closeVersionPopover() {
+        const versionPopover = document.getElementById('versionPopover');
+        if (versionPopover) versionPopover.classList.remove('show');
+    }
+
+    function toggleVersionPopover(force) {
+        const versionPopover = document.getElementById('versionPopover');
+        if (!versionPopover) return;
+        renderVersionPopover();
+        versionPopover.classList.toggle('show', typeof force === 'boolean' ? force : !versionPopover.classList.contains('show'));
+    }
+
+    async function refreshPanelVersionPopover() {
+        renderVersionPopover({current_version: panelCurrentVersion, check_success: false});
+        const res = await loadPanelUpgradeSource();
+        renderVersionPopover(res);
+    }
+
+    function openPanelRelease() {
+        const repo = (panelRepoUrl || 'https://github.com/anxiaoyang666/mihomo').replace(/\.git$/, '');
+        window.open(repo + '/releases', '_blank', 'noopener,noreferrer');
+    }
+
     async function loadPanelUpgradeSource() {
         const res = await api('/panel-upgrade-source');
         if (!res) return;
+        panelRepoUrl = res.repo_url || panelRepoUrl;
+        panelCurrentVersion = res.current_version || panelCurrentVersion || '--';
+        panelLatestVersion = res.latest_version || '';
+        panelUpdateAvailable = Boolean(res.update_available);
+        const versionText = document.getElementById('versionText');
+        const versionLabel = document.getElementById('versionLabel');
+        if (versionText) {
+            versionText.classList.toggle('has-update', panelUpdateAvailable);
+            versionText.title = panelUpdateAvailable
+                ? '发现 Mihomo v' + panelLatestVersion + '，点击升级'
+                : 'Mihomo 面板已是最新或暂未检测到更新';
+        }
+        if (versionLabel) {
+            versionLabel.textContent = panelUpdateAvailable
+                ? 'v' + panelCurrentVersion + ' 可更新'
+                : 'v' + panelCurrentVersion;
+        }
         setPanelText('panelRepo', res.repo_url || '--');
         setPanelText('panelBranch', res.branch || '--');
         setPanelText('panelCurrent', 'v' + (res.current_version || '--'));
@@ -788,6 +989,7 @@
                     ? '当前面板版本 v' + (res.current_version || '--') + '，远端版本 v' + (res.latest_version || '--') + '，无需更新。'
                     : (res.message || '当前升级源不是支持的 GitHub 仓库地址，请检查 .env 里的 MIHOMO_PANEL_REPO_URL。'));
         }
+        renderVersionPopover(res);
         return res;
     }
 
@@ -796,10 +998,27 @@
         control('upgrade_panel');
     }
 
+    function handlePanelVersionClick() {
+        toggleVersionPopover();
+        if (!panelLatestVersion) refreshPanelVersionPopover();
+    }
+
+    document.addEventListener('click', event => {
+        const versionPopover = document.getElementById('versionPopover');
+        const versionText = document.getElementById('versionText');
+        if (!versionPopover || !versionText || !versionPopover.classList.contains('show')) return;
+        if (versionPopover.contains(event.target) || versionText.contains(event.target)) return;
+        closeVersionPopover();
+    });
+
     setInterval(() => {
         api('/status').then(res => {
             const el = document.getElementById('status-text');
             el.innerHTML = res.running ? '<span class="text-success fw-bold">● 运行中</span>' : '<span class="text-danger fw-bold">● 已停止</span>';
+            panelCurrentVersion = res.panel_version || panelCurrentVersion;
+            const versionLabel = document.getElementById('versionLabel');
+            if (versionLabel && !panelUpdateAvailable) versionLabel.textContent = 'v' + (panelCurrentVersion || '--');
+            renderVersionPopover();
         });
     }, 5000);
     loadPanelUpgradeSource();
