@@ -1,0 +1,14 @@
+﻿# Runtime secrets and live configs
+remote-root/etc/mihomo/.env
+remote-root/etc/mihomo/config.yaml
+remote-root/etc/mihomo/providers/
+remote-root/etc/mihomo/backup/
+remote-root/etc/mihomo/cache.db
+
+# Extraction/archive artifacts
+*.tar.gz
+INVENTORY.txt
+
+# Python/cache artifacts
+__pycache__/
+*.pyc

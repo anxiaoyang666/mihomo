@@ -1,0 +1,10 @@
+[Unit]
+Description=Mihomo Web Manager
+After=network.target
+[Service]
+Type=simple
+User=root
+ExecStart=/usr/bin/python3 /etc/mihomo/manager/app.py
+Restart=always
+[Install]
+WantedBy=multi-user.target

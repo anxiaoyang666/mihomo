@@ -1,0 +1,9 @@
+*.sh text eol=lf
+remote-root/usr/bin/* text eol=lf
+*.service text eol=lf
+*.py text eol=lf
+*.yaml text eol=lf
+*.yml text eol=lf
+*.json text eol=lf
+*.html text eol=lf
+*.md text eol=lf
