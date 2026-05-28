@@ -20,7 +20,7 @@ class MihomoPanelUpgradeContractTest(unittest.TestCase):
     def test_panel_upgrade_backend_contract_exists(self):
         text = app_source()
 
-        self.assertIn('PANEL_VERSION = "0.1.1"', text)
+        self.assertIn('PANEL_VERSION = "0.1.2"', text)
         self.assertIn("DEFAULT_PANEL_REPO_URL", text)
         self.assertIn("def panel_version_tuple", text)
         self.assertIn("def panel_upgrade_state", text)
@@ -36,6 +36,22 @@ class MihomoPanelUpgradeContractTest(unittest.TestCase):
         self.assertIn("/etc/mihomo/config.yaml", text)
         self.assertIn("/etc/mihomo/ui", text)
         self.assertIn("remote_tuple <= current_tuple", text)
+
+    def test_panel_upgrade_messages_are_chinese(self):
+        text = app_source()
+
+        self.assertIn("Mihomo 面板升级完成", text)
+        self.assertIn("Web 服务将在 1 秒后重启", text)
+        self.assertIn("升级源", text)
+        self.assertIn("仓库", text)
+        self.assertIn("分支", text)
+        self.assertIn("旧版本", text)
+        self.assertIn("新版本", text)
+        self.assertIn("备份位置", text)
+        self.assertNotIn("Mihomo panel upgraded", text)
+        self.assertNotIn("Web service will restart", text)
+        self.assertNotIn("Old version:", text)
+        self.assertNotIn("New version:", text)
 
     def test_panel_upgrade_prefers_github_proxy(self):
         text = app_source()
@@ -71,7 +87,7 @@ class MihomoPanelUpgradeContractTest(unittest.TestCase):
 
         self.assertIsNotNone(match)
         version = tuple(int(part) for part in match.groups())
-        self.assertGreaterEqual(version, (0, 1, 1))
+        self.assertGreaterEqual(version, (0, 1, 2))
 
 
 if __name__ == "__main__":

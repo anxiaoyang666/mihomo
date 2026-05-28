@@ -21,7 +21,7 @@ CONFIG_FILE = f"{MIHOMO_DIR}/config.yaml"
 LOG_FILE = "/var/log/mihomo.log"
 BACKUP_DIR = f"{MIHOMO_DIR}/backup"
 MANAGER_DIR = f"{MIHOMO_DIR}/manager"
-PANEL_VERSION = "0.1.1"
+PANEL_VERSION = "0.1.2"
 DEFAULT_PANEL_REPO_URL = "https://github.com/anxiaoyang666/mihomo.git"
 DEFAULT_PANEL_BRANCH = "main"
 PANEL_BACKUP_KEEP_COUNT = 3
@@ -223,13 +223,13 @@ def remote_panel_version(settings=None):
     settings = settings or panel_repo_settings()
     raw_url = github_raw_app_url(settings["repo_url"], settings["branch"])
     if not raw_url:
-        return {"success": False, "latest_version": "", "source": "", "message": "Only GitHub repositories are supported."}
+        return {"success": False, "latest_version": "", "source": "", "message": "当前只支持 GitHub 仓库地址。"}
     ok, text, source = read_url_text([f"https://gh-proxy.com/{raw_url}", raw_url], timeout=15)
     if ok:
         version = parse_panel_version(text)
         if version:
             return {"success": True, "latest_version": version, "source": source, "message": ""}
-        return {"success": False, "latest_version": "", "source": source, "message": "Remote app.py has no PANEL_VERSION."}
+        return {"success": False, "latest_version": "", "source": source, "message": "远端 app.py 没有声明 PANEL_VERSION。"}
     return {"success": False, "latest_version": "", "source": "", "message": text}
 
 def panel_upgrade_state():
@@ -266,16 +266,16 @@ def download_panel_source(tmpdir):
     settings = panel_repo_settings()
     archive_url = github_archive_url(settings["repo_url"], settings["branch"])
     if not archive_url:
-        return False, "Only GitHub repositories are supported.", None, settings
+        return False, "当前只支持 GitHub 仓库地址。", None, settings
     zip_path = os.path.join(tmpdir, "mihomo-panel.zip")
     ok, source = download_file([f"https://gh-proxy.com/{archive_url}", archive_url], zip_path)
     if not ok:
-        return False, "Download failed:\n" + source, None, settings
+        return False, "下载升级包失败：\n" + source, None, settings
     try:
         with zipfile.ZipFile(zip_path) as archive:
             archive.extractall(tmpdir)
     except zipfile.BadZipFile:
-        return False, "Downloaded file is not a valid zip archive.", None, settings
+        return False, "下载到的文件不是有效的 zip 压缩包。", None, settings
 
     for root, dirs, _ in os.walk(tmpdir):
         if "remote-root" not in dirs:
@@ -287,11 +287,11 @@ def download_panel_source(tmpdir):
             continue
         ok, message = run_args(["python3", "-m", "py_compile", app_path], timeout=20)
         if not ok:
-            return False, "New app.py validation failed:\n" + message, None, settings
+            return False, "新版 app.py 校验失败：\n" + message, None, settings
         with open(app_path, "r", encoding="utf-8") as f:
             settings["remote_version"] = parse_panel_version(f.read())
         return True, source, source_root, settings
-    return False, "No valid remote-root was found in the archive.", None, settings
+    return False, "升级包里没有找到有效的 remote-root 目录。", None, settings
 
 def backup_panel_targets():
     os.makedirs(BACKUP_DIR, exist_ok=True)
@@ -375,9 +375,9 @@ def upgrade_panel():
         current_tuple = panel_version_tuple(PANEL_VERSION)
         remote_tuple = panel_version_tuple(remote_version)
         if not remote_tuple:
-            return False, "Remote panel has no PANEL_VERSION. Upgrade canceled to avoid downgrade.", False
+            return False, "远端面板没有声明 PANEL_VERSION，已取消升级以避免降级。", False
         if current_tuple and remote_tuple <= current_tuple:
-            return True, f"Current panel is already up to date.\nCurrent: v{PANEL_VERSION}\nRemote: v{remote_version}", False
+            return True, f"当前面板已经是最新版本。\n当前版本：v{PANEL_VERSION}\n远端版本：v{remote_version}", False
         backup_root = backup_panel_targets()
         try:
             install_panel_payload(source_root)
@@ -385,16 +385,16 @@ def upgrade_panel():
         except Exception as e:
             restore_panel_backup(backup_root)
             run_cmd("systemctl daemon-reload")
-            return False, "Panel upgrade failed and was rolled back:\n" + str(e), False
+            return False, "面板升级失败，已自动回滚：\n" + str(e), False
     schedule_panel_restart()
     return True, (
-        "Mihomo panel upgraded. Web service will restart in 1 second.\n"
-        f"Source: {source}\n"
-        f"Repository: {settings['repo_url']}\n"
-        f"Branch: {settings['branch']}\n"
-        f"Old version: v{PANEL_VERSION}\n"
-        f"New version: v{remote_version}\n"
-        f"Backup: {backup_root}"
+        "Mihomo 面板升级完成，Web 服务将在 1 秒后重启。\n"
+        f"升级源：{source}\n"
+        f"仓库：{settings['repo_url']}\n"
+        f"分支：{settings['branch']}\n"
+        f"旧版本：v{PANEL_VERSION}\n"
+        f"新版本：v{remote_version}\n"
+        f"备份位置：{backup_root}"
     ), True
 
 def login_required(f):
