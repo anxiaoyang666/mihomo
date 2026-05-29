@@ -5,6 +5,7 @@ import unittest
 ROOT = Path(__file__).resolve().parents[1]
 INSTALL = ROOT / "install.sh"
 README = ROOT / "README.md"
+README_ZH = ROOT / "README.zh-CN.md"
 
 
 def install_source():
@@ -13,6 +14,10 @@ def install_source():
 
 def readme_source():
     return README.read_text(encoding="utf-8")
+
+
+def readme_zh_source():
+    return README_ZH.read_text(encoding="utf-8")
 
 
 class MihomoInstallContractTest(unittest.TestCase):
@@ -34,6 +39,7 @@ class MihomoInstallContractTest(unittest.TestCase):
     def test_readme_documents_one_click_install(self):
         text = readme_source()
 
+        self.assertIn("[English](README.md) | [中文](README.zh-CN.md)", text)
         self.assertIn("## One-Click Install", text)
         self.assertIn(
             'bash -c "$(curl -fsSL https://raw.githubusercontent.com/anxiaoyang666/mihomo/main/install.sh)"',
@@ -44,6 +50,21 @@ class MihomoInstallContractTest(unittest.TestCase):
             text,
         )
         self.assertIn("WEB_PORT=7838 WEB_USER=admin WEB_SECRET='your-password'", text)
+
+    def test_chinese_readme_documents_one_click_install(self):
+        text = readme_zh_source()
+
+        self.assertIn("[English](README.md) | [中文](README.zh-CN.md)", text)
+        self.assertIn("## 一键安装", text)
+        self.assertIn("默认 Web 端口是 `7838`", text)
+        self.assertIn(
+            'bash -c "$(curl -fsSL https://raw.githubusercontent.com/anxiaoyang666/mihomo/main/install.sh)"',
+            text,
+        )
+        self.assertIn(
+            'bash -c "$(curl -fsSL https://gh-proxy.com/https://raw.githubusercontent.com/anxiaoyang666/mihomo/main/install.sh)"',
+            text,
+        )
 
 
 if __name__ == "__main__":
