@@ -20,7 +20,7 @@ class MihomoPanelUpgradeContractTest(unittest.TestCase):
     def test_panel_upgrade_backend_contract_exists(self):
         text = app_source()
 
-        self.assertIn('PANEL_VERSION = "0.1.4"', text)
+        self.assertIn('PANEL_VERSION = "0.1.5"', text)
         self.assertIn("DEFAULT_PANEL_REPO_URL", text)
         self.assertIn("def panel_version_tuple", text)
         self.assertIn("def panel_upgrade_state", text)
@@ -89,7 +89,7 @@ class MihomoPanelUpgradeContractTest(unittest.TestCase):
 
         self.assertIsNotNone(match)
         version = tuple(int(part) for part in match.groups())
-        self.assertGreaterEqual(version, (0, 1, 4))
+        self.assertGreaterEqual(version, (0, 1, 5))
 
 
 if __name__ == "__main__":
