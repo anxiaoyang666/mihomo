@@ -8,6 +8,23 @@ else
 fi
 
 JOB_ID="# MIHOMO_AUTOMATION"
+TMP_DIR="$(mktemp -d)"
+TMP_CRON="${TMP_DIR}/crontab"
+
+cleanup() {
+    rm -rf "$TMP_DIR"
+}
+trap cleanup EXIT
+
+current_cron() {
+    crontab -l 2>/dev/null || true
+}
+
+remove_matching_cron() {
+    local pattern=$1
+    current_cron | grep -F -v -- "$pattern" > "$TMP_CRON" || true
+    crontab "$TMP_CRON"
+}
 
 # --- 升级版添加函数 (支持覆盖修改) ---
 add_cron() {
@@ -17,17 +34,18 @@ add_cron() {
     
     # 1. 先清理旧的同名任务 (根据注释匹配)
     # 逻辑：列出所有任务 -> 过滤掉含当前注释的行 -> 重新写回 crontab
-    crontab -l 2>/dev/null | grep -v "$comment" | crontab -
+    current_cron | grep -F -v -- "$comment" > "$TMP_CRON" || true
     
     # 2. 添加新任务
     # 逻辑：列出 -> 追加新行 -> 写回
-    (crontab -l 2>/dev/null; echo "$schedule /bin/bash $script $JOB_ID - $comment") | crontab -
+    echo "$schedule /bin/bash $script $JOB_ID - $comment" >> "$TMP_CRON"
+    crontab "$TMP_CRON"
     echo "✅ 任务设置成功: $comment"
     echo "   执行时间: $schedule"
 }
 
 remove_cron() {
-    crontab -l 2>/dev/null | grep -v "$JOB_ID" | crontab -
+    remove_matching_cron "$JOB_ID"
     echo "🗑️  已清理所有 Mihomo 相关的自动任务。"
 }
 

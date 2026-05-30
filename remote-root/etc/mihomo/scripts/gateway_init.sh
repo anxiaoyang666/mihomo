@@ -9,6 +9,13 @@ if [ -f "/etc/mihomo/.env" ]; then source /etc/mihomo/.env; fi
 # 兜底路径 (防止 .env 不存在或变量缺失)
 SCRIPT_PATH="${SCRIPT_PATH:-/etc/mihomo/scripts}"
 CURRENT_SCRIPT="${SCRIPT_PATH}/gateway_init.sh"
+TMP_DIR="$(mktemp -d)"
+TMP_CRON="${TMP_DIR}/gateway_crontab"
+
+cleanup() {
+    rm -rf "$TMP_DIR"
+}
+trap cleanup EXIT
 
 # 颜色
 GREEN='\033[0;32m'
@@ -105,7 +112,9 @@ ensure_cron() {
         log "${YELLOW}正在添加自动保活任务 (Crontab)...${NC}"
         
         # 添加每分钟执行一次 check
-        (crontab -l 2>/dev/null; echo "*/1 * * * * /bin/bash ${CURRENT_SCRIPT} check >/dev/null 2>&1") | crontab -
+        crontab -l 2>/dev/null | grep -F -v -- "gateway_init.sh check" > "$TMP_CRON" || true
+        echo "*/1 * * * * /bin/bash ${CURRENT_SCRIPT} check >/dev/null 2>&1" >> "$TMP_CRON"
+        crontab "$TMP_CRON"
         
         log "✅ 保活任务已添加。即使防火墙被重置，1分钟内将自动恢复。"
     fi

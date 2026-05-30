@@ -4,6 +4,14 @@
 MIHOMO_DIR="/etc/mihomo"
 GEO_DIR="${MIHOMO_DIR}"
 ENV_FILE="${MIHOMO_DIR}/.env"
+TMP_DIR="$(mktemp -d)"
+GEOIP_TMP="${TMP_DIR}/geoip.dat"
+GEOSITE_TMP="${TMP_DIR}/geosite.dat"
+
+cleanup() {
+    rm -rf "$TMP_DIR"
+}
+trap cleanup EXIT
 
 if [ -f "$ENV_FILE" ]; then source "$ENV_FILE"; fi
 
@@ -13,23 +21,21 @@ GEOIP_URL="https://github.com/MetaCubeX/meta-rules-dat/releases/download/latest/
 GEOSITE_URL="https://github.com/MetaCubeX/meta-rules-dat/releases/download/latest/geosite.dat"
 
 # GeoIP
-wget --no-check-certificate -O "${GEO_DIR}/geoip.dat.new" "$GEOIP_URL" >/dev/null 2>&1
-if [ $? -eq 0 ] && [ -s "${GEO_DIR}/geoip.dat.new" ]; then
-    mv "${GEO_DIR}/geoip.dat.new" "${GEO_DIR}/geoip.dat"
+wget --no-check-certificate -O "$GEOIP_TMP" "$GEOIP_URL" >/dev/null 2>&1
+if [ $? -eq 0 ] && [ -s "$GEOIP_TMP" ]; then
+    mv "$GEOIP_TMP" "${GEO_DIR}/geoip.dat"
     echo "✅ GeoIP 更新成功"
 else
     echo "❌ GeoIP 更新失败"
-    rm -f "${GEO_DIR}/geoip.dat.new"
 fi
 
 # GeoSite
-wget --no-check-certificate -O "${GEO_DIR}/geosite.dat.new" "$GEOSITE_URL" >/dev/null 2>&1
-if [ $? -eq 0 ] && [ -s "${GEO_DIR}/geosite.dat.new" ]; then
-    mv "${GEO_DIR}/geosite.dat.new" "${GEO_DIR}/geosite.dat"
+wget --no-check-certificate -O "$GEOSITE_TMP" "$GEOSITE_URL" >/dev/null 2>&1
+if [ $? -eq 0 ] && [ -s "$GEOSITE_TMP" ]; then
+    mv "$GEOSITE_TMP" "${GEO_DIR}/geosite.dat"
     echo "✅ GeoSite 更新成功"
 else
     echo "❌ GeoSite 更新失败"
-    rm -f "${GEO_DIR}/geosite.dat.new"
 fi
 
 # 即使更新了也不重启，或者重启但不通知
