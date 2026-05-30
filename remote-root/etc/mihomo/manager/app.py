@@ -1,6 +1,7 @@
 from flask import Flask, render_template, request, jsonify, Response, redirect, session
 from functools import wraps
 from datetime import timedelta
+from collections import deque
 import subprocess
 import os
 import re
@@ -22,7 +23,7 @@ CONFIG_FILE = f"{MIHOMO_DIR}/config.yaml"
 LOG_FILE = "/var/log/mihomo.log"
 BACKUP_DIR = f"{MIHOMO_DIR}/backup"
 MANAGER_DIR = f"{MIHOMO_DIR}/manager"
-PANEL_VERSION = "0.1.6"
+PANEL_VERSION = "0.1.7"
 DEFAULT_PANEL_REPO_URL = "https://github.com/anxiaoyang666/mihomo.git"
 DEFAULT_PANEL_BRANCH = "main"
 PANEL_BACKUP_KEEP_COUNT = 3
@@ -31,19 +32,26 @@ PANEL_UPGRADE_EXCLUDES = ("/etc/mihomo/.env", "/etc/mihomo/config.yaml", "/etc/m
 app = Flask(__name__)
 app.permanent_session_lifetime = timedelta(days=365)
 
-def run_cmd(cmd):
-    try:
-        result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
-        return result.returncode == 0, result.stdout + result.stderr
-    except Exception as e:
-        return False, str(e)
-
 def run_args(args, timeout=30):
     try:
         result = subprocess.run(args, capture_output=True, text=True, timeout=timeout)
         return result.returncode == 0, result.stdout + result.stderr
     except Exception as e:
         return False, str(e)
+
+def is_service_active(service):
+    try:
+        result = subprocess.run(["systemctl", "is-active", service], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        return result.returncode == 0
+    except Exception:
+        return False
+
+def read_recent_log_lines(path, limit=100):
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
+            return "".join(deque(f, maxlen=limit))
+    except Exception as e:
+        return str(e)
 
 def config_value(key):
     if not os.path.exists(CONFIG_FILE):
@@ -136,7 +144,7 @@ def check_creds(username, password):
 
 def update_cron(job_id, schedule, command, enabled):
     try:
-        res = subprocess.run("crontab -l", shell=True, capture_output=True, text=True)
+        res = subprocess.run(["crontab", "-l"], capture_output=True, text=True)
         current_cron = res.stdout.strip().split('\n') if res.stdout else []
         new_cron = []
         for line in current_cron:
@@ -145,7 +153,7 @@ def update_cron(job_id, schedule, command, enabled):
         if enabled:
             new_cron.append(f"{schedule} {command} {job_id}")
         cron_str = "\n".join(new_cron) + "\n"
-        subprocess.run(f"echo '{cron_str}' | crontab -", shell=True)
+        subprocess.run(["crontab", "-"], input=cron_str, capture_output=True, text=True)
     except: pass
 
 def parse_daily_time(value, default_hour, default_minute=0):
@@ -287,7 +295,7 @@ def subscription_count(env):
 
 def collect_overview():
     env = read_env()
-    running = subprocess.run("systemctl is-active mihomo", shell=True).returncode == 0
+    running = is_service_active("mihomo")
     controller = mihomo_controller_settings()
     connections_ok, connections = mihomo_api_get("/connections")
     version_ok, version = mihomo_api_get("/version")
@@ -529,7 +537,7 @@ def install_panel_payload(source_root):
         else:
             shutil.copy2(source, target)
             os.chmod(target, mode)
-    run_cmd("systemctl daemon-reload")
+    run_args(["systemctl", "daemon-reload"], timeout=30)
 
 def schedule_panel_restart():
     subprocess.Popen(
@@ -557,7 +565,7 @@ def upgrade_panel():
             cleanup_panel_backups()
         except Exception as e:
             restore_panel_backup(backup_root)
-            run_cmd("systemctl daemon-reload")
+            run_args(["systemctl", "daemon-reload"], timeout=30)
             return False, "面板升级失败，已自动回滚：\n" + str(e), False
     schedule_panel_restart()
     return True, (
@@ -607,7 +615,7 @@ def index():
 @login_required
 def get_status():
     return jsonify({
-        "running": subprocess.run("systemctl is-active mihomo", shell=True).returncode == 0,
+        "running": is_service_active("mihomo"),
         "panel_version": PANEL_VERSION,
     })
 
@@ -628,18 +636,18 @@ def control_service():
     if action == 'upgrade_panel':
         ok, message, should_reload = upgrade_panel()
         return jsonify({"success": ok, "message": message, "reload_after": 5 if should_reload else 0})
-    cmds = {
-        'start': 'systemctl start mihomo',
-        'stop': 'systemctl stop mihomo',
-        'restart': 'systemctl restart mihomo',
-        'fix_logs': 'systemctl restart mihomo',
-        'update_sub': f'bash {SCRIPT_DIR}/update_subscription.sh',
-        'update_geo': f'bash {SCRIPT_DIR}/update_geo.sh',
-        'net_init': f'bash {SCRIPT_DIR}/gateway_init.sh',
-        'test_notify': f'bash {SCRIPT_DIR}/notify.sh "测试" "Web端测试消息"'
+    control_actions = {
+        'start': ['systemctl', 'start', 'mihomo'],
+        'stop': ['systemctl', 'stop', 'mihomo'],
+        'restart': ['systemctl', 'restart', 'mihomo'],
+        'fix_logs': ['systemctl', 'restart', 'mihomo'],
+        'update_sub': ['bash', f'{SCRIPT_DIR}/update_subscription.sh'],
+        'update_geo': ['bash', f'{SCRIPT_DIR}/update_geo.sh'],
+        'net_init': ['bash', f'{SCRIPT_DIR}/gateway_init.sh'],
+        'test_notify': ['bash', f'{SCRIPT_DIR}/notify.sh', '测试', 'Web端测试消息']
     }
-    if action in cmds:
-        s, m = run_cmd(cmds[action])
+    if action in control_actions:
+        s, m = run_args(control_actions[action], timeout=180)
         return jsonify({"success": s, "message": m})
     return jsonify({"success": False, "message": "未知指令"})
 
@@ -675,8 +683,8 @@ def handle_config():
 @login_required
 def get_logs():
     if not os.path.exists(LOG_FILE): return jsonify({"logs": "日志未生成"})
-    s, l = run_cmd(f"tail -n 100 {LOG_FILE}")
-    return jsonify({"logs": l if l else "暂无日志"})
+    logs = read_recent_log_lines(LOG_FILE, 100)
+    return jsonify({"logs": logs if logs else "暂无日志"})
 
 @app.route('/api/settings', methods=['GET', 'POST'])
 @login_required
