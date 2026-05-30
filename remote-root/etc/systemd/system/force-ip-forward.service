@@ -5,8 +5,5 @@ After=network.target
 Type=oneshot
 ExecStart=/sbin/sysctl -w net.ipv4.ip_forward=1
 RemainAfterExit=yes
-NoNewPrivileges=true
-PrivateTmp=true
-UMask=0077
 [Install]
 WantedBy=multi-user.target

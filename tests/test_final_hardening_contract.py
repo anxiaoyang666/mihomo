@@ -19,7 +19,7 @@ def text(path):
 
 class MihomoFinalHardeningContractTest(unittest.TestCase):
     def test_release_version_is_019(self):
-        self.assertIn('PANEL_VERSION = "0.1.9"', text(APP))
+        self.assertIn('PANEL_VERSION = "0.1.10"', text(APP))
 
     def test_frontend_uses_local_vendor_assets(self):
         index = text(INDEX)
@@ -60,17 +60,17 @@ class MihomoFinalHardeningContractTest(unittest.TestCase):
         self.assertIn('crontab "$TMP_CRON"', uninstall)
         self.assertNotIn('| crontab -', uninstall)
 
-    def test_systemd_units_have_conservative_hardening(self):
+    def test_systemd_units_avoid_strict_hardening_for_compatibility(self):
         for name in ["mihomo.service", "mihomo-manager.service", "force-ip-forward.service"]:
             unit = text(SYSTEMD / name)
             with self.subTest(unit=name):
-                self.assertIn("NoNewPrivileges=true", unit)
-                self.assertIn("PrivateTmp=true", unit)
-                self.assertIn("UMask=0077", unit)
+                self.assertNotIn("NoNewPrivileges=true", unit)
+                self.assertNotIn("PrivateTmp=true", unit)
+                self.assertNotIn("UMask=0077", unit)
 
         self.assertIn("RestartSec=3", text(SYSTEMD / "mihomo.service"))
         self.assertIn("RestartSec=3", text(SYSTEMD / "mihomo-manager.service"))
-        self.assertIn("NoNewPrivileges=true", text(SCRIPTS / "service_ctl.sh"))
+        self.assertNotIn("NoNewPrivileges=true", text(SCRIPTS / "service_ctl.sh"))
 
 
 if __name__ == "__main__":
