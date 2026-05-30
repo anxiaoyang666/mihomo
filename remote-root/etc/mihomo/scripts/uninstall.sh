@@ -9,6 +9,13 @@ RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[0;33m'
 NC='\033[0m'
+TMP_DIR="$(mktemp -d)"
+TMP_CRON="${TMP_DIR}/crontab"
+
+cleanup() {
+    rm -rf "$TMP_DIR"
+}
+trap cleanup EXIT
 
 echo -e "${RED}⚠️  警告：即将执行卸载操作！${NC}"
 echo "此操作将执行以下清理："
@@ -39,7 +46,8 @@ echo "✅ 服务已移除。"
 # 2. 清理 Crontab 任务 (核心新增)
 echo -e "${YELLOW}[2/4] 清理自动化任务...${NC}"
 # 逻辑：列出当前任务 -> 过滤掉含 gateway_init 的(保活任务) -> 过滤掉含 MIHOMO_AUTOMATION 的(更新任务) -> 写回
-crontab -l 2>/dev/null | grep -v "gateway_init.sh" | grep -v "MIHOMO_AUTOMATION" | crontab -
+crontab -l 2>/dev/null | grep -F -v -- "gateway_init.sh" | grep -F -v -- "MIHOMO_AUTOMATION" > "$TMP_CRON" || true
+crontab "$TMP_CRON"
 echo "✅ Crontab 任务已清理。"
 
 # 3. 删除文件

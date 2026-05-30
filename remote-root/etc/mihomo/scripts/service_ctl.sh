@@ -29,6 +29,9 @@ ExecStart=${MIHOMO_PATH}/mihomo -d ${MIHOMO_PATH}
 # 稳定性核心：崩溃后 5 秒自动重启
 Restart=always
 RestartSec=5s
+NoNewPrivileges=true
+PrivateTmp=true
+UMask=0077
 # 赋予网络管理权限
 AmbientCapabilities=CAP_NET_ADMIN CAP_NET_BIND_SERVICE CAP_NET_RAW
 CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_BIND_SERVICE CAP_NET_RAW

@@ -10,17 +10,40 @@ fi
 
 ENV_FILE="/etc/mihomo/.env"
 
+upsert_env() {
+    local key=$1
+    local value=$2
+    python3 - "$ENV_FILE" "$key" "$value" <<'PY'
+import pathlib, re, shlex, sys
+
+path = pathlib.Path(sys.argv[1])
+key = sys.argv[2]
+value = sys.argv[3]
+line = f"{key}={shlex.quote(value)}\n"
+lines = path.read_text(encoding="utf-8").splitlines(keepends=True) if path.exists() else []
+pattern = re.compile(rf"^\s*{re.escape(key)}=")
+for index, existing in enumerate(lines):
+    if pattern.match(existing):
+        lines[index] = line
+        break
+else:
+    if lines and not lines[-1].endswith("\n"):
+        lines[-1] += "\n"
+    lines.append(line)
+path.write_text("".join(lines), encoding="utf-8")
+PY
+}
+
 # 2. 保存函数
 save_notify_url() {
     local url=$1
     # 如果 .env 里已经有 NOTIFY_URL，就替换这一行
     if grep -q "^NOTIFY_URL=" "$ENV_FILE"; then
         # 使用 | 作为分隔符，防止 URL 里的斜杠干扰
-        sed -i "s|^NOTIFY_URL=.*|NOTIFY_URL=\"$url\"|" "$ENV_FILE"
+        upsert_env "NOTIFY_URL" "$url"
     else
         # 如果没有，就追加到最后
-        echo "" >> "$ENV_FILE"
-        echo "NOTIFY_URL=\"$url\"" >> "$ENV_FILE"
+        upsert_env "NOTIFY_URL" "$url"
     fi
     # 刷新变量
     source "$ENV_FILE"
@@ -66,7 +89,7 @@ case $choice in
         ;;
     3)
         # 清空逻辑
-        sed -i "s|^NOTIFY_URL=.*|NOTIFY_URL=\"\"|" "$ENV_FILE"
+        upsert_env "NOTIFY_URL" ""
         echo "通知地址已清空，通知功能已关闭。"
         ;;
     0)

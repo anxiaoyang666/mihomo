@@ -93,6 +93,12 @@ PY
   fi
 }
 
+write_env_line() {
+  local key="$1"
+  local value="$2"
+  printf '%s=%q\n' "$key" "$value"
+}
+
 copy_payload() {
   local root="$1"
   local payload="$root/remote-root"
@@ -131,22 +137,22 @@ write_env_file() {
     return
   fi
 
-  cat > "$INSTALL_DIR/.env" <<EOF
-WEB_SESSION_SECRET="$session_secret"
-WEB_USER="$user"
-WEB_SECRET="$pass"
-WEB_PORT="$WEB_PORT"
-MIHOMO_PANEL_REPO_URL="$REPO_URL"
-MIHOMO_PANEL_BRANCH="$BRANCH"
-MIHOMO_PATH="$INSTALL_DIR"
-SCRIPT_PATH="$INSTALL_DIR/scripts"
-GH_PROXY="$GH_PROXY"
-CONFIG_MODE="raw"
-SUB_URL_RAW=""
-SUB_URL_AIRPORT=""
-LOCAL_CIDR=""
-BACKUP_KEEP_COUNT="20"
-EOF
+  {
+    write_env_line "WEB_SESSION_SECRET" "$session_secret"
+    write_env_line "WEB_USER" "$user"
+    write_env_line "WEB_SECRET" "$pass"
+    write_env_line "WEB_PORT" "$WEB_PORT"
+    write_env_line "MIHOMO_PANEL_REPO_URL" "$REPO_URL"
+    write_env_line "MIHOMO_PANEL_BRANCH" "$BRANCH"
+    write_env_line "MIHOMO_PATH" "$INSTALL_DIR"
+    write_env_line "SCRIPT_PATH" "$INSTALL_DIR/scripts"
+    write_env_line "GH_PROXY" "$GH_PROXY"
+    write_env_line "CONFIG_MODE" "raw"
+    write_env_line "SUB_URL_RAW" ""
+    write_env_line "SUB_URL_AIRPORT" ""
+    write_env_line "LOCAL_CIDR" ""
+    write_env_line "BACKUP_KEEP_COUNT" "20"
+  } > "$INSTALL_DIR/.env"
   chmod 600 "$INSTALL_DIR/.env"
 }
 

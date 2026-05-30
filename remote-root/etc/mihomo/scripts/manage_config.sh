@@ -12,6 +12,30 @@ cleanup() {
 }
 trap cleanup EXIT
 
+upsert_env() {
+    local key=$1
+    local value=$2
+    python3 - "$ENV_FILE" "$key" "$value" <<'PY'
+import pathlib, re, shlex, sys
+
+path = pathlib.Path(sys.argv[1])
+key = sys.argv[2]
+value = sys.argv[3]
+line = f"{key}={shlex.quote(value)}\n"
+lines = path.read_text(encoding="utf-8").splitlines(keepends=True) if path.exists() else []
+pattern = re.compile(rf"^\s*{re.escape(key)}=")
+for index, existing in enumerate(lines):
+    if pattern.match(existing):
+        lines[index] = line
+        break
+else:
+    if lines and not lines[-1].endswith("\n"):
+        lines[-1] += "\n"
+    lines.append(line)
+path.write_text("".join(lines), encoding="utf-8")
+PY
+}
+
 # --- 核心：安全校验与应用 ---
 apply_config() {
     local target_file=$1
@@ -44,12 +68,7 @@ apply_config() {
 save_url_to_env() {
     local url=$1
     local env_file="/etc/mihomo/.env"
-    if grep -q "^SUB_URL=" "$env_file"; then
-        sed -i "s|^SUB_URL=.*|SUB_URL=\"$url\"|" "$env_file"
-    else
-        echo "" >> "$env_file"
-        echo "SUB_URL=\"$url\"" >> "$env_file"
-    fi
+    ENV_FILE="$env_file" upsert_env "SUB_URL" "$url"
     echo "✅ 订阅链接已保存。"
 }
 

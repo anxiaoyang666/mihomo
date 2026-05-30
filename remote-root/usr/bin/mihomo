@@ -14,6 +14,30 @@ CORE_BIN="/usr/bin/mihomo-core"
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[0;33m'; BLUE='\033[0;34m'; NC='\033[0m'
 if [ -f "$ENV_FILE" ]; then source "$ENV_FILE"; fi
 
+upsert_env() {
+    local key=$1
+    local value=$2
+    python3 - "$ENV_FILE" "$key" "$value" <<'PY'
+import pathlib, re, shlex, sys
+
+path = pathlib.Path(sys.argv[1])
+key = sys.argv[2]
+value = sys.argv[3]
+line = f"{key}={shlex.quote(value)}\n"
+lines = path.read_text(encoding="utf-8").splitlines(keepends=True) if path.exists() else []
+pattern = re.compile(rf"^\s*{re.escape(key)}=")
+for index, existing in enumerate(lines):
+    if pattern.match(existing):
+        lines[index] = line
+        break
+else:
+    if lines and not lines[-1].endswith("\n"):
+        lines[-1] += "\n"
+    lines.append(line)
+path.write_text("".join(lines), encoding="utf-8")
+PY
+}
+
 check_status() {
     if systemctl is-active --quiet $SVC_CORE; then c="${GREEN}运行中${NC}"; else c="${RED}已停止${NC}"; fi
     if systemctl is-active --quiet $SVC_MANAGER; then m="${GREEN}运行中${NC}"; else m="${RED}已停止${NC}"; fi
@@ -75,7 +99,7 @@ manage_sub() {
     read -p "选择: " opt
     if [ "$opt" == "1" ]; then
         read -p "链接: " url
-        [ -n "$url" ] && sed -i "s|^SUB_URL=.*|SUB_URL=\"$url\"|" "$ENV_FILE" && bash "${SCRIPT_DIR}/update_subscription.sh" && systemctl restart $SVC_CORE && echo "✅ 已更新"
+        [ -n "$url" ] && upsert_env "SUB_URL" "$url" && bash "${SCRIPT_DIR}/update_subscription.sh" && systemctl restart $SVC_CORE && echo "✅ 已更新"
     elif [ "$opt" == "2" ]; then
         nano /etc/mihomo/config.yaml && read -p "重启生效? (y/n): " r && [ "$r" == "y" ] && systemctl restart $SVC_CORE
     fi
