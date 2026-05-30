@@ -50,6 +50,13 @@ class MihomoUiPolishContractTest(unittest.TestCase):
         self.assertIn("function applyLogFilters", source)
         self.assertIn("function clearLogDisplay", source)
 
+    def test_tasks_page_removes_duplicate_apply_button_and_aligns_save_button_style(self):
+        source = text(INDEX)
+
+        self.assertEqual(source.count('saveAndUpdateSub(this)'), 1)
+        self.assertIn('class="action-button primary" onclick="saveConfig(this)"', source)
+        self.assertNotIn('class="soft-button" onclick="saveConfig(this)"', source)
+
     def test_icon_only_controls_have_accessible_names(self):
         source = text(INDEX)
 
@@ -58,13 +65,13 @@ class MihomoUiPolishContractTest(unittest.TestCase):
         self.assertIn('aria-label="重启 Mihomo"', source)
         self.assertIn('aria-label="停止 Mihomo"', source)
 
-    def test_release_version_is_0112(self):
+    def test_release_version_is_0113(self):
         app = text(APP)
 
-        self.assertIn('PANEL_VERSION = "0.1.12"', app)
+        self.assertIn('PANEL_VERSION = "0.1.13"', app)
         match = re.search(r'(?m)^PANEL_VERSION = "(\d+)\.(\d+)\.(\d+)"$', app)
         self.assertIsNotNone(match)
-        self.assertGreaterEqual(tuple(int(part) for part in match.groups()), (0, 1, 12))
+        self.assertGreaterEqual(tuple(int(part) for part in match.groups()), (0, 1, 13))
 
 
 if __name__ == "__main__":

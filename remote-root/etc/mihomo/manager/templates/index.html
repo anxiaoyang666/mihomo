@@ -963,7 +963,6 @@
                         <div class="eyebrow">Configuration</div>
                         <h1 class="page-title">订阅与任务</h1>
                     </div>
-                    <button class="action-button primary" onclick="saveAndUpdateSub(this)"><i class="bi bi-cloud-download"></i> 保存并应用</button>
                 </div>
 
                 <div class="section-grid">
@@ -1000,7 +999,7 @@
                         <div class="card">
                             <div class="card-header d-flex justify-content-between align-items-center">
                                 <span><i class="bi bi-file-earmark-code"></i> 配置文件 config.yaml</span>
-                                <button class="soft-button" onclick="saveConfig(this)"><i class="bi bi-save"></i> 保存重启</button>
+                                <button class="action-button primary" onclick="saveConfig(this)"><i class="bi bi-save"></i> 保存重启</button>
                             </div>
                             <div class="card-body p-0">
                                 <textarea id="config-editor" class="form-control"></textarea>
@@ -1072,6 +1071,26 @@
                         <input type="text" class="form-control" id="api_url" placeholder="http://...">
                         <div class="form-text">支持发送 JSON 通知的 Webhook 地址</div>
                         <button class="action-button primary mt-3" onclick="saveSettings(false, this)"><i class="bi bi-save"></i> 保存所有设置</button>
+                    </div>
+                </div>
+
+                <div class="card">
+                    <div class="card-header"><i class="bi bi-shield-lock"></i> 账户安全</div>
+                    <div class="card-body">
+                        <label class="form-label fw-bold">登录用户名</label>
+                        <input type="text" class="form-control mb-3" id="account_user" autocomplete="username" placeholder="admin">
+
+                        <label class="form-label fw-bold">当前密码</label>
+                        <input type="password" class="form-control mb-3" id="account_current_password" autocomplete="current-password" placeholder="输入当前密码后才能修改">
+
+                        <label class="form-label fw-bold">新密码</label>
+                        <input type="password" class="form-control mb-3" id="account_new_password" autocomplete="new-password" placeholder="留空则只修改用户名">
+
+                        <label class="form-label fw-bold">确认新密码</label>
+                        <input type="password" class="form-control" id="account_confirm_password" autocomplete="new-password" placeholder="再次输入新密码">
+                        <div class="form-text">修改成功后会退出登录，请使用新账号或密码重新登录。</div>
+
+                        <button class="action-button primary mt-3" onclick="saveAccount(this)"><i class="bi bi-person-check"></i> 更新账号密码</button>
                     </div>
                 </div>
             </section>
@@ -1617,6 +1636,7 @@
     function loadSettings() {
         api('/settings').then(res => {
             const isTrue = val => val === true || val === 'true';
+            if (document.getElementById('account_user')) document.getElementById('account_user').value = res.web_user || 'admin';
             document.getElementById('notify_api').checked = isTrue(res.notify_api);
             document.getElementById('api_url').value = res.api_url || '';
             cachedUrlRaw = (res.sub_url_raw || '').replace(/\|/g, '\n');
@@ -1642,6 +1662,54 @@
             updateScheduleVisibility('sub', '订阅');
             updateScheduleVisibility('geo', ' Geo 数据库');
         });
+    }
+
+    async function saveAccount(trigger = null) {
+        if (trigger?.classList?.contains('is-busy')) return;
+        const userInput = document.getElementById('account_user');
+        const currentInput = document.getElementById('account_current_password');
+        const newInput = document.getElementById('account_new_password');
+        const confirmInput = document.getElementById('account_confirm_password');
+        const newUser = (userInput?.value || '').trim();
+        const currentPassword = currentInput?.value || '';
+        const newPassword = newInput?.value || '';
+        const confirmPassword = confirmInput?.value || '';
+        if (!/^[A-Za-z0-9_.-]{3,32}$/.test(newUser)) {
+            showToast('用户名只能使用 3-32 位字母、数字、下划线、点或短横线。', 'warning');
+            return;
+        }
+        if (!currentPassword) {
+            showToast('请先输入当前密码。', 'warning');
+            return;
+        }
+        if (newPassword && newPassword.length < 6) {
+            showToast('新密码至少需要 6 位。', 'warning');
+            return;
+        }
+        if (newPassword !== confirmPassword) {
+            showToast('两次输入的新密码不一致。', 'warning');
+            return;
+        }
+        if (!await askConfirm('确定更新 Web 登录账号或密码吗？修改成功后需要重新登录。')) return;
+        setActionBusy(trigger, true);
+        try {
+            const res = await api('/account', {
+                web_user: newUser,
+                current_password: currentPassword,
+                web_secret: newPassword,
+                web_secret_confirm: confirmPassword
+            });
+            showToast(res.message, res.success ? 'success' : 'error');
+            if (res.success) {
+                currentInput.value = '';
+                newInput.value = '';
+                confirmInput.value = '';
+                setTimeout(() => window.location.href = '/login', Number(res.reload_after || 1) * 1000);
+            }
+            return res;
+        } finally {
+            setActionBusy(trigger, false);
+        }
     }
 
     async function saveSettings(silent = false, trigger = null) {

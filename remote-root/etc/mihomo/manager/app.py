@@ -23,7 +23,7 @@ CONFIG_FILE = f"{MIHOMO_DIR}/config.yaml"
 LOG_FILE = "/var/log/mihomo.log"
 BACKUP_DIR = f"{MIHOMO_DIR}/backup"
 MANAGER_DIR = f"{MIHOMO_DIR}/manager"
-PANEL_VERSION = "0.1.12"
+PANEL_VERSION = "0.1.13"
 DEFAULT_PANEL_REPO_URL = "https://github.com/anxiaoyang666/mihomo.git"
 DEFAULT_PANEL_BRANCH = "main"
 PANEL_BACKUP_KEEP_COUNT = 3
@@ -141,6 +141,9 @@ def check_creds(username, password):
     valid_user = os.environ.get('WEB_USER') or env.get('WEB_USER', 'admin')
     valid_pass = os.environ.get('WEB_SECRET') or env.get('WEB_SECRET', 'admin')
     return username == valid_user and password == valid_pass
+
+def is_valid_web_username(value):
+    return bool(re.fullmatch(r"[A-Za-z0-9_.-]{3,32}", str(value or "")))
 
 def update_cron(job_id, schedule, command, enabled):
     try:
@@ -686,6 +689,37 @@ def get_logs():
     logs = read_recent_log_lines(LOG_FILE, 100)
     return jsonify({"logs": logs if logs else "暂无日志"})
 
+@app.route('/api/account', methods=['POST'])
+@login_required
+def update_account_credentials():
+    data = request.json or {}
+    env = read_env()
+    valid_pass = os.environ.get('WEB_SECRET') or env.get('WEB_SECRET', 'admin')
+    current_password = str(data.get('current_password') or '')
+    new_user = str(data.get('web_user') or '').strip()
+    new_password = str(data.get('web_secret') or '')
+    confirm_password = str(data.get('web_secret_confirm') or '')
+
+    if current_password != valid_pass:
+        return jsonify({"success": False, "message": "当前密码不正确。"})
+    if not is_valid_web_username(new_user):
+        return jsonify({"success": False, "message": "用户名只能使用 3-32 位字母、数字、下划线、点或短横线。"})
+
+    updates = {"WEB_USER": new_user}
+    if new_password:
+        if len(new_password) < 6:
+            return jsonify({"success": False, "message": "新密码至少需要 6 位。"})
+        if new_password != confirm_password:
+            return jsonify({"success": False, "message": "两次输入的新密码不一致。"})
+        updates.update({"WEB_SECRET": new_password})
+
+    write_env(updates)
+    os.environ["WEB_USER"] = new_user
+    if "WEB_SECRET" in updates:
+        os.environ["WEB_SECRET"] = updates["WEB_SECRET"]
+    session.clear()
+    return jsonify({"success": True, "message": "账号已更新，请使用新凭据重新登录。", "reload_after": 1})
+
 @app.route('/api/settings', methods=['GET', 'POST'])
 @login_required
 def handle_settings():
@@ -696,7 +730,7 @@ def handle_settings():
         geo_schedule = cron_to_mode(e.get('CRON_GEO_SCHED', '0 4 * * *'), '04:00')
         
         return jsonify({
-            "web_user": e.get('WEB_USER'),
+            "web_user": os.environ.get('WEB_USER') or e.get('WEB_USER', 'admin'),
             "web_port": e.get('WEB_PORT', '7838'),
             
             "config_mode": e.get('CONFIG_MODE', 'airport'),

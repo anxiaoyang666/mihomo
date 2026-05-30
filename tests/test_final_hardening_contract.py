@@ -18,8 +18,8 @@ def text(path):
 
 
 class MihomoFinalHardeningContractTest(unittest.TestCase):
-    def test_release_version_is_0112(self):
-        self.assertIn('PANEL_VERSION = "0.1.12"', text(APP))
+    def test_release_version_is_0113(self):
+        self.assertIn('PANEL_VERSION = "0.1.13"', text(APP))
 
     def test_frontend_uses_local_vendor_assets(self):
         index = text(INDEX)

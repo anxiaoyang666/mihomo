@@ -21,7 +21,7 @@ def png_size(path):
 
 class MihomoLogoAssetContractTest(unittest.TestCase):
     def test_panel_version_marks_logo_refresh_release(self):
-        self.assertIn('PANEL_VERSION = "0.1.12"', text(APP))
+        self.assertIn('PANEL_VERSION = "0.1.13"', text(APP))
 
     def test_logo_is_square_app_icon_png(self):
         width, height = png_size(LOGO)
