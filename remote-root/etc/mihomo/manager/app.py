@@ -44,6 +44,19 @@ def run_args(args, timeout=30):
     except Exception as e:
         return False, str(e)
 
+def config_value(key):
+    if not os.path.exists(CONFIG_FILE):
+        return ""
+    try:
+        with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+            for line in f:
+                match = re.match(rf"^\s*{re.escape(key)}\s*:\s*(.*?)\s*$", line)
+                if match:
+                    return match.group(1).strip().strip('"').strip("'")
+    except:
+        pass
+    return ""
+
 def read_env():
     env_data = {}
     if os.path.exists(ENV_FILE):
@@ -156,6 +169,129 @@ def validate_config(path):
 
 def is_true(val):
     return str(val).lower() == 'true'
+
+def mihomo_controller_settings():
+    env = read_env()
+    controller = (
+        os.environ.get("MIHOMO_CONTROLLER")
+        or env.get("MIHOMO_CONTROLLER")
+        or config_value("external-controller")
+        or "127.0.0.1:9090"
+    )
+    controller = str(controller).strip().strip('"').strip("'")
+    if controller.startswith(":"):
+        controller = "127.0.0.1" + controller
+    if "://" not in controller:
+        controller = "http://" + controller
+    controller = controller.replace("0.0.0.0", "127.0.0.1").replace("[::]", "127.0.0.1")
+    secret = os.environ.get("MIHOMO_API_SECRET") or env.get("MIHOMO_API_SECRET") or config_value("secret")
+    return {"base_url": controller.rstrip("/"), "secret": secret}
+
+def mihomo_api_get(path, timeout=2):
+    settings = mihomo_controller_settings()
+    url = settings["base_url"] + path
+    headers = {"User-Agent": "mihomo-web-manager"}
+    if settings.get("secret"):
+        headers["Authorization"] = "Bearer " + settings["secret"]
+    try:
+        req = urlrequest.Request(url, headers=headers)
+        with urlrequest.urlopen(req, timeout=timeout) as resp:
+            return True, json.loads(resp.read().decode("utf-8", "replace"))
+    except Exception as e:
+        return False, {"error": str(e), "url": url}
+
+def first_number(value):
+    try:
+        return int(value or 0)
+    except:
+        return 0
+
+def latest_delay(proxy):
+    history = proxy.get("history") if isinstance(proxy, dict) else None
+    if not isinstance(history, list):
+        return None
+    for item in reversed(history):
+        delay = item.get("delay")
+        if isinstance(delay, (int, float)) and delay >= 0:
+            return delay
+    return None
+
+def proxy_group_summary(proxies):
+    items = proxies.get("proxies") if isinstance(proxies, dict) else {}
+    if not isinstance(items, dict):
+        return []
+    groups = []
+    for name, proxy in items.items():
+        if not isinstance(proxy, dict) or "all" not in proxy:
+            continue
+        groups.append({
+            "name": name,
+            "type": proxy.get("type", "Group"),
+            "now": proxy.get("now", ""),
+            "count": len(proxy.get("all") or []),
+            "delay": latest_delay(proxy),
+        })
+    return groups[:8]
+
+def log_level_summary():
+    levels = {"error": 0, "warn": 0, "info": 0, "debug": 0}
+    if not os.path.exists(LOG_FILE):
+        return levels
+    try:
+        with open(LOG_FILE, "r", encoding="utf-8", errors="replace") as f:
+            lines = f.readlines()[-200:]
+        for line in lines:
+            match = re.search(r"level=([a-zA-Z]+)", line)
+            if not match:
+                continue
+            level = match.group(1).lower()
+            if level in ("warning", "warn"):
+                levels["warn"] += 1
+            elif level in levels:
+                levels[level] += 1
+    except:
+        pass
+    return levels
+
+def subscription_count(env):
+    raw = [env.get("SUB_URL_RAW", "")]
+    airport = str(env.get("SUB_URL_AIRPORT", "")).replace("\\n", "\n").splitlines()
+    return len([item for item in raw + airport if item.strip()])
+
+def collect_overview():
+    env = read_env()
+    running = subprocess.run("systemctl is-active mihomo", shell=True).returncode == 0
+    controller = mihomo_controller_settings()
+    connections_ok, connections = mihomo_api_get("/connections")
+    version_ok, version = mihomo_api_get("/version")
+    proxies_ok, proxies = mihomo_api_get("/proxies")
+    connection_list = connections.get("connections") if isinstance(connections.get("connections"), list) else []
+    proxy_groups = proxy_group_summary(proxies) if proxies_ok else []
+    return {
+        "running": running,
+        "controller": {
+            "base_url": controller["base_url"],
+            "reachable": bool(connections_ok or version_ok or proxies_ok),
+            "error": "" if (connections_ok or version_ok or proxies_ok) else connections.get("error", "controller unreachable"),
+        },
+        "panel_version": PANEL_VERSION,
+        "core_version": version.get("version", "") if version_ok else "",
+        "connections_count": len(connection_list),
+        "download_total": first_number(connections.get("downloadTotal")),
+        "upload_total": first_number(connections.get("uploadTotal")),
+        "memory": first_number(connections.get("memory")),
+        "proxy_groups": proxy_groups,
+        "log_levels": log_level_summary(),
+        "settings": {
+            "config_mode": env.get("CONFIG_MODE", "airport"),
+            "subscription_count": subscription_count(env),
+            "cron_sub_enabled": env.get("CRON_SUB_ENABLED") == "true",
+            "cron_geo_enabled": env.get("CRON_GEO_ENABLED") == "true",
+            "notify_api": env.get("NOTIFY_API") == "true",
+            "local_cidr": env.get("LOCAL_CIDR", ""),
+        },
+        "updated_at": int(time.time()),
+    }
 
 def panel_repo_settings():
     env = read_env()
@@ -437,6 +573,11 @@ def get_status():
         "running": subprocess.run("systemctl is-active mihomo", shell=True).returncode == 0,
         "panel_version": PANEL_VERSION,
     })
+
+@app.route('/api/overview')
+@login_required
+def api_overview():
+    return jsonify(collect_overview())
 
 @app.route('/api/panel-upgrade-source')
 @login_required
