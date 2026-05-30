@@ -4,7 +4,13 @@
 MIHOMO_DIR="/etc/mihomo"
 ENV_FILE="${MIHOMO_DIR}/.env"
 CONFIG_FILE="${MIHOMO_DIR}/config.yaml"
-TEMP_FILE="/tmp/config_apply.yaml"
+TMP_DIR="$(mktemp -d)"
+TEMP_FILE="${TMP_DIR}/config_apply.yaml"
+
+cleanup() {
+    rm -rf "$TMP_DIR"
+}
+trap cleanup EXIT
 
 if [ -f "$ENV_FILE" ]; then source "$ENV_FILE"; fi
 

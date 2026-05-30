@@ -9,6 +9,14 @@ if [ -f "/etc/mihomo/.env" ]; then source /etc/mihomo/.env; fi
 
 UI_DIR="/etc/mihomo/ui"
 CONFIG_FILE="/etc/mihomo/config.yaml"
+TMP_DIR="$(mktemp -d)"
+UI_ZIP="${TMP_DIR}/ui.zip"
+UI_EXTRACT="${TMP_DIR}/ui_extract"
+
+cleanup() {
+    rm -rf "$TMP_DIR"
+}
+trap cleanup EXIT
 
 # 颜色
 GREEN='\033[0;32m'
@@ -58,7 +66,7 @@ echo -e "\n--> 正在清理旧面板文件..."
 rm -rf "${UI_DIR:?}"/*
 
 echo -e "--> 正在下载 ${UI_NAME}..."
-curl -L -o /tmp/ui.zip "$UI_URL"
+curl -L -o "$UI_ZIP" "$UI_URL"
 
 if [ $? -ne 0 ]; then
     echo "❌ 下载失败，请检查网络。"
@@ -66,14 +74,13 @@ if [ $? -ne 0 ]; then
 fi
 
 echo -e "--> 正在解压安装..."
-unzip -o -q /tmp/ui.zip -d /tmp/ui_extract
+unzip -o -q "$UI_ZIP" -d "$UI_EXTRACT"
 
 # 智能移动：GitHub 的 zip 通常包了一层文件夹，我们需要里面的内容
 # 这里的逻辑是将解压出的第一个文件夹里的内容移动到 UI_DIR
-cp -rf /tmp/ui_extract/*/* "${UI_DIR}/"
+cp -rf "$UI_EXTRACT"/*/* "${UI_DIR}/"
 
 # 清理垃圾
-rm -rf /tmp/ui.zip /tmp/ui_extract
 
 # ==================================================
 # 关键步骤：检查 config.yaml 是否配置了 external-ui

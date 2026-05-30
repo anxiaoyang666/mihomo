@@ -7,7 +7,13 @@ CONFIG_FILE="${MIHOMO_DIR}/config.yaml"
 TEMPLATE_FILE="${MIHOMO_DIR}/templates/default.yaml"
 BACKUP_DIR="${MIHOMO_DIR}/backup"
 NOTIFY_SCRIPT="${MIHOMO_DIR}/scripts/notify.sh"
-TEMP_NEW="/tmp/config_generated.yaml"
+TMP_DIR="$(mktemp -d)"
+TEMP_NEW="${TMP_DIR}/config_generated.yaml"
+
+cleanup() {
+    rm -rf "$TMP_DIR"
+}
+trap cleanup EXIT
 
 # 1. 加载环境变量
 if [ -f "$ENV_FILE" ]; then source "$ENV_FILE"; fi

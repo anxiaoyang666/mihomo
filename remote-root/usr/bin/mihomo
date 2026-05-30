@@ -49,14 +49,19 @@ update_kernel() {
         aarch64) URL="https://github.com/MetaCubeX/mihomo/releases/download/${LATEST_VER}/mihomo-linux-arm64-${LATEST_VER}.gz" ;;
         *) echo "不支持架构: $ARCH"; return ;;
     esac
+
+    tmp_dir="$(mktemp -d)"
+    trap 'rm -rf "$tmp_dir"' RETURN
+    gz_file="$tmp_dir/mihomo.gz"
+    bin_file="$tmp_dir/mihomo"
     
     echo "⬇️  正在下载..."
-    wget -O /tmp/mihomo.gz "$URL"
+    wget -O "$gz_file" "$URL"
     if [ $? -eq 0 ]; then
         echo "🛑 停止服务..."
         systemctl stop $SVC_CORE
-        gzip -d -f /tmp/mihomo.gz
-        mv /tmp/mihomo "$CORE_BIN"
+        gzip -d -f "$gz_file"
+        mv "$bin_file" "$CORE_BIN"
         chmod +x "$CORE_BIN"
         systemctl start $SVC_CORE
         echo -e "${GREEN}🎉 更新成功！当前版本: $(get_version)${NC}"

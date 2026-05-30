@@ -4,7 +4,13 @@ if [ -f "/etc/mihomo/.env" ]; then source /etc/mihomo/.env; else echo "错误：
 
 CONFIG_FILE="${MIHOMO_PATH}/config.yaml"
 BACKUP_FILE="${MIHOMO_PATH}/config.yaml.bak"
-TEMP_FILE="/tmp/mihomo_config_new.yaml"
+TMP_DIR="$(mktemp -d)"
+TEMP_FILE="${TMP_DIR}/mihomo_config_new.yaml"
+
+cleanup() {
+    rm -rf "$TMP_DIR"
+}
+trap cleanup EXIT
 
 # --- 核心：安全校验与应用 ---
 apply_config() {

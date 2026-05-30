@@ -3,6 +3,15 @@
 # 1. 加载环境
 if [ -f "/etc/mihomo/.env" ]; then source /etc/mihomo/.env; fi
 
+TMP_DIR="$(mktemp -d)"
+GZ_FILE="${TMP_DIR}/mihomo.gz"
+BIN_FILE="${TMP_DIR}/mihomo"
+
+cleanup() {
+    rm -rf "$TMP_DIR"
+}
+trap cleanup EXIT
+
 # 架构检测
 ARCH=$(uname -m)
 if [[ "$ARCH" == "x86_64" ]]; then
@@ -42,18 +51,17 @@ fi
 DOWNLOAD_URL="${GH_PROXY}https://github.com/MetaCubeX/mihomo/releases/download/${TAG}/mihomo-${PLATFORM}-${TAG}.gz"
 
 echo "⬇️  正在下载内核..."
-curl -L -o /tmp/mihomo.gz "$DOWNLOAD_URL"
+curl -L -o "$GZ_FILE" "$DOWNLOAD_URL"
 
 if [ $? -ne 0 ]; then
     echo "❌ 下载失败！请检查网络或代理设置。"
-    rm -f /tmp/mihomo.gz
     exit 1
 fi
 
 echo "📦 正在解压并安装..."
-gunzip -f /tmp/mihomo.gz
-mv /tmp/mihomo ${MIHOMO_PATH}/mihomo
-chmod +x ${MIHOMO_PATH}/mihomo
+gunzip -f "$GZ_FILE"
+mv "$BIN_FILE" "${MIHOMO_PATH}/mihomo"
+chmod +x "${MIHOMO_PATH}/mihomo"
 
 # ==========================================
 # 核心修复：智能重启逻辑

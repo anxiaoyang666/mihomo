@@ -5,6 +5,7 @@ import subprocess
 import os
 import re
 import secrets
+import shlex
 import glob
 import json
 import shutil
@@ -21,7 +22,7 @@ CONFIG_FILE = f"{MIHOMO_DIR}/config.yaml"
 LOG_FILE = "/var/log/mihomo.log"
 BACKUP_DIR = f"{MIHOMO_DIR}/backup"
 MANAGER_DIR = f"{MIHOMO_DIR}/manager"
-PANEL_VERSION = "0.1.5"
+PANEL_VERSION = "0.1.6"
 DEFAULT_PANEL_REPO_URL = "https://github.com/anxiaoyang666/mihomo.git"
 DEFAULT_PANEL_BRANCH = "main"
 PANEL_BACKUP_KEEP_COUNT = 3
@@ -63,12 +64,37 @@ def read_env():
         try:
             with open(ENV_FILE, 'r', encoding='utf-8') as f:
                 for line in f:
-                    if '=' in line and not line.strip().startswith('#'):
-                        parts = line.strip().split('=', 1)
-                        if len(parts) == 2:
-                            env_data[parts[0].strip()] = parts[1].strip().strip('"').strip("'")
+                    parsed = parse_env_line(line)
+                    if parsed:
+                        env_data[parsed[0]] = parsed[1]
         except: pass
     return env_data
+
+def parse_env_line(line):
+    stripped = line.strip()
+    if not stripped or stripped.startswith('#') or '=' not in stripped:
+        return None
+    try:
+        parts = shlex.split(stripped, comments=True, posix=True)
+    except ValueError:
+        parts = [stripped]
+    if not parts or '=' not in parts[0]:
+        return None
+    key, value = parts[0].split('=', 1)
+    key = key.strip()
+    if not re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]*', key):
+        return None
+    return key, value
+
+def env_value_for_shell(value):
+    normalized = str(value if value is not None else '')
+    normalized = normalized.replace('\r\n', '\n').replace('\r', '\n').replace('\n', '\\n')
+    return shlex.quote(normalized)
+
+def env_line(key, value):
+    if not re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]*', key):
+        raise ValueError(f"Invalid env key: {key}")
+    return f'{key}={env_value_for_shell(value)}\n'
 
 def write_env(updates):
     lines = []
@@ -78,10 +104,11 @@ def write_env(updates):
     with open(ENV_FILE, 'w', encoding='utf-8') as f:
         keys = set()
         for line in lines:
-            if '=' in line and not line.strip().startswith('#'):
-                k = line.split('=')[0].strip()
+            parsed = parse_env_line(line)
+            if parsed:
+                k = parsed[0]
                 if k in updates:
-                    f.write(f'{k}="{updates[k]}"\n')
+                    f.write(env_line(k, updates[k]))
                     keys.add(k)
                 else:
                     f.write(line)
@@ -89,7 +116,7 @@ def write_env(updates):
                 f.write(line)
         for k, v in updates.items():
             if k not in keys:
-                f.write(f'{k}="{v}"\n')
+                f.write(env_line(k, v))
 
 def ensure_session_secret():
     env = read_env()
@@ -345,6 +372,14 @@ def download_file(urls, output, timeout=30):
             last_error = str(e)
     return False, last_error
 
+def safe_extract_zip(archive, destination):
+    dest_root = os.path.abspath(destination)
+    for member in archive.infolist():
+        target = os.path.abspath(os.path.join(destination, member.filename))
+        if target != dest_root and not target.startswith(dest_root + os.sep):
+            raise ValueError("Unsafe path in zip archive: " + member.filename)
+        archive.extract(member, destination)
+
 def panel_version_tuple(value):
     match = re.search(r"v?(\d+)\.(\d+)\.(\d+)", str(value or ""))
     if not match:
@@ -409,9 +444,11 @@ def download_panel_source(tmpdir):
         return False, "下载升级包失败：\n" + source, None, settings
     try:
         with zipfile.ZipFile(zip_path) as archive:
-            archive.extractall(tmpdir)
+            safe_extract_zip(archive, tmpdir)
     except zipfile.BadZipFile:
         return False, "下载到的文件不是有效的 zip 压缩包。", None, settings
+    except ValueError as e:
+        return False, str(e), None, settings
 
     for root, dirs, _ in os.walk(tmpdir):
         if "remote-root" not in dirs:
