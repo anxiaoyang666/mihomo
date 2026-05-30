@@ -2,7 +2,7 @@
 <html lang="zh-CN">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Mihomo Web</title>
 
     <link rel="manifest" href="/static/manifest.json">
@@ -165,8 +165,8 @@
         }
 
         .icon-button {
-            width: 40px;
-            height: 40px;
+            width: 44px;
+            height: 44px;
             display: inline-grid;
             place-items: center;
             border: 1px solid var(--border-color);
@@ -174,6 +174,8 @@
             background: var(--bg-card-soft);
             color: var(--text-main);
             cursor: pointer;
+            touch-action: manipulation;
+            transition: transform .16s ease, border-color .16s ease, background .16s ease, opacity .16s ease;
         }
 
         .nav-pills { gap: 8px; }
@@ -315,7 +317,7 @@
         .top-actions { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; justify-content: flex-end; }
         .soft-button,
         .action-button {
-            min-height: 40px;
+            min-height: 44px;
             display: inline-flex;
             align-items: center;
             justify-content: center;
@@ -326,7 +328,39 @@
             background: var(--bg-card);
             color: var(--text-main);
             font-weight: 700;
+            touch-action: manipulation;
+            transition: transform .16s ease, border-color .16s ease, background .16s ease, opacity .16s ease;
         }
+
+        .icon-button:hover,
+        .soft-button:hover,
+        .action-button:hover { transform: translateY(-1px); border-color: color-mix(in srgb, var(--accent-2) 42%, var(--border-color)); }
+
+        .icon-button:focus-visible,
+        .soft-button:focus-visible,
+        .action-button:focus-visible,
+        .ops-card:focus-visible {
+            outline: 2px solid var(--accent-2);
+            outline-offset: 2px;
+        }
+
+        button:disabled,
+        .is-busy {
+            opacity: .62;
+            cursor: not-allowed;
+            transform: none !important;
+        }
+
+        .button-spinner {
+            width: 1rem;
+            height: 1rem;
+            border: 2px solid currentColor;
+            border-right-color: transparent;
+            border-radius: 999px;
+            animation: spin .8s linear infinite;
+        }
+
+        @keyframes spin { to { transform: rotate(360deg); } }
 
         .action-button.primary {
             border-color: transparent;
@@ -567,6 +601,14 @@
             border: 0;
         }
 
+        .log-toolbar {
+            display: grid;
+            grid-template-columns: 170px minmax(180px, 1fr) auto;
+            gap: 10px;
+            align-items: center;
+            margin-bottom: 12px;
+        }
+
         .log-box {
             min-height: 620px;
             max-height: calc(100vh - 220px);
@@ -605,6 +647,71 @@
         .tag-error { background: #dc3545; color: #fff; }
         .tag-debug { background: #6c757d; color: #fff; }
         .log-msg { word-break: break-all; }
+
+        .toast-stack {
+            position: fixed;
+            right: 18px;
+            bottom: 18px;
+            z-index: 1200;
+            display: grid;
+            gap: 10px;
+            width: min(380px, calc(100vw - 28px));
+        }
+
+        .app-toast {
+            display: grid;
+            grid-template-columns: auto 1fr auto;
+            gap: 10px;
+            align-items: flex-start;
+            padding: 12px 14px;
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            background: var(--bg-card);
+            color: var(--text-main);
+            box-shadow: var(--shadow);
+        }
+
+        .app-toast.success { border-color: rgba(85,214,139,.45); }
+        .app-toast.error { border-color: rgba(255,107,107,.55); }
+        .app-toast.warning { border-color: rgba(255,209,102,.55); }
+        .toast-icon.success { color: var(--accent); }
+        .toast-icon.error { color: var(--danger); }
+        .toast-icon.warning { color: var(--warning); }
+
+        .toast-close {
+            width: 28px;
+            height: 28px;
+            border: 0;
+            border-radius: 6px;
+            background: transparent;
+            color: var(--text-muted);
+        }
+
+        .confirm-backdrop {
+            position: fixed;
+            inset: 0;
+            z-index: 1190;
+            display: none;
+            place-items: center;
+            padding: 18px;
+            background: rgba(0,0,0,.48);
+            backdrop-filter: blur(4px);
+        }
+
+        .confirm-backdrop.show { display: grid; }
+
+        .confirm-dialog {
+            width: min(420px, 100%);
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            background: var(--bg-card);
+            box-shadow: var(--shadow);
+        }
+
+        .confirm-dialog-body { padding: 20px 20px 10px; }
+        .confirm-dialog-title { margin: 0 0 10px; font-size: 18px; font-weight: 760; }
+        .confirm-dialog-message { margin: 0; color: var(--text-muted); line-height: 1.6; white-space: pre-line; }
+        .confirm-dialog-actions { display: flex; justify-content: flex-end; gap: 10px; padding: 14px 20px 20px; }
 
         .section-grid {
             display: grid;
@@ -661,6 +768,7 @@
             .overlay.show { opacity: 1; visibility: visible; }
             .topline { align-items: flex-start; flex-direction: column; }
             .top-actions { justify-content: flex-start; }
+            .log-toolbar { grid-template-columns: 1fr; }
             .service-card { align-items: flex-start; flex-direction: column; }
             .control-buttons { justify-content: flex-start; }
             .quick-grid,
@@ -696,7 +804,7 @@
                     </button>
                 </div>
             </div>
-            <button class="icon-button" onclick="toggleTheme()" title="切换主题">
+            <button class="icon-button" onclick="toggleTheme()" title="切换主题" aria-label="切换主题">
                 <i class="bi bi-sun-fill" id="theme-icon-pc"></i>
             </button>
         </div>
@@ -757,9 +865,9 @@
                             <div class="service-state mt-3"><span class="state-dot" id="statusDot"></span><span id="status-text">正在连接后端</span></div>
                         </div>
                         <div class="control-buttons">
-                            <button class="icon-button" onclick="control('start')" title="启动"><i class="bi bi-play-fill"></i></button>
-                            <button class="icon-button" onclick="control('restart')" title="重启"><i class="bi bi-arrow-clockwise"></i></button>
-                            <button class="icon-button" onclick="control('stop')" title="停止"><i class="bi bi-stop-fill"></i></button>
+                            <button class="icon-button" onclick="control('start', this)" title="启动" aria-label="启动 Mihomo"><i class="bi bi-play-fill"></i></button>
+                            <button class="icon-button" onclick="control('restart', this)" title="重启" aria-label="重启 Mihomo"><i class="bi bi-arrow-clockwise"></i></button>
+                            <button class="icon-button" onclick="control('stop', this)" title="停止" aria-label="停止 Mihomo"><i class="bi bi-stop-fill"></i></button>
                         </div>
                     </div>
                     <div class="metric-card">
@@ -790,11 +898,11 @@
                         </div>
                         <div class="traffic-bars" id="trafficBars"></div>
                         <div class="quick-grid">
-                            <div class="ops-card" onclick="control('update_geo')">
+                            <div class="ops-card" role="button" tabindex="0" onclick="control('update_geo', this)" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();control('update_geo', this);}">
                                 <i class="bi bi-geo-alt"></i>
                                 <div><strong>更新 Geo 数据库</strong><span>刷新 GeoIP 与地理规则数据</span></div>
                             </div>
-                            <div class="ops-card" onclick="control('update_sub')">
+                            <div class="ops-card" role="button" tabindex="0" onclick="control('update_sub', this)" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();control('update_sub', this);}">
                                 <i class="bi bi-cloud-download"></i>
                                 <div><strong>立即更新订阅</strong><span>按当前订阅设置重新生成配置</span></div>
                             </div>
@@ -855,7 +963,7 @@
                         <div class="eyebrow">Configuration</div>
                         <h1 class="page-title">订阅与任务</h1>
                     </div>
-                    <button class="action-button primary" onclick="saveAndUpdateSub()"><i class="bi bi-cloud-download"></i> 保存并应用</button>
+                    <button class="action-button primary" onclick="saveAndUpdateSub(this)"><i class="bi bi-cloud-download"></i> 保存并应用</button>
                 </div>
 
                 <div class="section-grid">
@@ -884,7 +992,7 @@
 
                                 <div class="d-flex justify-content-between align-items-center mt-3">
                                     <small class="text-muted">保存后会覆盖当前配置并应用</small>
-                                    <button class="action-button primary" onclick="saveAndUpdateSub()"><i class="bi bi-check2-circle"></i> 保存并应用配置</button>
+                                    <button class="action-button primary" onclick="saveAndUpdateSub(this)"><i class="bi bi-check2-circle"></i> 保存并应用配置</button>
                                 </div>
                             </div>
                         </div>
@@ -892,7 +1000,7 @@
                         <div class="card">
                             <div class="card-header d-flex justify-content-between align-items-center">
                                 <span><i class="bi bi-file-earmark-code"></i> 配置文件 config.yaml</span>
-                                <button class="soft-button" onclick="saveConfig()"><i class="bi bi-save"></i> 保存重启</button>
+                                <button class="soft-button" onclick="saveConfig(this)"><i class="bi bi-save"></i> 保存重启</button>
                             </div>
                             <div class="card-body p-0">
                                 <textarea id="config-editor" class="form-control"></textarea>
@@ -938,7 +1046,7 @@
                                     <div class="form-text" id="cron_geo_hint">每天 04:00 自动更新 Geo 数据库</div>
                                 </div>
 
-                                <button class="action-button primary w-100 mt-4" onclick="saveSettings(false)"><i class="bi bi-save"></i> 仅保存设置</button>
+                                <button class="action-button primary w-100 mt-4" onclick="saveSettings(false, this)"><i class="bi bi-save"></i> 仅保存设置</button>
                             </div>
                         </div>
                     </div>
@@ -951,7 +1059,7 @@
                         <div class="eyebrow">Notification</div>
                         <h1 class="page-title">通知中心</h1>
                     </div>
-                    <button class="action-button primary" onclick="control('test_notify')"><i class="bi bi-send-fill"></i> 发送测试</button>
+                    <button class="action-button primary" onclick="control('test_notify', this)"><i class="bi bi-send-fill"></i> 发送测试</button>
                 </div>
 
                 <div class="card">
@@ -963,7 +1071,7 @@
                         </div>
                         <input type="text" class="form-control" id="api_url" placeholder="http://...">
                         <div class="form-text">支持发送 JSON 通知的 Webhook 地址</div>
-                        <button class="action-button primary mt-3" onclick="saveSettings(false)"><i class="bi bi-save"></i> 保存所有设置</button>
+                        <button class="action-button primary mt-3" onclick="saveSettings(false, this)"><i class="bi bi-save"></i> 保存所有设置</button>
                     </div>
                 </div>
             </section>
@@ -977,10 +1085,25 @@
                     <div class="top-actions">
                         <div class="form-check form-switch">
                             <input class="form-check-input" type="checkbox" id="auto-scroll-switch" checked>
-                            <label class="form-check-label small text-muted">自动刷新</label>
+                            <label class="form-check-label small text-muted">自动滚动</label>
                         </div>
-                        <button class="soft-button" onclick="control('fix_logs')"><i class="bi bi-tools"></i> 修复日志</button>
+                        <div class="form-check form-switch">
+                            <input class="form-check-input" type="checkbox" id="logPauseSwitch">
+                            <label class="form-check-label small text-muted">暂停刷新</label>
+                        </div>
+                        <button class="soft-button" onclick="control('fix_logs', this)"><i class="bi bi-tools"></i> 修复日志</button>
                     </div>
+                </div>
+                <div class="log-toolbar">
+                    <select class="form-select" id="logLevelFilter" onchange="applyLogFilters()" aria-label="日志级别筛选">
+                        <option value="">全部级别</option>
+                        <option value="error">ERROR / FATAL</option>
+                        <option value="warn">WARN</option>
+                        <option value="info">INFO</option>
+                        <option value="debug">DEBUG</option>
+                    </select>
+                    <input class="form-control" id="logSearch" type="search" placeholder="搜索日志内容" oninput="applyLogFilters()" aria-label="搜索日志内容">
+                    <button class="soft-button" type="button" onclick="clearLogDisplay()"><i class="bi bi-eraser"></i> 清空显示</button>
                 </div>
                 <div id="log-display" class="log-box">
                     <div class="text-muted text-center mt-5">等待加载...</div>
@@ -988,6 +1111,21 @@
             </section>
         </div>
     </main>
+</div>
+
+<div class="toast-stack" id="toastStack" aria-live="polite" aria-atomic="true"></div>
+
+<div class="confirm-backdrop" id="confirmDialog" role="dialog" aria-modal="true" aria-labelledby="confirmDialogTitle" aria-describedby="confirmDialogMessage">
+    <div class="confirm-dialog">
+        <div class="confirm-dialog-body">
+            <h2 class="confirm-dialog-title" id="confirmDialogTitle">确认操作</h2>
+            <p class="confirm-dialog-message" id="confirmDialogMessage"></p>
+        </div>
+        <div class="confirm-dialog-actions">
+            <button class="soft-button" type="button" id="confirmDialogCancel">取消</button>
+            <button class="action-button primary" type="button" id="confirmDialogOk">确认</button>
+        </div>
+    </div>
 </div>
 
 <script src="/static/vendor/bootstrap.bundle.min.js"></script>
@@ -1013,6 +1151,73 @@
     let panelCurrentVersion = "";
     let panelUpdateAvailable = false;
     let panelRepoUrl = "";
+    let latestRawLogs = "";
+    let pendingConfirmResolve = null;
+
+    function showToast(message, type = 'info', timeout = 4200) {
+        const stack = document.getElementById('toastStack');
+        if (!stack) return;
+        const toast = document.createElement('div');
+        const iconMap = { success: 'bi-check-circle-fill', error: 'bi-exclamation-triangle-fill', warning: 'bi-exclamation-circle-fill', info: 'bi-info-circle-fill' };
+        toast.className = `app-toast ${type}`;
+        toast.innerHTML = `
+            <i class="bi ${iconMap[type] || iconMap.info} toast-icon ${type}" aria-hidden="true"></i>
+            <div>${escapeHtml(message || '')}</div>
+            <button class="toast-close" type="button" aria-label="关闭提示"><i class="bi bi-x-lg"></i></button>
+        `;
+        const close = () => toast.remove();
+        toast.querySelector('button')?.addEventListener('click', close);
+        stack.appendChild(toast);
+        window.setTimeout(close, timeout);
+    }
+
+    function askConfirm(message) {
+        const dialog = document.getElementById('confirmDialog');
+        const messageEl = document.getElementById('confirmDialogMessage');
+        const ok = document.getElementById('confirmDialogOk');
+        const cancel = document.getElementById('confirmDialogCancel');
+        if (!dialog || !messageEl || !ok || !cancel) return Promise.resolve(true);
+        messageEl.textContent = message || '';
+        dialog.classList.add('show');
+        ok.focus();
+        return new Promise(resolve => {
+            pendingConfirmResolve = resolve;
+        });
+    }
+
+    function closeConfirmDialog(result) {
+        const dialog = document.getElementById('confirmDialog');
+        if (dialog) dialog.classList.remove('show');
+        if (pendingConfirmResolve) {
+            pendingConfirmResolve(Boolean(result));
+            pendingConfirmResolve = null;
+        }
+    }
+
+    function setActionBusy(trigger, busy) {
+        if (!trigger) return;
+        const isButton = 'disabled' in trigger;
+        if (busy) {
+            if (!trigger.dataset.originalHtml) trigger.dataset.originalHtml = trigger.innerHTML;
+            trigger.classList.toggle('is-busy', true);
+            trigger.setAttribute('aria-busy', 'true');
+            if (isButton) trigger.disabled = true;
+            if (trigger.tagName === 'BUTTON') {
+                const label = trigger.textContent.trim();
+                trigger.innerHTML = trigger.classList.contains('icon-button')
+                    ? `<span class="button-spinner" aria-hidden="true"></span>`
+                    : `<span class="button-spinner" aria-hidden="true"></span><span>${label || '处理中'}</span>`;
+            }
+            return;
+        }
+        trigger.classList.toggle('is-busy', false);
+        trigger.removeAttribute('aria-busy');
+        if (isButton) trigger.disabled = false;
+        if (trigger.dataset.originalHtml) {
+            trigger.innerHTML = trigger.dataset.originalHtml;
+            delete trigger.dataset.originalHtml;
+        }
+    }
 
     function formatBytes(value) {
         const units = ['B', 'KB', 'MB', 'GB', 'TB'];
@@ -1138,7 +1343,7 @@
         if (logInterval) clearInterval(logInterval);
         loadLogs();
         logInterval = setInterval(() => {
-            if (document.getElementById('auto-scroll-switch').checked) loadLogs();
+            if (!document.getElementById('logPauseSwitch')?.checked) loadLogs();
         }, 3000);
     }
 
@@ -1152,9 +1357,47 @@
     function loadLogs() {
         api('/logs').then(res => {
             const rawLogs = res.logs || "";
+            if (rawLogs === latestRawLogs) return;
+            latestRawLogs = rawLogs;
+            renderLogs(rawLogs);
+        });
+    }
+
+    function logLevelOf(line) {
+        const match = line.match(/level=([^ ]+)/);
+        if (!match) return '';
+        const level = match[1].toLowerCase();
+        if (level === 'fatal') return 'error';
+        if (level === 'warning') return 'warn';
+        return level;
+    }
+
+    function applyLogFilters() {
+        renderLogs(latestRawLogs);
+    }
+
+    function clearLogDisplay() {
+        latestRawLogs = "";
+        const logContainer = document.getElementById('log-display');
+        if (logContainer) {
+            logContainer.dataset.rawLogs = "";
+            logContainer.innerHTML = '<div class="text-muted text-center mt-5">当前显示已清空，等待下一次刷新...</div>';
+        }
+    }
+
+    function renderLogs(rawLogs) {
             const logContainer = document.getElementById('log-display');
+            if (!logContainer) return;
             const isAtBottom = (logContainer.scrollHeight - logContainer.scrollTop - logContainer.clientHeight) < 50;
-            const lines = rawLogs.split('\n').filter(line => line.trim() !== '').reverse();
+            const query = (document.getElementById('logSearch')?.value || '').trim().toLowerCase();
+            const levelFilter = document.getElementById('logLevelFilter')?.value || '';
+            const lines = rawLogs.split('\n').filter(line => {
+                const trimmed = line.trim();
+                if (!trimmed) return false;
+                if (query && !trimmed.toLowerCase().includes(query)) return false;
+                if (levelFilter && logLevelOf(trimmed) !== levelFilter) return false;
+                return true;
+            }).reverse();
             const fragment = document.createDocumentFragment();
             lines.forEach(line => {
                 const row = document.createElement('div');
@@ -1181,12 +1424,18 @@
                 }
                 fragment.appendChild(row);
             });
-            if (logContainer.dataset.rawLogs !== rawLogs) {
-                logContainer.dataset.rawLogs = rawLogs;
-                logContainer.replaceChildren(fragment);
-                if (isAtBottom) logContainer.scrollTop = logContainer.scrollHeight;
+            if (!lines.length) {
+                const empty = document.createElement('div');
+                empty.className = 'text-muted text-center mt-5';
+                empty.textContent = rawLogs ? '没有匹配的日志' : '暂无日志';
+                fragment.appendChild(empty);
             }
-        });
+            const renderKey = JSON.stringify([rawLogs, query, levelFilter]);
+            if (logContainer.dataset.rawLogs !== renderKey) {
+                logContainer.dataset.rawLogs = renderKey;
+                logContainer.replaceChildren(fragment);
+                if (document.getElementById('auto-scroll-switch')?.checked && isAtBottom) logContainer.scrollTop = logContainer.scrollHeight;
+            }
     }
 
     function toggleTheme() {
@@ -1285,25 +1534,39 @@
 
     async function api(path, data) {
         const opts = data ? { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(data) } : {};
-        const resp = await fetch('/api' + path, opts);
-        if (resp.status === 401) {
-            window.location.href = '/login';
-            return;
+        try {
+            const resp = await fetch('/api' + path, opts);
+            if (resp.status === 401) {
+                window.location.href = '/login';
+                return;
+            }
+            return resp.json();
+        } catch (error) {
+            showToast('请求失败：' + error.message, 'error');
+            return { success: false, message: error.message };
         }
-        return resp.json();
     }
 
-    function control(act) {
-        if (act === 'test_notify' && !confirm("确定发送测试消息吗？建议先保存配置。")) return;
-        if (act === 'update_sub' && !confirm("确定立即更新订阅并应用配置？")) return;
-        api('/control', {action: act}).then(res => {
-            alert(res.message || (res.success ? '操作成功' : '操作失败'));
+    async function control(act, trigger = null) {
+        if (trigger?.classList?.contains('is-busy')) return;
+        const confirmMessages = {
+            test_notify: "确定发送测试消息吗？建议先保存配置。",
+            update_sub: "确定立即更新订阅并应用配置？"
+        };
+        if (confirmMessages[act] && !await askConfirm(confirmMessages[act])) return;
+        setActionBusy(trigger, true);
+        try {
+            const res = await api('/control', {action: act});
+            showToast(res.message || (res.success ? '操作成功' : '操作失败'), res.success ? 'success' : 'error', act === 'upgrade_panel' ? 7000 : 4200);
             if (act === 'upgrade_panel' && res.success && Number(res.reload_after || 0) > 0) {
                 setTimeout(() => location.reload(), 5000);
             }
             if (act === 'fix_logs') loadLogs();
             loadOverview();
-        });
+            return res;
+        } finally {
+            setActionBusy(trigger, false);
+        }
     }
 
     function loadConfig() {
@@ -1311,26 +1574,44 @@
         loadSettings();
     }
 
-    function saveConfig() {
-        if (!confirm('确定保存并重启服务？')) return;
+    async function saveConfig(trigger = null) {
+        if (trigger?.classList?.contains('is-busy')) return;
+        if (!await askConfirm('确定保存并重启服务？')) return;
         const content = document.getElementById('config-editor').value;
-        api('/config', {content: content}).then(res => {
-            alert(res.message);
-            if (res.success) control('restart');
-        });
+        setActionBusy(trigger, true);
+        try {
+            const res = await api('/config', {content: content});
+            showToast(res.message, res.success ? 'success' : 'error');
+            if (res.success) await control('restart');
+            return res;
+        } finally {
+            setActionBusy(trigger, false);
+        }
     }
 
-    function saveAndUpdateSub() {
-        if (!document.getElementById('sub_url').value) return alert("请先填写订阅链接。");
-        if (!confirm("确定要保存并应用配置吗？此操作将覆盖当前配置。")) return;
-        saveSettings(true).then(() => {
-            alert("正在处理订阅与配置，完成后编辑器会自动刷新。");
-            api('/control', {action: 'update_sub'}).then(res => {
-                alert(res.message);
-                if (res.success) loadConfig();
-                loadOverview();
-            });
-        });
+    async function saveAndUpdateSub(trigger = null) {
+        if (trigger?.classList?.contains('is-busy')) return;
+        if (!document.getElementById('sub_url').value) {
+            showToast("请先填写订阅链接。", 'warning');
+            return;
+        }
+        if (!await askConfirm("确定要保存并应用配置吗？此操作将覆盖当前配置。")) return;
+        setActionBusy(trigger, true);
+        try {
+            const saved = await saveSettings(true);
+            if (!saved?.success) {
+                showToast(saved?.message || '设置保存失败，已停止应用配置。', 'error');
+                return saved;
+            }
+            showToast("正在处理订阅与配置，完成后编辑器会自动刷新。", 'info');
+            const res = await api('/control', {action: 'update_sub'});
+            showToast(res.message, res.success ? 'success' : 'error');
+            if (res.success) loadConfig();
+            loadOverview();
+            return res;
+        } finally {
+            setActionBusy(trigger, false);
+        }
     }
 
     function loadSettings() {
@@ -1363,31 +1644,37 @@
         });
     }
 
-    async function saveSettings(silent = false) {
+    async function saveSettings(silent = false, trigger = null) {
+        if (trigger?.classList?.contains('is-busy')) return;
         let currentMode = document.getElementById('mode_airport').checked ? 'airport' : 'raw';
         if (currentMode === 'airport') cachedUrlAirport = document.getElementById('sub_url').value;
         else cachedUrlRaw = document.getElementById('sub_url').value;
         updateScheduleHint('sub', '订阅');
         updateScheduleHint('geo', ' Geo 数据库');
-        const res = await api('/settings', {
-            notify_api: String(document.getElementById('notify_api').checked),
-            api_url: document.getElementById('api_url').value,
-            config_mode: currentMode,
-            sub_url_raw: cachedUrlRaw.replace(/\n/g, '|'),
-            sub_url_airport: cachedUrlAirport.replace(/\n/g, '|'),
-            local_cidr: document.getElementById('local_cidr') ? document.getElementById('local_cidr').value : '',
-            cron_sub_enabled: document.getElementById('cron_sub_enabled') ? String(document.getElementById('cron_sub_enabled').checked) : 'false',
-            cron_sub_mode: document.getElementById('cron_sub_mode') ? document.getElementById('cron_sub_mode').value : 'daily',
-            cron_sub_time: document.getElementById('cron_sub_time') ? document.getElementById('cron_sub_time').value : '05:00',
-            cron_sub_sched: document.getElementById('cron_sub_sched') ? document.getElementById('cron_sub_sched').value : '',
-            cron_geo_enabled: document.getElementById('cron_geo_enabled') ? String(document.getElementById('cron_geo_enabled').checked) : 'false',
-            cron_geo_mode: document.getElementById('cron_geo_mode') ? document.getElementById('cron_geo_mode').value : 'daily',
-            cron_geo_time: document.getElementById('cron_geo_time') ? document.getElementById('cron_geo_time').value : '04:00',
-            cron_geo_sched: document.getElementById('cron_geo_sched') ? document.getElementById('cron_geo_sched').value : ''
-        });
-        if (!silent) alert(res.message);
-        loadOverview();
-        return res;
+        setActionBusy(trigger, true);
+        try {
+            const res = await api('/settings', {
+                notify_api: String(document.getElementById('notify_api').checked),
+                api_url: document.getElementById('api_url').value,
+                config_mode: currentMode,
+                sub_url_raw: cachedUrlRaw.replace(/\n/g, '|'),
+                sub_url_airport: cachedUrlAirport.replace(/\n/g, '|'),
+                local_cidr: document.getElementById('local_cidr') ? document.getElementById('local_cidr').value : '',
+                cron_sub_enabled: document.getElementById('cron_sub_enabled') ? String(document.getElementById('cron_sub_enabled').checked) : 'false',
+                cron_sub_mode: document.getElementById('cron_sub_mode') ? document.getElementById('cron_sub_mode').value : 'daily',
+                cron_sub_time: document.getElementById('cron_sub_time') ? document.getElementById('cron_sub_time').value : '05:00',
+                cron_sub_sched: document.getElementById('cron_sub_sched') ? document.getElementById('cron_sub_sched').value : '',
+                cron_geo_enabled: document.getElementById('cron_geo_enabled') ? String(document.getElementById('cron_geo_enabled').checked) : 'false',
+                cron_geo_mode: document.getElementById('cron_geo_mode') ? document.getElementById('cron_geo_mode').value : 'daily',
+                cron_geo_time: document.getElementById('cron_geo_time') ? document.getElementById('cron_geo_time').value : '04:00',
+                cron_geo_sched: document.getElementById('cron_geo_sched') ? document.getElementById('cron_geo_sched').value : ''
+            });
+            if (!silent) showToast(res.message, res.success ? 'success' : 'error');
+            loadOverview();
+            return res;
+        } finally {
+            setActionBusy(trigger, false);
+        }
     }
 
     function setPanelText(id, value) {
@@ -1461,9 +1748,9 @@
         return res;
     }
 
-    function confirmUpgradePanel() {
-        if (!confirm('确定升级 Mihomo Web 面板吗？升级不会覆盖 .env、config.yaml 和运行数据，完成后页面会自动刷新。')) return;
-        control('upgrade_panel');
+    async function confirmUpgradePanel() {
+        if (!await askConfirm('确定升级 Mihomo Web 面板吗？升级不会覆盖 .env、config.yaml 和运行数据，完成后页面会自动刷新。')) return;
+        control('upgrade_panel', document.getElementById('versionPopoverUpgrade'));
     }
 
     function handlePanelVersionClick() {
@@ -1477,6 +1764,18 @@
         if (!versionPopover || !versionText || !versionPopover.classList.contains('show')) return;
         if (versionPopover.contains(event.target) || versionText.contains(event.target)) return;
         closeVersionPopover();
+    });
+
+    document.getElementById('confirmDialogOk')?.addEventListener('click', () => closeConfirmDialog(true));
+    document.getElementById('confirmDialogCancel')?.addEventListener('click', () => closeConfirmDialog(false));
+    document.getElementById('confirmDialog')?.addEventListener('click', event => {
+        if (event.target.id === 'confirmDialog') closeConfirmDialog(false);
+    });
+    document.addEventListener('keydown', event => {
+        if (event.key === 'Escape') closeConfirmDialog(false);
+    });
+    document.getElementById('logPauseSwitch')?.addEventListener('change', event => {
+        if (!event.target.checked) loadLogs();
     });
 
     document.getElementById('sub_url').addEventListener('input', event => {
