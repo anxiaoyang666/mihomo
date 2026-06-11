@@ -683,6 +683,18 @@
             line-height: 1.55;
         }
 
+        .toast-countdown {
+            display: none;
+            margin-bottom: 8px;
+            color: var(--accent);
+            font-weight: 760;
+            line-height: 1.35;
+        }
+
+        .toast-countdown:not(:empty) {
+            display: block;
+        }
+
         .app-toast.success { border-color: rgba(85,214,139,.45); }
         .app-toast.error { border-color: rgba(255,107,107,.55); }
         .app-toast.warning { border-color: rgba(255,209,102,.55); }
@@ -1248,20 +1260,29 @@
         toast.className = `app-toast ${type}`;
         toast.innerHTML = `
             <i class="bi ${iconMap[type] || iconMap.info} toast-icon ${type}" aria-hidden="true"></i>
-            <div class="toast-message">${escapeHtml(message || '')}</div>
+            <div class="toast-content">
+                <div class="toast-countdown"></div>
+                <div class="toast-message">${escapeHtml(message || '')}</div>
+            </div>
             <button class="toast-close" type="button" aria-label="关闭提示"><i class="bi bi-x-lg"></i></button>
         `;
         const close = () => toast.remove();
         toast.querySelector('button')?.addEventListener('click', close);
         stack.appendChild(toast);
         if (Number(timeout) > 0) window.setTimeout(close, timeout);
-        return {toast, messageEl: toast.querySelector('.toast-message'), close};
+        return {
+            toast,
+            countdownEl: toast.querySelector('.toast-countdown'),
+            messageEl: toast.querySelector('.toast-message'),
+            close
+        };
     }
 
     function startReloadCountdown(message, seconds) {
         let remaining = Math.max(1, Number(seconds || 5));
-        const countdownText = () => `${message || ''}\n\n页面将在 ${remaining} 秒后自动刷新。`;
-        const handle = showToast(countdownText(), 'success', 0);
+        const countdownText = () => `页面将在 ${remaining} 秒后自动刷新。`;
+        const handle = showToast(message || '升级完成', 'success', 0);
+        if (handle?.countdownEl) handle.countdownEl.textContent = countdownText();
         const timer = setInterval(() => {
             remaining -= 1;
             if (remaining <= 0) {
@@ -1269,7 +1290,7 @@
                 location.reload();
                 return;
             }
-            if (handle?.messageEl) handle.messageEl.textContent = countdownText();
+            if (handle?.countdownEl) handle.countdownEl.textContent = countdownText();
         }, 1000);
     }
 

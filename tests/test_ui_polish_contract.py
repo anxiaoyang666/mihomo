@@ -25,6 +25,7 @@ class MihomoUiPolishContractTest(unittest.TestCase):
 
         self.assertIn('id="toastStack"', source)
         self.assertIn("function showToast", source)
+        self.assertIn('class="toast-countdown"', source)
         self.assertIn('class="toast-message"', source)
         self.assertRegex(source, r"\.toast-message\s*\{[^}]*overflow-wrap:\s*anywhere")
         self.assertRegex(source, r"\.toast-message\s*\{[^}]*white-space:\s*pre-wrap")
@@ -34,6 +35,15 @@ class MihomoUiPolishContractTest(unittest.TestCase):
         self.assertIn("function askConfirm", source)
         self.assertNotIn("alert(", source)
         self.assertNotIn("confirm(", source)
+
+    def test_upgrade_countdown_stays_above_scrollable_details(self):
+        source = text(INDEX)
+
+        self.assertIn("countdownEl", source)
+        self.assertIn("toast-countdown", source)
+        self.assertIn("页面将在", source)
+        self.assertIn("handle.countdownEl.textContent = countdownText()", source)
+        self.assertNotIn("handle.messageEl.textContent = countdownText()", source)
 
     def test_action_buttons_have_touch_and_busy_states(self):
         source = text(INDEX)
@@ -70,13 +80,13 @@ class MihomoUiPolishContractTest(unittest.TestCase):
         self.assertIn('aria-label="重启 Mihomo"', source)
         self.assertIn('aria-label="停止 Mihomo"', source)
 
-    def test_release_version_is_0119(self):
+    def test_release_version_is_0120(self):
         app = text(APP)
 
-        self.assertIn('PANEL_VERSION = "0.1.19"', app)
+        self.assertIn('PANEL_VERSION = "0.1.20"', app)
         match = re.search(r'(?m)^PANEL_VERSION = "(\d+)\.(\d+)\.(\d+)"$', app)
         self.assertIsNotNone(match)
-        self.assertGreaterEqual(tuple(int(part) for part in match.groups()), (0, 1, 19))
+        self.assertGreaterEqual(tuple(int(part) for part in match.groups()), (0, 1, 20))
 
 
 if __name__ == "__main__":
