@@ -25,6 +25,11 @@ class MihomoUiPolishContractTest(unittest.TestCase):
 
         self.assertIn('id="toastStack"', source)
         self.assertIn("function showToast", source)
+        self.assertIn('class="toast-message"', source)
+        self.assertRegex(source, r"\.toast-message\s*\{[^}]*overflow-wrap:\s*anywhere")
+        self.assertRegex(source, r"\.toast-message\s*\{[^}]*white-space:\s*pre-wrap")
+        self.assertRegex(source, r"\.toast-message\s*\{[^}]*max-height:\s*min\(42vh,\s*260px\)")
+        self.assertRegex(source, r"\.toast-message\s*\{[^}]*overflow:\s*auto")
         self.assertIn('id="confirmDialog"', source)
         self.assertIn("function askConfirm", source)
         self.assertNotIn("alert(", source)
@@ -65,13 +70,13 @@ class MihomoUiPolishContractTest(unittest.TestCase):
         self.assertIn('aria-label="重启 Mihomo"', source)
         self.assertIn('aria-label="停止 Mihomo"', source)
 
-    def test_release_version_is_0114(self):
+    def test_release_version_is_0116(self):
         app = text(APP)
 
-        self.assertIn('PANEL_VERSION = "0.1.15"', app)
+        self.assertIn('PANEL_VERSION = "0.1.16"', app)
         match = re.search(r'(?m)^PANEL_VERSION = "(\d+)\.(\d+)\.(\d+)"$', app)
         self.assertIsNotNone(match)
-        self.assertGreaterEqual(tuple(int(part) for part in match.groups()), (0, 1, 15))
+        self.assertGreaterEqual(tuple(int(part) for part in match.groups()), (0, 1, 16))
 
 
 if __name__ == "__main__":

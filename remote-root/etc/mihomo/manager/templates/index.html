@@ -655,7 +655,7 @@
             z-index: 1200;
             display: grid;
             gap: 10px;
-            width: min(380px, calc(100vw - 28px));
+            width: min(560px, calc(100vw - 28px));
         }
 
         .app-toast {
@@ -669,6 +669,18 @@
             background: var(--bg-card);
             color: var(--text-main);
             box-shadow: var(--shadow);
+            max-width: 100%;
+            overflow: hidden;
+        }
+
+        .toast-message {
+            min-width: 0;
+            max-height: min(42vh, 260px);
+            overflow: auto;
+            overflow-wrap: anywhere;
+            word-break: break-word;
+            white-space: pre-wrap;
+            line-height: 1.55;
         }
 
         .app-toast.success { border-color: rgba(85,214,139,.45); }
@@ -1236,13 +1248,13 @@
         toast.className = `app-toast ${type}`;
         toast.innerHTML = `
             <i class="bi ${iconMap[type] || iconMap.info} toast-icon ${type}" aria-hidden="true"></i>
-            <div>${escapeHtml(message || '')}</div>
+            <div class="toast-message">${escapeHtml(message || '')}</div>
             <button class="toast-close" type="button" aria-label="关闭提示"><i class="bi bi-x-lg"></i></button>
         `;
         const close = () => toast.remove();
         toast.querySelector('button')?.addEventListener('click', close);
         stack.appendChild(toast);
-        window.setTimeout(close, timeout);
+        if (Number(timeout) > 0) window.setTimeout(close, timeout);
     }
 
     function askConfirm(message) {
