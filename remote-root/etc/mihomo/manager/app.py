@@ -23,7 +23,7 @@ CONFIG_FILE = f"{MIHOMO_DIR}/config.yaml"
 LOG_FILE = "/var/log/mihomo.log"
 BACKUP_DIR = f"{MIHOMO_DIR}/backup"
 MANAGER_DIR = f"{MIHOMO_DIR}/manager"
-PANEL_VERSION = "0.1.14"
+PANEL_VERSION = "0.1.15"
 DEFAULT_PANEL_REPO_URL = "https://github.com/anxiaoyang666/mihomo.git"
 DEFAULT_PANEL_BRANCH = "main"
 PANEL_BACKUP_KEEP_COUNT = 3
@@ -32,6 +32,8 @@ SYNCABLE_RULE_IDS = {"force-cn", "force-nocn"}
 RULE_SYNC_ACTIONS = {"force-cn": "DIRECT", "force-nocn": "PROXY"}
 RULE_SYNC_BEGIN = "# MOSCTL_MIHOMO_RULE_SYNC_BEGIN"
 RULE_SYNC_END = "# MOSCTL_MIHOMO_RULE_SYNC_END"
+FAKE_IP_FILTER_BEGIN = "# MOSCTL_MIHOMO_FAKE_IP_FILTER_BEGIN"
+FAKE_IP_FILTER_END = "# MOSCTL_MIHOMO_FAKE_IP_FILTER_END"
 
 app = Flask(__name__)
 app.permanent_session_lifetime = timedelta(days=365)
@@ -290,6 +292,15 @@ def find_yaml_top_level_key(lines, key):
             return index
     return -1
 
+def line_indent(line):
+    return re.match(r"^\s*", line).group(0)
+
+def is_yaml_section_at_or_above(line, indent_len):
+    stripped = line.strip()
+    if not stripped or stripped.startswith("#"):
+        return False
+    return len(line_indent(line)) <= indent_len and re.match(r"^[^#:\s][^#]*:\s*(?:#.*)?$", line[indent_len:]) is not None
+
 def proxy_policy_name(text):
     for preferred in ("♻️ 自动选择", "🚀 默认代理", "Final", "GLOBAL"):
         if preferred in text:
@@ -327,6 +338,75 @@ def build_mihomo_sync_rule_lines(rule_contents, proxy_policy):
     block.append(f"{RULE_SYNC_END}\n")
     return block
 
+def build_fake_ip_filter_lines(rule_contents, item_indent):
+    block = [f"{item_indent}{FAKE_IP_FILTER_BEGIN}\n"]
+    for domain in normalize_rule_domains(rule_contents.get("force-cn", "")):
+        block.append(f"{item_indent}- +.{domain}\n")
+    block.append(f"{item_indent}{FAKE_IP_FILTER_END}\n")
+    return block
+
+def remove_fake_ip_filter_block(lines):
+    start = next((idx for idx, line in enumerate(lines) if line.strip() == FAKE_IP_FILTER_BEGIN), -1)
+    if start < 0:
+        return lines
+    end = next((idx for idx in range(start + 1, len(lines)) if lines[idx].strip() == FAKE_IP_FILTER_END), start)
+    return lines[:start] + lines[end + 1:]
+
+def find_nested_key(lines, section_index, key):
+    parent_indent = len(line_indent(lines[section_index]))
+    pattern = re.compile(rf"^\s*{re.escape(key)}\s*:\s*(?:#.*)?$")
+    for index in range(section_index + 1, len(lines)):
+        if is_yaml_section_at_or_above(lines[index], parent_indent):
+            break
+        if pattern.match(lines[index].rstrip("\n")):
+            return index
+    return -1
+
+def section_end_index(lines, section_index):
+    parent_indent = len(line_indent(lines[section_index]))
+    for index in range(section_index + 1, len(lines)):
+        if is_yaml_section_at_or_above(lines[index], parent_indent):
+            return index
+    return len(lines)
+
+def list_item_indent_after_key(lines, key_index):
+    key_indent = line_indent(lines[key_index])
+    key_indent_len = len(key_indent)
+    for index in range(key_index + 1, len(lines)):
+        line = lines[index]
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        if is_yaml_section_at_or_above(line, key_indent_len):
+            break
+        if re.match(r"^\s*-\s+", line):
+            return line_indent(line)
+    return key_indent + "  "
+
+def update_fake_ip_filter_block(lines, rule_contents):
+    lines = remove_fake_ip_filter_block(lines)
+    dns_index = find_yaml_top_level_key(lines, "dns")
+    if dns_index < 0:
+        if lines and not lines[-1].endswith("\n"):
+            lines[-1] += "\n"
+        lines.append("dns:\n")
+        lines.append("  fake-ip-filter:\n")
+        lines.extend(build_fake_ip_filter_lines(rule_contents, "    "))
+        return lines
+
+    fake_filter_index = find_nested_key(lines, dns_index, "fake-ip-filter")
+    if fake_filter_index < 0:
+        dns_indent = line_indent(lines[dns_index])
+        child_indent = dns_indent + "  "
+        item_indent = child_indent + "  "
+        insert_at = section_end_index(lines, dns_index)
+        lines[insert_at:insert_at] = [f"{child_indent}fake-ip-filter:\n"] + build_fake_ip_filter_lines(rule_contents, item_indent)
+        return lines
+
+    item_indent = list_item_indent_after_key(lines, fake_filter_index)
+    lines[fake_filter_index + 1:fake_filter_index + 1] = build_fake_ip_filter_lines(rule_contents, item_indent)
+    return lines
+
 def update_mihomo_sync_block(rule_contents):
     text = read_config_text()
     lines = text.splitlines(True)
@@ -347,6 +427,7 @@ def update_mihomo_sync_block(rule_contents):
             lines.append("rules:\n")
             rules_index = len(lines) - 1
         lines[rules_index + 1:rules_index + 1] = block
+    lines = update_fake_ip_filter_block(lines, rule_contents)
     new_text = "".join(lines)
     tmp_file = f"{CONFIG_FILE}.rulesync"
     with open(tmp_file, "w", encoding="utf-8") as f:

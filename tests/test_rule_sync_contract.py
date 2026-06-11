@@ -44,6 +44,17 @@ class MihomoRuleSyncContractTest(unittest.TestCase):
         self.assertIn("lines[rules_index + 1:rules_index + 1] = block", text)
         self.assertIn("rules_index + 1", text)
 
+    def test_force_direct_domains_are_added_to_fake_ip_filter(self):
+        text = app_source()
+
+        self.assertIn("FAKE_IP_FILTER_BEGIN", text)
+        self.assertIn("FAKE_IP_FILTER_END", text)
+        self.assertIn("def build_fake_ip_filter_lines", text)
+        self.assertIn('block.append(f"{item_indent}- +.{domain}\\n")', text)
+        self.assertIn('rule_contents.get("force-cn", "")', text)
+        self.assertNotIn('rule_contents.get("force-nocn", "")', text[text.find("def build_fake_ip_filter_lines"): text.find("def update_mihomo_sync_block")])
+        self.assertIn("update_fake_ip_filter_block(lines, rule_contents)", text)
+
     def test_sync_does_not_rebroadcast_received_rules(self):
         text = app_source()
 
@@ -66,7 +77,7 @@ class MihomoRuleSyncContractTest(unittest.TestCase):
         match = re.search(r'(?m)^PANEL_VERSION = "(\d+)\.(\d+)\.(\d+)"$', app_source())
 
         self.assertIsNotNone(match)
-        self.assertGreaterEqual(tuple(int(part) for part in match.groups()), (0, 1, 14))
+        self.assertGreaterEqual(tuple(int(part) for part in match.groups()), (0, 1, 15))
 
 
 if __name__ == "__main__":
