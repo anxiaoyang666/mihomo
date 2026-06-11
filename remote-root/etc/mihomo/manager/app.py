@@ -23,11 +23,15 @@ CONFIG_FILE = f"{MIHOMO_DIR}/config.yaml"
 LOG_FILE = "/var/log/mihomo.log"
 BACKUP_DIR = f"{MIHOMO_DIR}/backup"
 MANAGER_DIR = f"{MIHOMO_DIR}/manager"
-PANEL_VERSION = "0.1.13"
+PANEL_VERSION = "0.1.14"
 DEFAULT_PANEL_REPO_URL = "https://github.com/anxiaoyang666/mihomo.git"
 DEFAULT_PANEL_BRANCH = "main"
 PANEL_BACKUP_KEEP_COUNT = 3
 PANEL_UPGRADE_EXCLUDES = ("/etc/mihomo/.env", "/etc/mihomo/config.yaml", "/etc/mihomo/ui")
+SYNCABLE_RULE_IDS = {"force-cn", "force-nocn"}
+RULE_SYNC_ACTIONS = {"force-cn": "DIRECT", "force-nocn": "PROXY"}
+RULE_SYNC_BEGIN = "# MOSCTL_MIHOMO_RULE_SYNC_BEGIN"
+RULE_SYNC_END = "# MOSCTL_MIHOMO_RULE_SYNC_END"
 
 app = Flask(__name__)
 app.permanent_session_lifetime = timedelta(days=365)
@@ -207,6 +211,256 @@ def validate_config(path):
 
 def is_true(val):
     return str(val).lower() == 'true'
+
+def is_safe_text(value, max_len=50000):
+    return isinstance(value, str) and len(value.encode("utf-8")) <= max_len and "\x00" not in value
+
+def parse_peers(value):
+    if isinstance(value, list):
+        parts = value
+    else:
+        parts = re.split(r"[\n,|]+", str(value or ""))
+    peers = []
+    for item in parts:
+        peer = str(item or "").strip().rstrip("/")
+        if not peer:
+            continue
+        if not peer.startswith(("http://", "https://")):
+            peer = "http://" + peer
+        peers.append(peer)
+    return list(dict.fromkeys(peers))
+
+def normalize_rule_domains(content):
+    domains = []
+    for line in str(content or "").replace("|", "\n").splitlines():
+        item = line.strip()
+        if not item or item.startswith("#"):
+            continue
+        item = re.sub(r"^(DOMAIN-SUFFIX,|DOMAIN,|full:)", "", item, flags=re.IGNORECASE).strip()
+        item = item.lstrip(".")
+        if re.fullmatch(r"[A-Za-z0-9*_.-]+\.[A-Za-z0-9_.-]+", item):
+            domains.append(item.lower())
+    return list(dict.fromkeys(domains))
+
+def read_sync_settings():
+    env = read_env()
+    peers = parse_peers(env.get("RULE_SYNC_PEERS", ""))
+    return {
+        "enabled": is_true(env.get("RULE_SYNC_ENABLED")),
+        "token": env.get("RULE_SYNC_TOKEN", ""),
+        "peers": peers,
+        "peers_text": "\n".join(peers),
+        "syncable_rules": sorted(SYNCABLE_RULE_IDS),
+    }
+
+def write_sync_settings(data):
+    peers = parse_peers(data.get("peers_text") or data.get("peers") or "")
+    token = str(data.get("token") or "").strip()
+    if not token:
+        token = secrets.token_urlsafe(24)
+    if not is_safe_text(token, 200) or "\n" in token or "\r" in token:
+        return False, "同步密钥不合法"
+    write_env(
+        {
+            "RULE_SYNC_ENABLED": str(is_true(data.get("enabled"))).lower(),
+            "RULE_SYNC_TOKEN": token,
+            "RULE_SYNC_PEERS": "|".join(peers),
+        }
+    )
+    return True, "规则同步设置已保存"
+
+def read_config_text():
+    if not os.path.exists(CONFIG_FILE):
+        return "rules:\n"
+    with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+        return f.read()
+
+def write_config_text(text):
+    os.makedirs(os.path.dirname(CONFIG_FILE), exist_ok=True)
+    if os.path.exists(CONFIG_FILE):
+        os.makedirs(BACKUP_DIR, exist_ok=True)
+        shutil.copy2(CONFIG_FILE, f"{BACKUP_DIR}/config.before-rule-sync.{time.strftime('%Y%m%d%H%M%S')}.yaml")
+    with open(CONFIG_FILE, "w", encoding="utf-8") as f:
+        f.write(text)
+
+def find_yaml_top_level_key(lines, key):
+    pattern = re.compile(rf"^{re.escape(key)}\s*:\s*(?:#.*)?$")
+    for index, line in enumerate(lines):
+        if pattern.match(line.rstrip("\n")):
+            return index
+    return -1
+
+def proxy_policy_name(text):
+    for preferred in ("♻️ 自动选择", "🚀 默认代理", "Final", "GLOBAL"):
+        if preferred in text:
+            return preferred
+    match = re.search(r"(?m)^\s*-\s*name:\s*['\"]?([^'\"\n]+)['\"]?\s*$", text)
+    return match.group(1).strip() if match else "PROXY"
+
+def read_mihomo_sync_rules():
+    text = read_config_text()
+    rules = {"force-cn": [], "force-nocn": []}
+    in_block = False
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped == RULE_SYNC_BEGIN:
+            in_block = True
+            continue
+        if stripped == RULE_SYNC_END:
+            in_block = False
+            continue
+        if not in_block:
+            continue
+        if stripped.startswith("- DOMAIN-SUFFIX,"):
+            parts = stripped[2:].split(",", 2)
+            if len(parts) == 3:
+                target = "force-cn" if parts[2] == "DIRECT" else "force-nocn"
+                rules[target].append(parts[1])
+    return {key: "\n".join(value) + ("\n" if value else "") for key, value in rules.items()}
+
+def build_mihomo_sync_rule_lines(rule_contents, proxy_policy):
+    block = [f"{RULE_SYNC_BEGIN}\n"]
+    for domain in normalize_rule_domains(rule_contents.get("force-cn", "")):
+        block.append(f"- DOMAIN-SUFFIX,{domain},DIRECT\n")
+    for domain in normalize_rule_domains(rule_contents.get("force-nocn", "")):
+        block.append(f"- DOMAIN-SUFFIX,{domain},{proxy_policy}\n")
+    block.append(f"{RULE_SYNC_END}\n")
+    return block
+
+def update_mihomo_sync_block(rule_contents):
+    text = read_config_text()
+    lines = text.splitlines(True)
+    if not lines:
+        lines = ["rules:\n"]
+    proxy_policy = proxy_policy_name(text)
+    block = build_mihomo_sync_rule_lines(rule_contents, proxy_policy)
+
+    start = next((idx for idx, line in enumerate(lines) if line.strip() == RULE_SYNC_BEGIN), -1)
+    if start >= 0:
+        end = next((idx for idx in range(start + 1, len(lines)) if lines[idx].strip() == RULE_SYNC_END), start)
+        lines[start:end + 1] = block
+    else:
+        rules_index = find_yaml_top_level_key(lines, "rules")
+        if rules_index < 0:
+            if lines and not lines[-1].endswith("\n"):
+                lines[-1] += "\n"
+            lines.append("rules:\n")
+            rules_index = len(lines) - 1
+        lines[rules_index + 1:rules_index + 1] = block
+    new_text = "".join(lines)
+    tmp_file = f"{CONFIG_FILE}.rulesync"
+    with open(tmp_file, "w", encoding="utf-8") as f:
+        f.write(new_text)
+    ok, message = validate_config(tmp_file)
+    if not ok:
+        try:
+            os.remove(tmp_file)
+        except OSError:
+            pass
+        return False, "规则写入后配置校验失败，已取消保存：\n" + message
+    os.remove(tmp_file)
+    write_config_text(new_text)
+    return True, "规则已写入 mihomo 配置"
+
+def save_rule_content(rule_id, content):
+    if rule_id not in SYNCABLE_RULE_IDS:
+        return False, "未知规则文件"
+    if not is_safe_text(content):
+        return False, "规则内容不合法或过大"
+    current = read_mihomo_sync_rules()
+    current[rule_id] = "\n".join(normalize_rule_domains(content))
+    if current[rule_id]:
+        current[rule_id] += "\n"
+    return update_mihomo_sync_block(current)
+
+def restart_mihomo():
+    return run_args(["systemctl", "restart", "mihomo"], timeout=60)
+
+def broadcast_rule(rule_id, content):
+    if rule_id not in SYNCABLE_RULE_IDS:
+        return ""
+    settings = read_sync_settings()
+    if not settings["enabled"]:
+        return "规则同步未启用。"
+    if not settings["peers"]:
+        return "规则同步已启用，但没有配置其他节点。"
+    if not settings["token"]:
+        return "规则同步已启用，但缺少同步密钥。"
+
+    payload = json.dumps(
+        {
+            "token": settings["token"],
+            "rules": {rule_id: content},
+            "source": request.host_url.rstrip("/"),
+        }
+    ).encode("utf-8")
+    headers = {"Content-Type": "application/json", "X-Mosdns-Sync-Token": settings["token"]}
+    results = []
+    for peer in settings["peers"]:
+        url = peer.rstrip("/") + "/api/rule-sync"
+        try:
+            req = urlrequest.Request(url, data=payload, headers=headers, method="POST")
+            with urlrequest.urlopen(req, timeout=15) as resp:
+                body = json.loads(resp.read().decode("utf-8", "replace"))
+            if body.get("success"):
+                results.append(f"{peer}: 成功")
+            else:
+                results.append(f"{peer}: 失败 - {body.get('message', '未知错误')}")
+        except Exception as exc:
+            results.append(f"{peer}: 失败 - {exc}")
+    return "同步结果：\n" + "\n".join(results)
+
+def apply_synced_rules(rules):
+    if not isinstance(rules, dict):
+        return False, "同步内容不合法"
+    current = read_mihomo_sync_rules()
+    applied = []
+    for rule_id, content in rules.items():
+        if rule_id not in SYNCABLE_RULE_IDS:
+            continue
+        if not is_safe_text(content):
+            return False, "规则内容不合法或过大"
+        current[rule_id] = "\n".join(normalize_rule_domains(content))
+        if current[rule_id]:
+            current[rule_id] += "\n"
+        applied.append(rule_id)
+    if not applied:
+        return False, "没有可同步的规则"
+    ok, message = update_mihomo_sync_block(current)
+    if not ok:
+        return False, message
+    restarted, restart_message = restart_mihomo()
+    if not restarted:
+        return False, "规则已写入，但 mihomo 重启失败：\n" + restart_message
+    return True, "已同步规则：" + ", ".join(applied)
+
+def test_sync_peers(data):
+    peers = parse_peers(data.get("peers_text") or data.get("peers") or "")
+    token = str(data.get("token") or "").strip()
+    if not peers:
+        return False, "请先填写其他 mosctl / mihomo 面板地址", []
+    if not token:
+        return False, "请先填写同步密钥", []
+    payload = json.dumps({"token": token, "rules": {}, "source": request.host_url.rstrip("/")}).encode("utf-8")
+    headers = {"Content-Type": "application/json", "X-Mosdns-Sync-Token": token}
+    results = []
+    for peer in peers:
+        url = peer.rstrip("/") + "/api/rule-sync"
+        try:
+            req = urlrequest.Request(url, data=payload, headers=headers, method="POST")
+            with urlrequest.urlopen(req, timeout=8) as resp:
+                body_text = resp.read().decode("utf-8", "replace")
+            try:
+                body = json.loads(body_text)
+            except json.JSONDecodeError:
+                body = {}
+            message = body.get("message") or "接口可访问，密钥已通过"
+            if message == "没有可同步的规则":
+                message = "接口可访问，密钥已通过"
+            results.append({"peer": peer, "success": True, "message": message})
+        except Exception as exc:
+            results.append({"peer": peer, "success": False, "message": str(exc)})
+    return all(item["success"] for item in results), "连通性测试完成", results
 
 def mihomo_controller_settings():
     env = read_env()
@@ -719,6 +973,70 @@ def update_account_credentials():
         os.environ["WEB_SECRET"] = updates["WEB_SECRET"]
     session.clear()
     return jsonify({"success": True, "message": "账号已更新，请使用新凭据重新登录。", "reload_after": 1})
+
+@app.route("/api/rule-sync-settings", methods=["GET", "POST"])
+@login_required
+def api_rule_sync_settings():
+    if request.method == "GET":
+        return jsonify(read_sync_settings())
+    ok, message = write_sync_settings(request.json or {})
+    return jsonify({"success": ok, "message": message, **read_sync_settings()})
+
+@app.route("/api/rule-sync-test", methods=["POST"])
+@login_required
+def api_rule_sync_test():
+    ok, message, results = test_sync_peers(request.json or {})
+    return jsonify({"success": ok, "message": message, "results": results})
+
+@app.route("/api/rule-sync", methods=["POST"])
+def api_rule_sync():
+    env = read_env()
+    expected = env.get("RULE_SYNC_TOKEN", "")
+    provided = request.headers.get("X-Mosdns-Sync-Token", "")
+    data = request.json or {}
+    if not provided:
+        provided = str(data.get("token") or "")
+    if not expected or not secrets.compare_digest(provided, expected):
+        return jsonify({"success": False, "message": "同步密钥错误"}), 403
+    ok, message = apply_synced_rules(data.get("rules"))
+    return jsonify({"success": ok, "message": message})
+
+@app.route("/api/rules/<rule_id>", methods=["GET", "POST"])
+@login_required
+def api_rules(rule_id):
+    if rule_id not in SYNCABLE_RULE_IDS:
+        return jsonify({"success": False, "message": "未知规则文件"}), 404
+    labels = {"force-cn": "强制直连", "force-nocn": "强制代理"}
+    summaries = {
+        "force-cn": "这些域名会写入 mihomo 规则顶部并强制 DIRECT。",
+        "force-nocn": "这些域名会写入 mihomo 规则顶部并强制走代理策略组。",
+    }
+    if request.method == "GET":
+        return jsonify(
+            {
+                "id": rule_id,
+                "label": labels[rule_id],
+                "summary": summaries[rule_id],
+                "format": "每行一个域名，例如 example.com",
+                "examples": ["example.com", "full.example.com"],
+                "content": read_mihomo_sync_rules().get(rule_id, ""),
+            }
+        )
+    content = (request.json or {}).get("content", "")
+    saved, save_message = save_rule_content(rule_id, content)
+    if not saved:
+        return jsonify({"success": False, "message": save_message})
+    ok, message = restart_mihomo()
+    if ok:
+        sync_message = broadcast_rule(rule_id, content)
+        if sync_message:
+            message = "规则已保存并重启 mihomo\n\n" + sync_message
+    return jsonify(
+        {
+            "success": ok,
+            "message": message if ok else "规则已保存，但 mihomo 重启失败：\n" + message,
+        }
+    )
 
 @app.route('/api/settings', methods=['GET', 'POST'])
 @login_required

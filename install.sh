@@ -127,10 +127,11 @@ copy_payload() {
 }
 
 write_env_file() {
-  local user pass session_secret
+  local user pass session_secret sync_token
   user="${WEB_USER:-admin}"
   pass="${WEB_SECRET:-$(rand_secret)}"
   session_secret="$(rand_secret)$(rand_secret)"
+  sync_token="$(rand_secret)"
 
   if [ -f "$INSTALL_DIR/.env" ] && [ "${MIHOMO_KEEP_ENV:-1}" = "1" ]; then
     yellow "保留已有 $INSTALL_DIR/.env"
@@ -152,6 +153,9 @@ write_env_file() {
     write_env_line "SUB_URL_AIRPORT" ""
     write_env_line "LOCAL_CIDR" ""
     write_env_line "BACKUP_KEEP_COUNT" "20"
+    write_env_line "RULE_SYNC_TOKEN" "$sync_token"
+    write_env_line "RULE_SYNC_ENABLED" "false"
+    write_env_line "RULE_SYNC_PEERS" ""
   } > "$INSTALL_DIR/.env"
   chmod 600 "$INSTALL_DIR/.env"
 }

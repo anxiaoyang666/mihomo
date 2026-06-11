@@ -832,6 +832,7 @@
         <div class="nav flex-column nav-pills" id="mainTab" role="tablist">
             <button class="nav-link active" id="tab-dash-btn" data-bs-toggle="pill" data-bs-target="#tab-dash" onclick="closeSidebar()"><i class="bi bi-grid-1x2"></i> 概览与控制</button>
             <button class="nav-link" id="tab-tasks-btn" data-bs-toggle="pill" data-bs-target="#tab-tasks" onclick="loadConfig(); closeSidebar()"><i class="bi bi-sliders"></i> 订阅与任务</button>
+            <button class="nav-link" id="tab-rules-btn" data-bs-toggle="pill" data-bs-target="#tab-rules" onclick="loadRulesPage(); closeSidebar()"><i class="bi bi-signpost-split"></i> 分流同步</button>
             <button class="nav-link" id="tab-notify-btn" data-bs-toggle="pill" data-bs-target="#tab-notify" onclick="loadSettings(); closeSidebar()"><i class="bi bi-bell"></i> 通知中心</button>
             <button class="nav-link" id="tab-logs-btn" data-bs-toggle="pill" data-bs-target="#tab-logs" onclick="closeSidebar()"><i class="bi bi-terminal"></i> 运行日志</button>
         </div>
@@ -1046,6 +1047,60 @@
                                 </div>
 
                                 <button class="action-button primary w-100 mt-4" onclick="saveSettings(false, this)"><i class="bi bi-save"></i> 仅保存设置</button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <section class="tab-pane fade" id="tab-rules">
+                <div class="topline">
+                    <div>
+                        <div class="eyebrow">Policy Sync</div>
+                        <h1 class="page-title">分流规则同步</h1>
+                    </div>
+                </div>
+
+                <div class="section-grid">
+                    <div>
+                        <div class="card">
+                            <div class="card-header"><i class="bi bi-check2-circle"></i> 强制直连</div>
+                            <div class="card-body">
+                                <div class="form-text mb-2">每行一个域名。保存后写入 mihomo 顶部规则，动作为 DIRECT，并同步到 mosctl 的强制国内。</div>
+                                <textarea class="form-control" id="rule_force_cn" rows="8" placeholder="ippure.com"></textarea>
+                                <button class="action-button primary mt-3" onclick="saveRule('force-cn', this)"><i class="bi bi-save"></i> 保存强制直连</button>
+                            </div>
+                        </div>
+                        <div class="card">
+                            <div class="card-header"><i class="bi bi-send"></i> 强制代理</div>
+                            <div class="card-body">
+                                <div class="form-text mb-2">每行一个域名。保存后写入 mihomo 顶部规则，默认走 ♻️ 自动选择，并同步到 mosctl 的强制国外。</div>
+                                <textarea class="form-control" id="rule_force_nocn" rows="8" placeholder="openai.com"></textarea>
+                                <button class="action-button primary mt-3" onclick="saveRule('force-nocn', this)"><i class="bi bi-save"></i> 保存强制代理</button>
+                            </div>
+                        </div>
+                    </div>
+                    <div>
+                        <div class="card">
+                            <div class="card-header"><i class="bi bi-diagram-3"></i> 规则同步</div>
+                            <div class="card-body">
+                                <div class="form-check form-switch mb-3">
+                                    <input class="form-check-input" type="checkbox" id="syncEnabled">
+                                    <label class="form-check-label fw-bold">启用规则同步</label>
+                                </div>
+                                <label class="form-label fw-bold">同步密钥</label>
+                                <div class="input-group mb-3">
+                                    <input type="text" class="form-control" id="syncToken" autocomplete="off">
+                                    <button class="btn btn-outline-secondary" type="button" onclick="generateSyncToken()">生成</button>
+                                    <button class="btn btn-outline-secondary" type="button" onclick="copySyncToken()">复制</button>
+                                </div>
+                                <label class="form-label fw-bold">其他 mosctl / mihomo 面板地址，每行一个</label>
+                                <textarea class="form-control" id="syncPeers" rows="7" placeholder="http://10.10.10.3:7840&#10;http://10.10.30.2:7838"></textarea>
+                                <div class="d-flex flex-wrap gap-2 mt-3">
+                                    <button class="action-button primary" onclick="saveSyncSettings(this)"><i class="bi bi-save"></i> 保存同步</button>
+                                    <button class="soft-button" onclick="testSyncPeers(this)"><i class="bi bi-wifi"></i> 测试连通性</button>
+                                </div>
+                                <div class="sync-test-list mt-3" id="syncTestResults"></div>
                             </div>
                         </div>
                     </div>
@@ -1712,6 +1767,126 @@
         }
     }
 
+    function ruleElementId(ruleId) {
+        return ruleId === 'force-cn' ? 'rule_force_cn' : 'rule_force_nocn';
+    }
+
+    async function loadRule(ruleId) {
+        const res = await api('/rules/' + encodeURIComponent(ruleId));
+        const editor = document.getElementById(ruleElementId(ruleId));
+        if (editor) editor.value = res.content || '';
+        return res;
+    }
+
+    async function saveRule(ruleId, trigger = null) {
+        if (trigger?.classList?.contains('is-busy')) return;
+        const editor = document.getElementById(ruleElementId(ruleId));
+        setActionBusy(trigger, true);
+        try {
+            const res = await api('/rules/' + encodeURIComponent(ruleId), {content: editor ? editor.value : ''});
+            showToast(res.message || (res.success ? '规则已保存' : '保存失败'), res.success ? 'success' : 'error', 6000);
+            loadOverview();
+            return res;
+        } finally {
+            setActionBusy(trigger, false);
+        }
+    }
+
+    async function loadSyncSettings() {
+        const res = await api('/rule-sync-settings');
+        const enabled = document.getElementById('syncEnabled');
+        const token = document.getElementById('syncToken');
+        const peers = document.getElementById('syncPeers');
+        if (enabled) enabled.checked = Boolean(res.enabled);
+        if (token) token.value = res.token || '';
+        if (peers) peers.value = res.peers_text || '';
+        renderSyncTestResults([]);
+        return res;
+    }
+
+    async function loadRulesPage() {
+        await Promise.all([loadRule('force-cn'), loadRule('force-nocn'), loadSyncSettings()]);
+    }
+
+    function generateSyncToken() {
+        const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-';
+        const bytes = new Uint8Array(32);
+        crypto.getRandomValues(bytes);
+        const token = Array.from(bytes, value => chars[value % chars.length]).join('');
+        document.getElementById('syncToken').value = token;
+        showToast('已生成随机密钥', '保存同步设置后生效。', 'info');
+    }
+
+    async function copySyncToken() {
+        const token = (document.getElementById('syncToken')?.value || '').trim();
+        if (!token) {
+            showToast('没有可复制的密钥', '请先生成或填写同步密钥。', 'warning');
+            return;
+        }
+        try {
+            await navigator.clipboard.writeText(token);
+        } catch (err) {
+            document.getElementById('syncToken').select();
+            document.execCommand('copy');
+        }
+        showToast('已复制同步密钥', '可以粘贴到其他 mosctl / mihomo 面板。', 'success');
+    }
+
+    function renderSyncTestResults(results) {
+        const list = document.getElementById('syncTestResults');
+        if (!list) return;
+        list.innerHTML = '';
+        (results || []).forEach(item => {
+            const row = document.createElement('div');
+            row.className = 'health-row';
+            const info = document.createElement('div');
+            const peer = document.createElement('strong');
+            peer.textContent = item.peer || '--';
+            const message = document.createElement('span');
+            message.textContent = item.message || '';
+            info.appendChild(peer);
+            info.appendChild(message);
+            const badge = document.createElement('span');
+            badge.className = item.success ? 'small-pill' : 'small-pill warn';
+            badge.textContent = item.success ? '正常' : '异常';
+            row.appendChild(info);
+            row.appendChild(badge);
+            list.appendChild(row);
+        });
+    }
+
+    async function saveSyncSettings(trigger = null) {
+        if (trigger?.classList?.contains('is-busy')) return;
+        setActionBusy(trigger, true);
+        try {
+            const res = await api('/rule-sync-settings', {
+                enabled: String(document.getElementById('syncEnabled').checked),
+                token: document.getElementById('syncToken').value,
+                peers_text: document.getElementById('syncPeers').value
+            });
+            showToast(res.message || (res.success ? '保存完成' : '保存失败'), res.success ? 'success' : 'error');
+            return res;
+        } finally {
+            setActionBusy(trigger, false);
+        }
+    }
+
+    async function testSyncPeers(trigger = null) {
+        if (trigger?.classList?.contains('is-busy')) return;
+        setActionBusy(trigger, true);
+        try {
+            const res = await api('/rule-sync-test', {
+                token: document.getElementById('syncToken').value,
+                peers_text: document.getElementById('syncPeers').value
+            });
+            renderSyncTestResults(res.results || []);
+            showToast(res.message || '连通性测试完成', res.success ? 'success' : 'warning');
+            return res;
+        } finally {
+            setActionBusy(trigger, false);
+        }
+    }
+
     async function saveSettings(silent = false, trigger = null) {
         if (trigger?.classList?.contains('is-busy')) return;
         let currentMode = document.getElementById('mode_airport').checked ? 'airport' : 'raw';
@@ -1876,6 +2051,7 @@
         if (tabTrigger) {
             new bootstrap.Tab(tabTrigger).show();
             if (activeTabId === 'tab-tasks-btn') loadConfig();
+            if (activeTabId === 'tab-rules-btn') loadRulesPage();
             if (activeTabId === 'tab-notify-btn') loadSettings();
             if (activeTabId === 'tab-logs-btn') startLogPolling();
         }

@@ -18,8 +18,8 @@ def text(path):
 
 
 class MihomoFinalHardeningContractTest(unittest.TestCase):
-    def test_release_version_is_0113(self):
-        self.assertIn('PANEL_VERSION = "0.1.13"', text(APP))
+    def test_release_version_is_0114(self):
+        self.assertIn('PANEL_VERSION = "0.1.14"', text(APP))
 
     def test_frontend_uses_local_vendor_assets(self):
         index = text(INDEX)
@@ -39,6 +39,8 @@ class MihomoFinalHardeningContractTest(unittest.TestCase):
         self.assertIn("write_env_line()", install)
         self.assertIn("printf '%s=%q\\n'", install)
         self.assertIn('write_env_line "WEB_SESSION_SECRET" "$session_secret"', install)
+        self.assertIn('write_env_line "RULE_SYNC_TOKEN" "$sync_token"', install)
+        self.assertIn('write_env_line "RULE_SYNC_ENABLED" "false"', install)
         self.assertNotIn('WEB_SESSION_SECRET="$session_secret"', install)
         self.assertNotIn('cat > "$INSTALL_DIR/.env" <<EOF', install)
 
