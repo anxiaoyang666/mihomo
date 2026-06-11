@@ -61,6 +61,14 @@ class MihomoRuleSyncContractTest(unittest.TestCase):
         self.assertIn("def apply_synced_rules(rules):", text)
         self.assertNotIn("broadcast_rule(rule_id, content)", text[text.find("def apply_synced_rules"): text.find("def api_rule_sync")])
 
+    def test_received_sync_defers_restart_until_after_http_response(self):
+        text = app_source()
+        sync_section = text[text.find("def apply_synced_rules"): text.find("def test_sync_peers")]
+
+        self.assertIn("def schedule_mihomo_restart", text)
+        self.assertIn("schedule_mihomo_restart()", sync_section)
+        self.assertNotIn("restart_mihomo()", sync_section)
+
     def test_ui_has_force_rule_and_cross_panel_sync_controls(self):
         text = index_source()
 
@@ -77,7 +85,7 @@ class MihomoRuleSyncContractTest(unittest.TestCase):
         match = re.search(r'(?m)^PANEL_VERSION = "(\d+)\.(\d+)\.(\d+)"$', app_source())
 
         self.assertIsNotNone(match)
-        self.assertGreaterEqual(tuple(int(part) for part in match.groups()), (0, 1, 15))
+        self.assertGreaterEqual(tuple(int(part) for part in match.groups()), (0, 1, 22))
 
 
 if __name__ == "__main__":

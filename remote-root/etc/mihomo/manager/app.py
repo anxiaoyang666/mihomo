@@ -24,7 +24,7 @@ CONFIG_FILE = f"{MIHOMO_DIR}/config.yaml"
 LOG_FILE = "/var/log/mihomo.log"
 BACKUP_DIR = f"{MIHOMO_DIR}/backup"
 MANAGER_DIR = f"{MIHOMO_DIR}/manager"
-PANEL_VERSION = "0.1.21"
+PANEL_VERSION = "0.1.22"
 DEFAULT_PANEL_REPO_URL = "https://github.com/anxiaoyang666/mihomo.git"
 DEFAULT_PANEL_BRANCH = "main"
 PANEL_BACKUP_KEEP_COUNT = 3
@@ -458,6 +458,14 @@ def save_rule_content(rule_id, content):
 def restart_mihomo():
     return run_args(["systemctl", "restart", "mihomo"], timeout=60)
 
+def schedule_mihomo_restart():
+    subprocess.Popen(
+        ["sh", "-c", "sleep 1; systemctl restart mihomo"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        close_fds=True,
+    )
+
 def broadcast_rule(rule_id, content):
     if rule_id not in SYNCABLE_RULE_IDS:
         return ""
@@ -511,10 +519,8 @@ def apply_synced_rules(rules):
     ok, message = update_mihomo_sync_block(current)
     if not ok:
         return False, message
-    restarted, restart_message = restart_mihomo()
-    if not restarted:
-        return False, "规则已写入，但 mihomo 重启失败：\n" + restart_message
-    return True, "已同步规则：" + ", ".join(applied)
+    schedule_mihomo_restart()
+    return True, "已同步规则：" + ", ".join(applied) + "，mihomo 将在后台重启"
 
 def test_sync_peers(data):
     peers = parse_peers(data.get("peers_text") or data.get("peers") or "")
