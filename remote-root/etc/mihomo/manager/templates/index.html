@@ -1255,6 +1255,22 @@
         toast.querySelector('button')?.addEventListener('click', close);
         stack.appendChild(toast);
         if (Number(timeout) > 0) window.setTimeout(close, timeout);
+        return {toast, messageEl: toast.querySelector('.toast-message'), close};
+    }
+
+    function startReloadCountdown(message, seconds) {
+        let remaining = Math.max(1, Number(seconds || 5));
+        const countdownText = () => `${message || ''}\n\n页面将在 ${remaining} 秒后自动刷新。`;
+        const handle = showToast(countdownText(), 'success', 0);
+        const timer = setInterval(() => {
+            remaining -= 1;
+            if (remaining <= 0) {
+                clearInterval(timer);
+                location.reload();
+                return;
+            }
+            if (handle?.messageEl) handle.messageEl.textContent = countdownText();
+        }, 1000);
     }
 
     function askConfirm(message) {
@@ -1643,9 +1659,10 @@
         setActionBusy(trigger, true);
         try {
             const res = await api('/control', {action: act});
-            showToast(res.message || (res.success ? '操作成功' : '操作失败'), res.success ? 'success' : 'error', act === 'upgrade_panel' ? 7000 : 4200);
             if (act === 'upgrade_panel' && res.success && Number(res.reload_after || 0) > 0) {
-                setTimeout(() => location.reload(), 5000);
+                startReloadCountdown(res.message || '升级完成', Number(res.reload_after || 5));
+            } else {
+                showToast(res.message || (res.success ? '操作成功' : '操作失败'), res.success ? 'success' : 'error', 4200);
             }
             if (act === 'fix_logs') loadLogs();
             loadOverview();

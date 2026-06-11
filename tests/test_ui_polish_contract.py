@@ -70,13 +70,13 @@ class MihomoUiPolishContractTest(unittest.TestCase):
         self.assertIn('aria-label="重启 Mihomo"', source)
         self.assertIn('aria-label="停止 Mihomo"', source)
 
-    def test_release_version_is_0116(self):
+    def test_release_version_is_0117(self):
         app = text(APP)
 
-        self.assertIn('PANEL_VERSION = "0.1.16"', app)
+        self.assertIn('PANEL_VERSION = "0.1.17"', app)
         match = re.search(r'(?m)^PANEL_VERSION = "(\d+)\.(\d+)\.(\d+)"$', app)
         self.assertIsNotNone(match)
-        self.assertGreaterEqual(tuple(int(part) for part in match.groups()), (0, 1, 16))
+        self.assertGreaterEqual(tuple(int(part) for part in match.groups()), (0, 1, 17))
 
 
 if __name__ == "__main__":

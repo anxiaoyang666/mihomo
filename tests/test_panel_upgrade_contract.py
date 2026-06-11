@@ -20,7 +20,7 @@ class MihomoPanelUpgradeContractTest(unittest.TestCase):
     def test_panel_upgrade_backend_contract_exists(self):
         text = app_source()
 
-        self.assertIn('PANEL_VERSION = "0.1.16"', text)
+        self.assertIn('PANEL_VERSION = "0.1.17"', text)
         self.assertIn("DEFAULT_PANEL_REPO_URL", text)
         self.assertIn("def panel_version_tuple", text)
         self.assertIn("def panel_upgrade_state", text)
@@ -79,7 +79,11 @@ class MihomoPanelUpgradeContractTest(unittest.TestCase):
         self.assertIn("document.addEventListener('click'", text)
         self.assertIn("version-dot", text)
         self.assertIn("upgrade_panel", text)
-        self.assertIn("setTimeout(() => location.reload(), 5000)", text)
+        self.assertIn("function startReloadCountdown", text)
+        self.assertIn("页面将在", text)
+        self.assertIn("setInterval", text)
+        self.assertIn("location.reload()", text)
+        self.assertNotIn("setTimeout(() => location.reload(), 5000)", text)
 
     def test_app_remains_valid_python(self):
         compile(app_source(), str(APP), "exec")
@@ -89,7 +93,7 @@ class MihomoPanelUpgradeContractTest(unittest.TestCase):
 
         self.assertIsNotNone(match)
         version = tuple(int(part) for part in match.groups())
-        self.assertGreaterEqual(version, (0, 1, 16))
+        self.assertGreaterEqual(version, (0, 1, 17))
 
 
 if __name__ == "__main__":
