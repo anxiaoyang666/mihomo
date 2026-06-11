@@ -3,6 +3,7 @@ from functools import wraps
 from datetime import timedelta
 from collections import deque
 import subprocess
+import base64
 import os
 import re
 import secrets
@@ -23,7 +24,7 @@ CONFIG_FILE = f"{MIHOMO_DIR}/config.yaml"
 LOG_FILE = "/var/log/mihomo.log"
 BACKUP_DIR = f"{MIHOMO_DIR}/backup"
 MANAGER_DIR = f"{MIHOMO_DIR}/manager"
-PANEL_VERSION = "0.1.18"
+PANEL_VERSION = "0.1.19"
 DEFAULT_PANEL_REPO_URL = "https://github.com/anxiaoyang666/mihomo.git"
 DEFAULT_PANEL_BRANCH = "main"
 PANEL_BACKUP_KEEP_COUNT = 3
@@ -695,6 +696,23 @@ def github_raw_app_url(repo_url, branch):
     owner, name = parts
     return f"https://raw.githubusercontent.com/{owner}/{name}/{quote(branch, safe='/')}/remote-root/etc/mihomo/manager/app.py"
 
+def github_contents_app_url(repo_url, branch):
+    parts = github_repo_parts(repo_url)
+    if not parts:
+        return ""
+    owner, name = parts
+    path = "remote-root/etc/mihomo/manager/app.py"
+    return f"https://api.github.com/repos/{owner}/{name}/contents/{path}?ref={quote(branch, safe='/')}"
+
+def parse_github_contents_text(text):
+    data = json.loads(text or "{}")
+    if not isinstance(data, dict):
+        return ""
+    if data.get("encoding") != "base64" or not data.get("content"):
+        return ""
+    payload = str(data.get("content") or "").replace("\n", "")
+    return base64.b64decode(payload).decode("utf-8", "replace")
+
 def read_url_text(urls, timeout=15):
     last_error = ""
     for url in urls:
@@ -739,10 +757,13 @@ def parse_panel_version(text):
 def remote_panel_version(settings=None):
     settings = settings or panel_repo_settings()
     raw_url = github_raw_app_url(settings["repo_url"], settings["branch"])
-    if not raw_url:
+    contents_url = github_contents_app_url(settings["repo_url"], settings["branch"])
+    if not raw_url or not contents_url:
         return {"success": False, "latest_version": "", "source": "", "message": "当前只支持 GitHub 仓库地址。"}
-    ok, text, source = read_url_text([f"https://gh-proxy.com/{raw_url}", raw_url], timeout=15)
+    ok, text, source = read_url_text([contents_url, f"https://gh-proxy.com/{raw_url}", raw_url], timeout=15)
     if ok:
+        if source == contents_url:
+            text = parse_github_contents_text(text)
         version = parse_panel_version(text)
         if version:
             return {"success": True, "latest_version": version, "source": source, "message": ""}

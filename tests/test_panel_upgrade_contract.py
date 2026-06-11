@@ -20,7 +20,7 @@ class MihomoPanelUpgradeContractTest(unittest.TestCase):
     def test_panel_upgrade_backend_contract_exists(self):
         text = app_source()
 
-        self.assertIn('PANEL_VERSION = "0.1.18"', text)
+        self.assertIn('PANEL_VERSION = "0.1.19"', text)
         self.assertIn("DEFAULT_PANEL_REPO_URL", text)
         self.assertIn("def panel_version_tuple", text)
         self.assertIn("def panel_upgrade_state", text)
@@ -56,7 +56,12 @@ class MihomoPanelUpgradeContractTest(unittest.TestCase):
     def test_panel_upgrade_prefers_github_proxy(self):
         text = app_source()
 
-        self.assertIn('read_url_text([f"https://gh-proxy.com/{raw_url}", raw_url]', text)
+        self.assertIn("def github_contents_app_url", text)
+        self.assertIn("contents_url = github_contents_app_url", text)
+        self.assertIn("parse_github_contents_text", text)
+        self.assertIn("contents_url, f\"https://gh-proxy.com/{raw_url}\", raw_url", text)
+        self.assertIn('f"https://gh-proxy.com/{raw_url}"', text)
+        self.assertIn("raw_url", text)
         self.assertIn('download_file([f"https://gh-proxy.com/{archive_url}", archive_url]', text)
         self.assertNotIn('read_url_text([raw_url, f"https://gh-proxy.com/{raw_url}"]', text)
         self.assertNotIn('download_file([archive_url, f"https://gh-proxy.com/{archive_url}"]', text)
@@ -93,7 +98,7 @@ class MihomoPanelUpgradeContractTest(unittest.TestCase):
 
         self.assertIsNotNone(match)
         version = tuple(int(part) for part in match.groups())
-        self.assertGreaterEqual(version, (0, 1, 18))
+        self.assertGreaterEqual(version, (0, 1, 19))
 
 
 if __name__ == "__main__":
