@@ -3,6 +3,7 @@ from functools import wraps
 from datetime import timedelta
 from collections import deque
 import subprocess
+import atexit
 import base64
 import logging
 import os
@@ -10,8 +11,11 @@ import re
 import secrets
 import shlex
 import glob
+import ipaddress
 import json
 import shutil
+import signal
+import sys
 import tempfile
 import threading
 import time
@@ -30,7 +34,7 @@ SUBSCRIPTION_STATE_FILE = f"{MIHOMO_DIR}/.last_subscription"
 SUBSCRIPTION_LOG = "/var/log/mihomo-subscription.log"
 GEO_LOG = "/var/log/mihomo-geo.log"
 MANAGER_DIR = f"{MIHOMO_DIR}/manager"
-PANEL_VERSION = "0.1.27"
+PANEL_VERSION = "0.1.28"
 DEFAULT_PANEL_REPO_URL = "https://github.com/anxiaoyang666/mihomo.git"
 DEFAULT_PANEL_BRANCH = "main"
 PANEL_BACKUP_KEEP_COUNT = 3
@@ -931,6 +935,434 @@ def last_subscription_state(path=None):
         return None
     return {"at": at, "ok": parts[1] == "ok", "message": parts[2] if len(parts) > 2 else ""}
 
+# ---------------------------------------------------------------------------
+# 设备流量统计
+#
+# 这台机器是网关（TUN + fake-ip），mihomo 控制器的 /connections 能看到局域网里每台设备的连接；
+# mosdns 面板只看得到 DNS，看不到流量，所以设备视图放在这里。后台线程每 DEVICE_SAMPLE_INTERVAL 秒
+# 读一次连接列表，按 sourceIP 累加每条连接相对上次采样的字节增量，并定期写到 devices.json。
+# ---------------------------------------------------------------------------
+DEVICES_FILE = f"{MIHOMO_DIR}/devices.json"
+DEVICE_SAMPLE_INTERVAL = 5
+DEVICE_ONLINE_SECONDS = 90
+DEVICE_PERSIST_INTERVAL = 30
+DEVICE_NEIGH_INTERVAL = 30
+DEVICE_MAX_DOMAINS = 200
+DEVICE_MAX_CHAINS = 50
+DEVICE_MAX_DEVICES = 500
+DEVICE_NOTE_MAX_LEN = 80
+# 网关自己（127.0.0.1、本机地址）发出的连接归到一个伪设备下，mosdns 转发过来的 DNS 流量才有地方看
+GATEWAY_DEVICE_KEY = "本机/网关"
+LOOPBACK_IPS = frozenset({"127.0.0.1", "::1"})
+
+DEVICE_LOCK = threading.Lock()
+DEVICE_STATE = {
+    "devices": {},            # ip -> 累计数据（持久化）
+    "notes": {},              # ip -> 备注（持久化）
+    "prev": {},               # 连接 id -> (upload, download) 上次采样值，用来算增量（不持久化）
+    "sampled_at": 0,          # 上次成功采样的时间
+    "controller_error": "",
+    "controller_error_at": 0,
+    "local_ips": set(LOOPBACK_IPS),
+    "macs": {},
+    "dirty": False,           # 有未落盘的改动
+}
+DEVICE_SAMPLER_STARTED = False
+DEVICE_SAMPLER_STOP = threading.Event()
+
+def normalize_source_ip(value):
+    """控制器对 IPv4 来源常给 ::ffff:a.b.c.d 这种映射地址，统一成 a.b.c.d。"""
+    ip = str(value or "").strip()
+    if ip.startswith("[") and ip.endswith("]"):
+        ip = ip[1:-1]
+    if ip.lower().startswith("::ffff:") and ip.count(".") == 3:
+        ip = ip[7:]
+    return ip
+
+def detect_local_ips():
+    ips = set(LOOPBACK_IPS)
+    ok, output = run_args(["ip", "-4", "-o", "addr"], timeout=5)
+    if ok:
+        ips.update(re.findall(r"\binet\s+(\d+\.\d+\.\d+\.\d+)/", output))
+    return ips
+
+def detect_neighbour_macs():
+    """ip neigh 里直连邻居的 MAC；只用来显示，绝不拿它判断在线。"""
+    ok, output = run_args(["ip", "neigh"], timeout=5)
+    if not ok:
+        return {}
+    macs = {}
+    for line in output.splitlines():
+        match = re.match(r"^(\S+)\s+.*\blladdr\s+([0-9a-fA-F]{2}(?::[0-9a-fA-F]{2}){5})\b", line)
+        if match:
+            macs[match.group(1)] = match.group(2).lower()
+    return macs
+
+def new_device_record(key, now, is_gateway=False):
+    return {
+        "ip": key,
+        "is_gateway": bool(is_gateway),
+        "mac": "",
+        "first_seen": int(now),
+        "last_seen": int(now),
+        "upload_total": 0,
+        "download_total": 0,
+        "domains": {},            # host -> {count, bytes, last}
+        "chains": {},             # 出口链路标签 -> bytes
+        "active_connections": 0,
+        "rate_up": 0,
+        "rate_down": 0,
+        "last_host": "",
+        "last_start": "",
+    }
+
+def connection_chain_label(conn):
+    """mihomo 的 chains 是出口节点在前、规则命中的策略组在后；显示成 策略组 → 节点，直连就是 DIRECT。"""
+    chains = conn.get("chains") if isinstance(conn, dict) else None
+    names = [str(item).strip() for item in chains if str(item or "").strip()] if isinstance(chains, list) else []
+    if not names:
+        return "DIRECT"
+    return " → ".join(reversed(names)) if len(names) > 1 else names[0]
+
+def trim_device_record(device):
+    """域名表最多 DEVICE_MAX_DOMAINS 条（淘汰最久没访问的），链路表最多 DEVICE_MAX_CHAINS 条。"""
+    domains = device.get("domains") or {}
+    if len(domains) > DEVICE_MAX_DOMAINS:
+        for host, _ in sorted(domains.items(), key=lambda item: item[1].get("last", 0))[: len(domains) - DEVICE_MAX_DOMAINS]:
+            domains.pop(host, None)
+    chains = device.get("chains") or {}
+    if len(chains) > DEVICE_MAX_CHAINS:
+        for label, _ in sorted(chains.items(), key=lambda item: item[1])[: len(chains) - DEVICE_MAX_CHAINS]:
+            chains.pop(label, None)
+
+def trim_device_table(devices):
+    """设备超过 DEVICE_MAX_DEVICES 台时淘汰最久没活动的，网关伪设备不淘汰。"""
+    if len(devices) <= DEVICE_MAX_DEVICES:
+        return
+    candidates = sorted(
+        (key for key, device in devices.items() if not device.get("is_gateway")),
+        key=lambda key: devices[key].get("last_seen", 0),
+    )
+    for key in candidates[: len(devices) - DEVICE_MAX_DEVICES]:
+        devices.pop(key, None)
+
+def apply_connections_sample(connections, now=None, local_ips=None):
+    """把一次 /connections 快照累加进 DEVICE_STATE，返回本次有连接的设备数。
+
+    增量规则：新 id 按当前值全额计入；见过的 id 按 当前 - 上次 计入；计数器变小说明 id 被复用，
+    按新连接处理。上次有、这次没有的 id 直接丢掉，它之前累加过的字节保留。
+    """
+    now = int(now if now is not None else time.time())
+    with DEVICE_LOCK:
+        if local_ips is None:
+            local_ips = DEVICE_STATE["local_ips"]
+        devices = DEVICE_STATE["devices"]
+        prev = DEVICE_STATE["prev"]
+        last_at = DEVICE_STATE["sampled_at"]
+        elapsed = now - last_at
+        interval = elapsed if last_at and 0 < elapsed <= DEVICE_SAMPLE_INTERVAL * 12 else DEVICE_SAMPLE_INTERVAL
+        seen = {}
+        deltas = {}   # key -> [up, down, active]
+        for conn in connections if isinstance(connections, list) else []:
+            if not isinstance(conn, dict):
+                continue
+            meta = conn.get("metadata") if isinstance(conn.get("metadata"), dict) else {}
+            src = normalize_source_ip(meta.get("sourceIP"))
+            if not src:
+                continue
+            cid = str(conn.get("id") or "")
+            up, down = first_number(conn.get("upload")), first_number(conn.get("download"))
+            is_new = not cid or cid not in prev
+            if is_new:
+                du, dd = up, down
+            else:
+                du, dd = up - prev[cid][0], down - prev[cid][1]
+                if du < 0 or dd < 0:
+                    du, dd, is_new = up, down, True
+            if cid:
+                seen[cid] = (up, down)
+            is_gateway = src in local_ips
+            key = GATEWAY_DEVICE_KEY if is_gateway else src
+            device = devices.get(key)
+            if device is None:
+                device = devices[key] = new_device_record(key, now, is_gateway)
+            device["upload_total"] += du
+            device["download_total"] += dd
+            device["last_seen"] = now
+            delta = deltas.setdefault(key, [0, 0, 0])
+            delta[0] += du
+            delta[1] += dd
+            delta[2] += 1
+            host = str(meta.get("host") or meta.get("destinationIP") or "").strip()[:253]
+            if host:
+                entry = device["domains"].get(host)
+                if entry is None:
+                    entry = device["domains"][host] = {"count": 0, "bytes": 0, "last": now}
+                entry["bytes"] += du + dd
+                entry["last"] = now
+                if is_new:
+                    entry["count"] += 1
+                start = str(conn.get("start") or "")
+                if not device.get("last_host") or start >= device.get("last_start", ""):
+                    device["last_host"], device["last_start"] = host, start
+            label = connection_chain_label(conn)
+            device["chains"][label] = device["chains"].get(label, 0) + du + dd
+        for key, device in devices.items():
+            delta = deltas.get(key)
+            device["active_connections"] = delta[2] if delta else 0
+            device["rate_up"] = int(delta[0] / interval) if delta else 0
+            device["rate_down"] = int(delta[1] / interval) if delta else 0
+            if delta:
+                trim_device_record(device)
+        trim_device_table(devices)
+        DEVICE_STATE["prev"] = seen
+        DEVICE_STATE["sampled_at"] = now
+        DEVICE_STATE["controller_error"] = ""
+        DEVICE_STATE["dirty"] = True
+        return len(deltas)
+
+def coerce_device_record(key, raw):
+    """devices.json 里的一条设备记录，字段逐个校验类型，坏文件不能把面板搞挂。"""
+    if not isinstance(raw, dict):
+        return None
+    record = new_device_record(key, first_number(raw.get("first_seen")), raw.get("is_gateway"))
+    record["last_seen"] = first_number(raw.get("last_seen"))
+    record["upload_total"] = max(0, first_number(raw.get("upload_total")))
+    record["download_total"] = max(0, first_number(raw.get("download_total")))
+    record["mac"] = str(raw.get("mac") or "")[:32]
+    record["last_host"] = str(raw.get("last_host") or "")[:253]
+    record["last_start"] = str(raw.get("last_start") or "")[:64]
+    domains = raw.get("domains") if isinstance(raw.get("domains"), dict) else {}
+    for host, entry in domains.items():
+        if isinstance(entry, dict) and isinstance(host, str) and host:
+            record["domains"][host[:253]] = {
+                "count": max(0, first_number(entry.get("count"))),
+                "bytes": max(0, first_number(entry.get("bytes"))),
+                "last": first_number(entry.get("last")),
+            }
+    chains = raw.get("chains") if isinstance(raw.get("chains"), dict) else {}
+    for label, total in chains.items():
+        if isinstance(label, str) and label:
+            record["chains"][label[:200]] = max(0, first_number(total))
+    trim_device_record(record)
+    return record
+
+def load_device_state(path=None):
+    """启动时读回上次落盘的累计值；文件缺失或损坏就从空表开始。"""
+    path = path or DEVICES_FILE
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return False
+    if not isinstance(data, dict):
+        return False
+    devices = {}
+    raw_devices = data.get("devices") if isinstance(data.get("devices"), dict) else {}
+    for key, raw in raw_devices.items():
+        record = coerce_device_record(str(key), raw)
+        if record:
+            devices[str(key)] = record
+    trim_device_table(devices)
+    raw_notes = data.get("notes") if isinstance(data.get("notes"), dict) else {}
+    notes = {str(key): str(value)[:DEVICE_NOTE_MAX_LEN] for key, value in raw_notes.items() if isinstance(value, str) and value}
+    with DEVICE_LOCK:
+        DEVICE_STATE["devices"] = devices
+        DEVICE_STATE["notes"] = notes
+        DEVICE_STATE["prev"] = {}
+        DEVICE_STATE["dirty"] = False
+    return True
+
+def save_device_state(path=None):
+    """临时文件 + os.replace 原子写，面板被杀在写一半时不会留下坏文件。"""
+    path = path or DEVICES_FILE
+    with DEVICE_LOCK:
+        payload = {
+            "version": 1,
+            "saved_at": int(time.time()),
+            "devices": DEVICE_STATE["devices"],
+            "notes": DEVICE_STATE["notes"],
+        }
+        text = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+        DEVICE_STATE["dirty"] = False
+    directory = os.path.dirname(path) or "."
+    os.makedirs(directory, exist_ok=True)
+    tmp_path = os.path.join(directory, f".devices.{os.getpid()}.{secrets.token_hex(4)}.tmp")
+    try:
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            f.write(text)
+            f.flush()
+            os.fsync(f.fileno())
+        os.chmod(tmp_path, 0o644)
+        os.replace(tmp_path, path)
+    except Exception:
+        remove_quietly(tmp_path)
+        raise
+
+def refresh_device_neighbours():
+    local_ips = detect_local_ips()
+    macs = detect_neighbour_macs()
+    with DEVICE_LOCK:
+        DEVICE_STATE["local_ips"] = local_ips
+        DEVICE_STATE["macs"] = macs
+        for key, device in DEVICE_STATE["devices"].items():
+            if key in macs:
+                device["mac"] = macs[key]
+
+def sample_devices_once():
+    ok, data = mihomo_api_get("/connections", timeout=3)
+    if ok:
+        connections = data.get("connections") if isinstance(data, dict) else None
+        apply_connections_sample(connections if isinstance(connections, list) else [])
+        return True
+    with DEVICE_LOCK:
+        DEVICE_STATE["controller_error"] = str(data.get("error") or "controller unreachable")
+        DEVICE_STATE["controller_error_at"] = int(time.time())
+        # 控制器不可达时上一轮的速率和活动连接数已经过期，清零；累计值和 prev 保留，恢复后继续算增量
+        for device in DEVICE_STATE["devices"].values():
+            device["active_connections"] = 0
+            device["rate_up"] = 0
+            device["rate_down"] = 0
+    return False
+
+def device_sampler_loop():
+    last_persist = time.time()
+    last_neigh = 0
+    while not DEVICE_SAMPLER_STOP.is_set():
+        try:
+            now = time.time()
+            if now - last_neigh >= DEVICE_NEIGH_INTERVAL:
+                refresh_device_neighbours()
+                last_neigh = now
+            sample_devices_once()
+            if now - last_persist >= DEVICE_PERSIST_INTERVAL:
+                with DEVICE_LOCK:
+                    dirty = DEVICE_STATE["dirty"]
+                if dirty:
+                    save_device_state()
+                last_persist = now
+        except Exception as e:
+            log.warning("设备采样失败：%s", e)
+        DEVICE_SAMPLER_STOP.wait(DEVICE_SAMPLE_INTERVAL)
+
+def stop_device_sampler():
+    DEVICE_SAMPLER_STOP.set()
+    try:
+        save_device_state()
+    except Exception as e:
+        log.warning("退出时保存设备统计失败：%s", e)
+
+def start_device_sampler():
+    """只在 app.py 作为 __main__ 运行时调用（mihomo-manager.service 就是这么启动的）；
+    测试 exec 这个模块时不会起线程。重复调用无效。"""
+    global DEVICE_SAMPLER_STARTED
+    if DEVICE_SAMPLER_STARTED:
+        return False
+    DEVICE_SAMPLER_STARTED = True
+    load_device_state()
+    thread = threading.Thread(target=device_sampler_loop, name="device-sampler", daemon=True)
+    thread.start()
+    atexit.register(stop_device_sampler)
+    return True
+
+def device_payload(key, device, notes, now):
+    domains = device.get("domains") or {}
+    top_domains = sorted(domains.items(), key=lambda item: item[1].get("bytes", 0), reverse=True)[:12]
+    chains = sorted((device.get("chains") or {}).items(), key=lambda item: item[1], reverse=True)[:5]
+    last_seen = first_number(device.get("last_seen"))
+    return {
+        "ip": key,
+        "mac": device.get("mac", ""),
+        "note": notes.get(key, ""),
+        "online": now - last_seen <= DEVICE_ONLINE_SECONDS,
+        "is_gateway": bool(device.get("is_gateway")),
+        "last_seen": last_seen,
+        "first_seen": first_number(device.get("first_seen")),
+        "active_connections": first_number(device.get("active_connections")),
+        "rate_up": first_number(device.get("rate_up")),
+        "rate_down": first_number(device.get("rate_down")),
+        "upload_total": first_number(device.get("upload_total")),
+        "download_total": first_number(device.get("download_total")),
+        "top_domains": [{"host": host, "bytes": entry.get("bytes", 0), "count": entry.get("count", 0)} for host, entry in top_domains],
+        "chains": [{"label": label, "bytes": total} for label, total in chains],
+        "last_host": device.get("last_host", ""),
+    }
+
+def devices_snapshot(now=None):
+    """/api/devices 的响应。时间全是 epoch 秒，容器跑在 UTC，由浏览器按本地时区格式化。"""
+    now = int(now if now is not None else time.time())
+    controller = mihomo_controller_settings()
+    with DEVICE_LOCK:
+        notes = DEVICE_STATE["notes"]
+        items = [device_payload(key, device, notes, now) for key, device in DEVICE_STATE["devices"].items()]
+        sampled_at = DEVICE_STATE["sampled_at"]
+        error = DEVICE_STATE["controller_error"]
+        error_at = DEVICE_STATE["controller_error_at"]
+    # 默认排序：在线优先，再按实时速率降序，再按最近活动
+    items.sort(key=lambda item: (not item["online"], -(item["rate_up"] + item["rate_down"]), -item["last_seen"]))
+    return {
+        "devices": items,
+        "controller": {
+            "reachable": bool(sampled_at) and not error,
+            "error": error,
+            "error_at": error_at,
+            "base_url": controller["base_url"],
+        },
+        "sampled_at": sampled_at,
+        "sample_interval": DEVICE_SAMPLE_INTERVAL,
+        "online_seconds": DEVICE_ONLINE_SECONDS,
+        "sampler_running": DEVICE_SAMPLER_STARTED,
+        "totals": {
+            "devices": len(items),
+            "online": sum(1 for item in items if item["online"]),
+            "upload": sum(item["upload_total"] for item in items),
+            "download": sum(item["download_total"] for item in items),
+            "rate_up": sum(item["rate_up"] for item in items),
+            "rate_down": sum(item["rate_down"] for item in items),
+        },
+    }
+
+def devices_summary(now=None):
+    """概览页的"设备 在线 N / 共 M"。"""
+    now = int(now if now is not None else time.time())
+    with DEVICE_LOCK:
+        devices = list(DEVICE_STATE["devices"].values())
+    online = sum(1 for device in devices if now - first_number(device.get("last_seen")) <= DEVICE_ONLINE_SECONDS)
+    return {"online": online, "total": len(devices)}
+
+def reset_device_totals():
+    """累计流量、域名、链路全部清零；设备本身、首次/最近时间、MAC 和备注保留。"""
+    with DEVICE_LOCK:
+        for device in DEVICE_STATE["devices"].values():
+            device["upload_total"] = 0
+            device["download_total"] = 0
+            device["domains"] = {}
+            device["chains"] = {}
+            device["last_host"] = ""
+            device["last_start"] = ""
+            device["rate_up"] = 0
+            device["rate_down"] = 0
+        DEVICE_STATE["dirty"] = True
+    save_device_state()
+
+def set_device_note(ip, note):
+    ip = normalize_source_ip(ip)
+    try:
+        ipaddress.ip_address(ip)
+    except ValueError:
+        return False, "IP 地址不合法"
+    if not isinstance(note, str) or "\n" in note or "\r" in note or not is_safe_text(note, DEVICE_NOTE_MAX_LEN * 4) or len(note) > DEVICE_NOTE_MAX_LEN:
+        return False, f"备注最多 {DEVICE_NOTE_MAX_LEN} 个字符，且不能包含换行"
+    note = note.strip()
+    with DEVICE_LOCK:
+        if note:
+            DEVICE_STATE["notes"][ip] = note
+        else:
+            DEVICE_STATE["notes"].pop(ip, None)
+        DEVICE_STATE["dirty"] = True
+    save_device_state()
+    return True, "备注已保存" if note else "备注已清除"
+
 def collect_overview():
     env = read_env()
     running = is_service_active("mihomo")
@@ -954,6 +1386,7 @@ def collect_overview():
         "upload_total": first_number(connections.get("uploadTotal")),
         "memory": first_number(connections.get("memory")),
         "proxy_groups": proxy_groups,
+        "devices": devices_summary(),
         "log_levels": log_level_summary(),
         "settings": {
             "config_mode": env.get("CONFIG_MODE", "airport"),
@@ -1338,6 +1771,32 @@ def get_status():
 def api_overview():
     return jsonify(collect_overview())
 
+@app.route('/api/devices')
+@login_required
+def api_devices():
+    return jsonify(devices_snapshot())
+
+@app.route('/api/devices/reset', methods=['POST'])
+@login_required
+def api_devices_reset():
+    try:
+        reset_device_totals()
+    except Exception as e:
+        return jsonify({"success": False, "message": f"清零失败：{e}"})
+    return jsonify({"success": True, "message": "设备流量统计已清零"})
+
+@app.route('/api/devices/<ip>/note', methods=['POST'])
+@login_required
+def api_device_note(ip):
+    note = json_body().get("note", "")
+    if not isinstance(note, str):
+        return jsonify({"success": False, "message": "备注必须是文本"}), 400
+    try:
+        ok, message = set_device_note(ip, note)
+    except Exception as e:
+        return jsonify({"success": False, "message": f"保存备注失败：{e}"})
+    return jsonify({"success": ok, "message": message})
+
 @app.route('/api/panel-upgrade-source')
 @login_required
 def api_panel_upgrade_source():
@@ -1622,4 +2081,7 @@ if __name__ == '__main__':
         port = int(env.get('WEB_PORT', 7838))
     except Exception:
         port = 7838
+    # systemd 停服务发 SIGTERM，默认处理是直接退出不跑 atexit；转成 SystemExit 让采样线程把统计落盘
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
+    start_device_sampler()
     app.run(host='0.0.0.0', port=port)
