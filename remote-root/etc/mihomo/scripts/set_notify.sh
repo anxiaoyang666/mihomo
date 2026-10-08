@@ -14,7 +14,7 @@ upsert_env() {
     local key=$1
     local value=$2
     python3 - "$ENV_FILE" "$key" "$value" <<'PY'
-import pathlib, re, shlex, sys
+import os, pathlib, re, shlex, sys
 
 path = pathlib.Path(sys.argv[1])
 key = sys.argv[2]
@@ -30,21 +30,22 @@ else:
     if lines and not lines[-1].endswith("\n"):
         lines[-1] += "\n"
     lines.append(line)
-path.write_text("".join(lines), encoding="utf-8")
+# .env 里有密码：0600 临时文件 + 原子替换
+tmp = path.with_name(f".env.{os.getpid()}.tmp")
+fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+with os.fdopen(fd, "w", encoding="utf-8") as f:
+    f.write("".join(lines))
+os.replace(tmp, path)
 PY
+    chmod 600 "$ENV_FILE"
 }
 
 # 2. 保存函数
+# notify.sh 读取的是 NOTIFY_API_URL + NOTIFY_API=true（和面板设置页一致），这里必须写同样的键
 save_notify_url() {
     local url=$1
-    # 如果 .env 里已经有 NOTIFY_URL，就替换这一行
-    if grep -q "^NOTIFY_URL=" "$ENV_FILE"; then
-        # 使用 | 作为分隔符，防止 URL 里的斜杠干扰
-        upsert_env "NOTIFY_URL" "$url"
-    else
-        # 如果没有，就追加到最后
-        upsert_env "NOTIFY_URL" "$url"
-    fi
+    upsert_env "NOTIFY_API_URL" "$url"
+    upsert_env "NOTIFY_API" "true"
     # 刷新变量
     source "$ENV_FILE"
     echo "✅ 通知地址已保存！"
@@ -54,7 +55,7 @@ save_notify_url() {
 echo "==================================="
 echo "       通知接口配置"
 echo "==================================="
-echo "当前地址: ${NOTIFY_URL:-未设置}"
+echo "当前地址: ${NOTIFY_API_URL:-未设置} (开关: ${NOTIFY_API:-false})"
 echo "-----------------------------------"
 echo "1. 设置/修改 通知地址"
 echo "2. 发送测试消息"
@@ -79,7 +80,7 @@ case $choice in
         fi
         ;;
     2)
-        if [ -z "$NOTIFY_URL" ]; then
+        if [ -z "$NOTIFY_API_URL" ]; then
             echo "❌ 错误：尚未设置地址，请先选择 [1] 进行设置。"
         else
             echo "正在发送测试消息..."
@@ -89,7 +90,8 @@ case $choice in
         ;;
     3)
         # 清空逻辑
-        upsert_env "NOTIFY_URL" ""
+        upsert_env "NOTIFY_API_URL" ""
+        upsert_env "NOTIFY_API" "false"
         echo "通知地址已清空，通知功能已关闭。"
         ;;
     0)

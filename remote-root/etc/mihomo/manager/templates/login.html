@@ -92,11 +92,11 @@
         <form action="/login" method="POST">
             <div class="form-group">
                 <label>用户名</label>
-                <input type="text" name="username" placeholder="默认 admin" required>
+                <input type="text" name="username" placeholder="安装时设置的用户名" autocomplete="username" required>
             </div>
             <div class="form-group">
                 <label>密码</label>
-                <input type="password" name="password" placeholder="默认 admin" required>
+                <input type="password" name="password" placeholder="安装时设置的密码" autocomplete="current-password" required>
             </div>
             <button type="submit">登 录</button>
             {% if error %}

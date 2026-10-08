@@ -8,9 +8,13 @@ else
     exit 1
 fi
 
+MIHOMO_PATH="${MIHOMO_PATH:-/etc/mihomo}"
+SCRIPT_PATH="${SCRIPT_PATH:-/etc/mihomo/scripts}"
 SERVICE_FILE="/etc/systemd/system/mihomo.service"
+# 内核路径的唯一来源：和 mihomo.service / app.py / install_kernel.sh 一致
+CORE_BIN="/usr/bin/mihomo-core"
 
-# 2. 自动生成 Systemd 服务文件逻辑
+# 2. 自动生成 Systemd 服务文件逻辑（install.sh 已经装好了 mihomo.service，这里只是兜底）
 generate_service() {
     echo "正在生成 Systemd 服务文件..."
     cat <<EOF > $SERVICE_FILE
@@ -25,7 +29,7 @@ WorkingDirectory=${MIHOMO_PATH}
 # --- 新增：启动前强制初始化网关网络 ---
 ExecStartPre=/bin/bash ${SCRIPT_PATH}/gateway_init.sh
 # -----------------------------------
-ExecStart=${MIHOMO_PATH}/mihomo -d ${MIHOMO_PATH}
+ExecStart=${CORE_BIN} -d ${MIHOMO_PATH}
 # 稳定性核心：崩溃后 5 秒自动重启
 Restart=always
 RestartSec=5s
@@ -54,8 +58,8 @@ case "$1" in
     restart)
         if [ ! -f "$SERVICE_FILE" ]; then generate_service; fi
         # 重启前先校验配置 (假设 config.yaml 已存在)
-        if [ -f "${MIHOMO_PATH}/config.yaml" ]; then
-            ${MIHOMO_PATH}/mihomo -t -d ${MIHOMO_PATH} > /dev/null
+        if [ -f "${MIHOMO_PATH}/config.yaml" ] && [ -x "$CORE_BIN" ]; then
+            "$CORE_BIN" -t -d "${MIHOMO_PATH}" > /dev/null
             if [ $? -ne 0 ]; then
                 echo "配置校验失败，取消重启！"
                 exit 1

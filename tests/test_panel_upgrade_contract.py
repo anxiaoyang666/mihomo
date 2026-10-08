@@ -20,7 +20,7 @@ class MihomoPanelUpgradeContractTest(unittest.TestCase):
     def test_panel_upgrade_backend_contract_exists(self):
         text = app_source()
 
-        self.assertIn('PANEL_VERSION = "0.1.23"', text)
+        self.assertIn('PANEL_VERSION = "0.1.24"', text)
         self.assertIn("DEFAULT_PANEL_REPO_URL", text)
         self.assertIn("def panel_version_tuple", text)
         self.assertIn("def panel_upgrade_state", text)
@@ -53,18 +53,21 @@ class MihomoPanelUpgradeContractTest(unittest.TestCase):
         self.assertNotIn("Old version:", text)
         self.assertNotIn("New version:", text)
 
-    def test_panel_upgrade_prefers_github_proxy(self):
+    def test_panel_upgrade_prefers_direct_github_then_env_proxy(self):
         text = app_source()
 
         self.assertIn("def github_contents_app_url", text)
         self.assertIn("contents_url = github_contents_app_url", text)
         self.assertIn("parse_github_contents_text", text)
-        self.assertIn("contents_url, f\"https://gh-proxy.com/{raw_url}\", raw_url", text)
-        self.assertIn('f"https://gh-proxy.com/{raw_url}"', text)
-        self.assertIn("raw_url", text)
-        self.assertIn('download_file([f"https://gh-proxy.com/{archive_url}", archive_url]', text)
-        self.assertNotIn('read_url_text([raw_url, f"https://gh-proxy.com/{raw_url}"]', text)
-        self.assertNotIn('download_file([archive_url, f"https://gh-proxy.com/{archive_url}"]', text)
+        self.assertIn("def github_proxy_prefix", text)
+        self.assertIn("def github_candidate_urls", text)
+        self.assertIn('read_env().get("GH_PROXY", "")', text)
+        self.assertIn("read_url_text([contents_url] + github_candidate_urls(raw_url)", text)
+        self.assertIn("download_file(github_candidate_urls(archive_url), zip_path)", text)
+        # 代理不再写死，也不再排在官方源前面
+        self.assertNotIn("gh-proxy.com", text)
+        self.assertIn("DOWNLOAD_MAX_BYTES = 50 * 1024 * 1024", text)
+        self.assertIn("max_bytes=DOWNLOAD_MAX_BYTES", text)
 
     def test_panel_upgrade_ui_contract_exists(self):
         text = index_source()

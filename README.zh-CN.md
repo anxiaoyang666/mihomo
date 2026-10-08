@@ -43,7 +43,15 @@ WEB_PORT=7838 WEB_USER=admin WEB_SECRET='your-password' bash -c "$(curl -fsSL ht
 ```bash
 MIHOMO_PANEL_REPO_URL="https://github.com/anxiaoyang666/mihomo.git"
 MIHOMO_PANEL_BRANCH="main"
+# 始终先直连 GitHub，GH_PROXY 只作为失败后的回退（留空表示不用代理）
+GH_PROXY="https://gh-proxy.com/"
 ```
+
+其他可选的 `.env` 配置：
+
+- `MIHOMO_API_SECRET`：`external-controller` 的访问密钥，由 `install.sh` 生成并同时写入 `config.yaml` 和 `.env`（面板和 9090 端口的外部 Dashboard 都用它）
+- `BACKUP_KEEP_COUNT`：`config.yaml` 备份保留数量，默认 `10`
+- `ALLOW_INSECURE_TLS=true`：下载订阅 / Geo 数据时跳过 TLS 证书校验（默认关闭）
 
 面板升级会保留本地运行状态：
 

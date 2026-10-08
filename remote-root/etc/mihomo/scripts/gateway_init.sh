@@ -59,11 +59,9 @@ apply_rules() {
     # --------------------------------------
     # 确保 FORWARD 链策略是 ACCEPT (关键！)
     # 注意：我们不再暴力 Flush 所有规则，以免误伤 Docker
-    # 而是检测是否允许转发
-    iptables -C FORWARD -j ACCEPT 2>/dev/null
-    if [ $? -ne 0 ]; then
-        # 如果没有 ACCEPT 规则，或者策略不是 ACCEPT，强制插队一条
-        # (这里为了稳妥，我们直接设置默认策略，这是网关最需要的)
+    # 检查和修复必须针对同一个东西：修复设的是链的默认策略 (-P)，
+    # 所以检查也要看策略，而不是用 -C 找一条 "-j ACCEPT" 规则（那条规则从来不存在，会导致每分钟都"修复"一次）
+    if ! iptables -S FORWARD 2>/dev/null | grep -q '^-P FORWARD ACCEPT'; then
         iptables -P FORWARD ACCEPT
         log "✅ FORWARD 默认策略已设为 ACCEPT"
         changed=1

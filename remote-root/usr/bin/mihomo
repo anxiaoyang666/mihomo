@@ -18,7 +18,7 @@ upsert_env() {
     local key=$1
     local value=$2
     python3 - "$ENV_FILE" "$key" "$value" <<'PY'
-import pathlib, re, shlex, sys
+import os, pathlib, re, shlex, sys
 
 path = pathlib.Path(sys.argv[1])
 key = sys.argv[2]
@@ -34,8 +34,14 @@ else:
     if lines and not lines[-1].endswith("\n"):
         lines[-1] += "\n"
     lines.append(line)
-path.write_text("".join(lines), encoding="utf-8")
+# .env 里有密码：0600 临时文件 + 原子替换
+tmp = path.with_name(f".env.{os.getpid()}.tmp")
+fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+with os.fdopen(fd, "w", encoding="utf-8") as f:
+    f.write("".join(lines))
+os.replace(tmp, path)
 PY
+    chmod 600 "$ENV_FILE"
 }
 
 check_status() {
@@ -53,53 +59,39 @@ view_log() {
     [ -f "$LOG_FILE" ] && tail -f -n 50 "$LOG_FILE" || echo -e "${YELLOW}日志不存在${NC}"
 }
 
-# === 核心修复：自动更新到最新版 ===
+# === 更新/修复内核：下载、校验、版本比较全部交给 install_kernel.sh（唯一实现，避免两套逻辑不一致）===
 update_kernel() {
     echo "🔍 正在检查 GitHub 最新版本..."
-    
-    # 动态获取 tag
-    LATEST_VER=$(curl -s https://api.github.com/repos/MetaCubeX/mihomo/releases/latest | grep "tag_name" | cut -d '"' -f 4)
-    
-    if [ -z "$LATEST_VER" ]; then
-        echo -e "${RED}⚠️  无法连接 GitHub API，尝试使用保底版本 v1.18.1${NC}"
-        LATEST_VER="v1.18.1"
-    else
-        echo -e "${GREEN}✅ 发现最新版本: ${LATEST_VER}${NC}"
+    if [ ! -f "${SCRIPT_DIR}/install_kernel.sh" ]; then
+        echo -e "${RED}❌ 缺少 ${SCRIPT_DIR}/install_kernel.sh，请重新安装工具箱。${NC}"
+        return 1
     fi
-
-    ARCH=$(uname -m)
-    case $ARCH in
-        x86_64) URL="https://github.com/MetaCubeX/mihomo/releases/download/${LATEST_VER}/mihomo-linux-amd64-${LATEST_VER}.gz" ;;
-        aarch64) URL="https://github.com/MetaCubeX/mihomo/releases/download/${LATEST_VER}/mihomo-linux-arm64-${LATEST_VER}.gz" ;;
-        *) echo "不支持架构: $ARCH"; return ;;
-    esac
-
-    tmp_dir="$(mktemp -d)"
-    trap 'rm -rf "$tmp_dir"' RETURN
-    gz_file="$tmp_dir/mihomo.gz"
-    bin_file="$tmp_dir/mihomo"
-    
-    echo "⬇️  正在下载..."
-    wget -O "$gz_file" "$URL"
-    if [ $? -eq 0 ]; then
-        echo "🛑 停止服务..."
-        systemctl stop $SVC_CORE
-        gzip -d -f "$gz_file"
-        mv "$bin_file" "$CORE_BIN"
-        chmod +x "$CORE_BIN"
-        systemctl start $SVC_CORE
-        echo -e "${GREEN}🎉 更新成功！当前版本: $(get_version)${NC}"
+    if bash "${SCRIPT_DIR}/install_kernel.sh" auto; then
+        echo -e "${GREEN}🎉 内核已就绪，当前版本: $(get_version)${NC}"
     else
-        echo -e "${RED}❌ 下载失败，请检查网络连通性${NC}"
+        echo -e "${RED}❌ 内核更新失败，已保留当前内核 ($(get_version))。${NC}"
+        return 1
     fi
 }
 
+# 订阅链接写入的是 update_subscription.sh / 面板实际读取的键：CONFIG_MODE + SUB_URL_RAW / SUB_URL_AIRPORT
 manage_sub() {
     echo -e "\n1. 粘贴订阅链接  2. 编辑 config.yaml"
     read -p "选择: " opt
     if [ "$opt" == "1" ]; then
+        echo -e "订阅类型：\n  1. 配置托管 (链接返回完整的 mihomo config.yaml)\n  2. 节点订阅 (机场链接，套用本地模板)"
+        read -p "类型 [1/2]: " kind
         read -p "链接: " url
-        [ -n "$url" ] && upsert_env "SUB_URL" "$url" && bash "${SCRIPT_DIR}/update_subscription.sh" && systemctl restart $SVC_CORE && echo "✅ 已更新"
+        [ -n "$url" ] || { echo "链接为空，已取消。"; return; }
+        if [ "$kind" == "2" ]; then
+            upsert_env "CONFIG_MODE" "airport"
+            upsert_env "SUB_URL_AIRPORT" "$url"
+        else
+            upsert_env "CONFIG_MODE" "raw"
+            upsert_env "SUB_URL_RAW" "$url"
+        fi
+        # update_subscription.sh 自己会校验、备份并重启内核
+        bash "${SCRIPT_DIR}/update_subscription.sh" && echo "✅ 已更新"
     elif [ "$opt" == "2" ]; then
         nano /etc/mihomo/config.yaml && read -p "重启生效? (y/n): " r && [ "$r" == "y" ] && systemctl restart $SVC_CORE
     fi
@@ -111,7 +103,36 @@ show_info() {
     echo -e "地址: http://${IP}:${WEB_PORT:-7838}"
     echo -e "用户: ${WEB_USER}"
     echo -e "密码: ${WEB_SECRET}"
+    echo -e "内核控制器 (Dashboard): http://${IP}:9090/ui"
+    echo -e "控制器密钥 (MIHOMO_API_SECRET): ${MIHOMO_API_SECRET:-未设置}"
     echo -e "${BLUE}===============${NC}"
+}
+
+# 卸载：实际清理逻辑在 scripts/uninstall.sh（和 install.sh / gateway_init.sh 一一对应），这里只做菜单确认
+uninstall_toolbox() {
+    read -p "确认卸载? (y/n): " ack
+    [ "$ack" == "y" ] || return
+    read -p "同时删除 /etc/mihomo 下的配置和数据? (y/n): " purge
+    local data_flag="--keep-data"
+    [ "$purge" == "y" ] && data_flag="--purge"
+    if [ -f "${SCRIPT_DIR}/uninstall.sh" ]; then
+        bash "${SCRIPT_DIR}/uninstall.sh" -y "$data_flag"
+        exit 0
+    fi
+    # uninstall.sh 丢了也要能卸干净
+    systemctl stop mihomo mihomo-manager force-ip-forward 2>/dev/null
+    systemctl disable mihomo mihomo-manager force-ip-forward 2>/dev/null
+    rm -f /etc/systemd/system/mihomo.service /etc/systemd/system/mihomo-manager.service /etc/systemd/system/force-ip-forward.service
+    systemctl daemon-reload
+    local tmp_cron
+    tmp_cron="$(mktemp)"
+    crontab -l 2>/dev/null | grep -F -v -- "gateway_init.sh" | grep -F -v -- "MIHOMO_AUTOMATION" | grep -F -v -- "# JOB_SUB" | grep -F -v -- "# JOB_GEO" | grep -F -v -- "/etc/mihomo/scripts/" > "$tmp_cron" || true
+    if [ -s "$tmp_cron" ]; then crontab "$tmp_cron"; else crontab -r 2>/dev/null || true; fi
+    rm -f "$tmp_cron"
+    rm -f /etc/sysctl.d/99-mihomo-gateway.conf /etc/logrotate.d/mihomo /usr/bin/mihomo /usr/bin/mihomo-core /usr/bin/mihomo-core.new
+    [ "$data_flag" == "--purge" ] && rm -rf /etc/mihomo
+    echo "已卸载"
+    exit 0
 }
 
 show_menu() {
@@ -159,20 +180,12 @@ while true; do
             sleep 1 ;;
         3) manage_sub; read -n 1 -s -r -p "按键返回..." ;;
         4) view_log ;;
-        5) crontab -l | grep "mihomo"; read -n 1 -s -r -p "按键返回..." ;;
+        5) crontab -l 2>/dev/null | grep -E "mihomo|JOB_SUB|JOB_GEO|MIHOMO_AUTOMATION"; read -n 1 -s -r -p "按键返回..." ;;
         6) bash "${SCRIPT_DIR}/update_geo.sh"; read -n 1 -s -r -p "按键返回..." ;;
         7) bash "${SCRIPT_DIR}/notify.sh" "测试" "CLI消息"; read -n 1 -s -r -p "按键返回..." ;;
         8) bash "${SCRIPT_DIR}/gateway_init.sh"; read -n 1 -s -r -p "按键返回..." ;;
         9) show_info; read -n 1 -s -r -p "按键返回..." ;;
-        10) 
-            read -p "确认卸载? (y/n): " ack
-            if [ "$ack" == "y" ]; then
-                systemctl stop $SVC_MANAGER $SVC_CORE
-                systemctl disable $SVC_MANAGER $SVC_CORE
-                rm -rf /etc/mihomo /etc/mihomo-tools /usr/bin/mihomo /usr/bin/mihomo-core /etc/systemd/system/mihomo*
-                systemctl daemon-reload
-                echo "已卸载"; exit 0
-            fi ;;
+        10) uninstall_toolbox ;;
         0) exit 0 ;;
         *) echo "无效选项"; sleep 1 ;;
     esac

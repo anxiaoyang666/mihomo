@@ -2,6 +2,11 @@
 
 if [ -f "/etc/mihomo/.env" ]; then source /etc/mihomo/.env; else echo "错误：未找到 .env"; exit 1; fi
 
+MIHOMO_PATH="${MIHOMO_PATH:-/etc/mihomo}"
+SCRIPT_PATH="${SCRIPT_PATH:-/etc/mihomo/scripts}"
+ENV_FILE="/etc/mihomo/.env"
+# 内核路径的唯一来源：和 mihomo.service / app.py / install_kernel.sh 一致
+CORE_BIN="/usr/bin/mihomo-core"
 CONFIG_FILE="${MIHOMO_PATH}/config.yaml"
 BACKUP_FILE="${MIHOMO_PATH}/config.yaml.bak"
 TMP_DIR="$(mktemp -d)"
@@ -16,7 +21,7 @@ upsert_env() {
     local key=$1
     local value=$2
     python3 - "$ENV_FILE" "$key" "$value" <<'PY'
-import pathlib, re, shlex, sys
+import os, pathlib, re, shlex, sys
 
 path = pathlib.Path(sys.argv[1])
 key = sys.argv[2]
@@ -32,17 +37,27 @@ else:
     if lines and not lines[-1].endswith("\n"):
         lines[-1] += "\n"
     lines.append(line)
-path.write_text("".join(lines), encoding="utf-8")
+# .env 里有密码：0600 临时文件 + 原子替换
+tmp = path.with_name(f".env.{os.getpid()}.tmp")
+fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+with os.fdopen(fd, "w", encoding="utf-8") as f:
+    f.write("".join(lines))
+os.replace(tmp, path)
 PY
+    chmod 600 "$ENV_FILE"
 }
 
 # --- 核心：安全校验与应用 ---
 apply_config() {
     local target_file=$1
     echo "正在校验配置文件有效性..."
-    
-    ${MIHOMO_PATH}/mihomo -t -d ${MIHOMO_PATH} -f "$target_file"
-    
+
+    if [ ! -x "$CORE_BIN" ]; then
+        echo "❌ 未找到内核 ${CORE_BIN}，请先安装内核。"
+        exit 1
+    fi
+    "$CORE_BIN" -t -d "${MIHOMO_PATH}" -f "$target_file"
+
     if [ $? -eq 0 ]; then
         echo "✅ 配置校验通过！"
         if [ -f "$CONFIG_FILE" ]; then cp "$CONFIG_FILE" "$BACKUP_FILE"; fi
@@ -65,17 +80,18 @@ apply_config() {
 }
 
 # --- 保存订阅链接 ---
+# 这个脚本下载的是完整配置，对应面板/update_subscription.sh 的 "配置托管" 模式：CONFIG_MODE=raw + SUB_URL_RAW
 save_url_to_env() {
     local url=$1
-    local env_file="/etc/mihomo/.env"
-    ENV_FILE="$env_file" upsert_env "SUB_URL" "$url"
+    upsert_env "CONFIG_MODE" "raw"
+    upsert_env "SUB_URL_RAW" "$url"
     echo "✅ 订阅链接已保存。"
 }
 
 # --- 下载逻辑 ---
 update_from_url() {
     local url=$1
-    if [ -z "$url" ]; then url=$SUB_URL; fi
+    if [ -z "$url" ]; then url=$SUB_URL_RAW; fi
     
     if [ -z "$url" ]; then
         echo "未检测到订阅链接。"
@@ -87,7 +103,7 @@ update_from_url() {
     fi
     
     echo "正在下载: $url"
-    curl -L -o "$TEMP_FILE" "$url"
+    curl -fL --max-time 60 -o "$TEMP_FILE" "$url"
     if [ $? -ne 0 ]; then
         echo "❌ 下载失败。"
         # --- 埋点：下载失败通知 ---

@@ -17,9 +17,25 @@ trap cleanup EXIT
 
 # 1. 加载环境变量
 if [ -f "$ENV_FILE" ]; then source "$ENV_FILE"; fi
+BACKUP_KEEP_COUNT="${BACKUP_KEEP_COUNT:-10}"
+
+# TLS 默认严格校验；只有 .env 里显式写 ALLOW_INSECURE_TLS=true 才跳过证书检查
+WGET_OPTS=(--timeout=30 --tries=2)
+if [ "$ALLOW_INSECURE_TLS" == "true" ]; then
+    WGET_OPTS+=(--no-check-certificate)
+fi
 
 mkdir -p "$BACKUP_DIR"
 mkdir -p "${MIHOMO_DIR}/providers"
+
+# 只保留最新的 BACKUP_KEEP_COUNT 份备份（和面板 app.py 的 prune_config_backups 同一套文件名模式）
+prune_backups() {
+    local keep="$BACKUP_KEEP_COUNT"
+    [[ "$keep" =~ ^[0-9]+$ ]] && [ "$keep" -ge 1 ] || keep=10
+    ls -1t "$BACKUP_DIR"/config_*.yaml "$BACKUP_DIR"/config.before-rule-sync.*.yaml 2>/dev/null \
+        | tail -n +$((keep + 1)) \
+        | while read -r old; do rm -f "$old"; done
+}
 
 # ==========================================
 # 第一阶段：生成基础配置 (Raw 或 Airport)
@@ -32,8 +48,8 @@ if [ "$CONFIG_MODE" == "raw" ]; then
         exit 0
     fi
     echo "⬇️  [配置托管] 正在下载完整配置..."
-    wget --no-check-certificate -O "$TEMP_NEW" "$SUB_URL_RAW" >/dev/null 2>&1
-    
+    wget "${WGET_OPTS[@]}" -O "$TEMP_NEW" "$SUB_URL_RAW" >/dev/null 2>&1
+
     if [ $? -ne 0 ] || [ ! -s "$TEMP_NEW" ]; then
         echo "❌ 下载失败。"
         bash "$NOTIFY_SCRIPT" "❌ 更新失败" "无法下载托管配置。"
@@ -52,12 +68,13 @@ else
     fi
     echo "🔨 [节点订阅] 正在构建配置文件..."
     export SUB_URL_AIRPORT
-    
-    python3 -c "
+
+    # 路径走 argv，不拼进 Python 源码
+    python3 - "$TEMPLATE_FILE" "$TEMP_NEW" <<'PY'
 import sys, yaml, os
-template_path = '$TEMPLATE_FILE'
-output_path = '$TEMP_NEW'
-urls_raw = os.environ.get('SUB_URL_AIRPORT', '').replace('|', '\n').replace('\\\\n', '\\n')
+template_path = sys.argv[1]
+output_path = sys.argv[2]
+urls_raw = os.environ.get('SUB_URL_AIRPORT', '').replace('|', '\n').replace('\\n', '\n')
 
 def load_yaml(path):
     if not os.path.exists(path): return {}
@@ -88,7 +105,7 @@ try:
 except Exception as e:
     print(f'Error: {e}')
     sys.exit(1)
-"
+PY
     if [ $? -ne 0 ]; then
         echo "❌ 生成配置失败。"
         bash "$NOTIFY_SCRIPT" "❌ 生成失败" "YAML 处理错误。"
@@ -105,11 +122,11 @@ fi
 if [ -n "$LOCAL_CIDR" ]; then
     echo "🛡️ 检测到防回环设置 ($LOCAL_CIDR)，正在注入规则..."
     export LOCAL_CIDR
-    
-    python3 -c "
+
+    python3 - "$TEMP_NEW" <<'PY'
 import sys, yaml, os
 
-config_path = '$TEMP_NEW'
+config_path = sys.argv[1]
 local_cidr = os.environ.get('LOCAL_CIDR', '').strip()
 
 try:
@@ -148,8 +165,49 @@ except Exception as e:
     print(f'⚠️ 防回环注入失败: {e}')
     # 注意：这里我们不退出 exit 1，因为即使注入失败，主体配置可能还是能用的，
     # 但建议在日志里看到警告。
-"
+PY
 fi
+
+# ==========================================
+# 第二阶段 B：保留控制器密钥
+# ==========================================
+
+# 新配置从模板/订阅重新生成，external-controller 的 secret 会变回空。
+# 面板用 .env 的 MIHOMO_API_SECRET 访问控制器（app.py mihomo_controller_settings），所以以它为准；
+# .env 没有时退回旧 config.yaml 里的 secret。两边都没有就不动（保持无密钥状态，由安装脚本负责生成）。
+export MIHOMO_API_SECRET
+python3 - "$CONFIG_FILE" "$TEMP_NEW" <<'PY'
+import os, re, sys, yaml
+
+old_path, new_path = sys.argv[1], sys.argv[2]
+
+def read_secret_from_file(path):
+    if not os.path.exists(path):
+        return ""
+    with open(path, 'r', encoding='utf-8') as f:
+        for line in f:
+            match = re.match(r'^\s*secret\s*:\s*(.*?)\s*$', line)
+            if match:
+                return match.group(1).strip().strip('"').strip("'")
+    return ""
+
+secret = os.environ.get('MIHOMO_API_SECRET', '').strip() or read_secret_from_file(old_path)
+if not secret:
+    sys.exit(0)
+try:
+    with open(new_path, 'r', encoding='utf-8') as f:
+        config = yaml.safe_load(f) or {}
+    if not isinstance(config, dict):
+        sys.exit(0)
+    if config.get('secret') == secret:
+        sys.exit(0)
+    config['secret'] = secret
+    with open(new_path, 'w', encoding='utf-8') as f:
+        yaml.dump(config, f, allow_unicode=True, sort_keys=False)
+    print('✅ 已保留控制器密钥 (secret)。')
+except Exception as e:
+    print(f'⚠️ 控制器密钥保留失败: {e}')
+PY
 
 # ==========================================
 # 第三阶段：保留面板里的同步规则
@@ -207,6 +265,7 @@ fi
 if [ "$FILE_CHANGED" -eq 1 ]; then
     BACKUP_FILE="${BACKUP_DIR}/config_$(date +%Y%m%d%H%M%S).yaml"
     [ -f "$CONFIG_FILE" ] && cp "$CONFIG_FILE" "$BACKUP_FILE"
+    prune_backups
     mv "$TEMP_NEW" "$CONFIG_FILE"
     systemctl restart mihomo
     sleep 3

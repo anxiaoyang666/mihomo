@@ -46,9 +46,11 @@ class MihomoSecurityHardeningContractTest(unittest.TestCase):
                 self.assertIn("mktemp", text)
                 self.assertIn("trap", text)
 
+        # CLI 不再自己下载内核，统一交给 install_kernel.sh（那里有 mktemp/trap/校验）
         cli_text = source(CLI)
-        self.assertIn("mktemp", cli_text)
-        self.assertIn("trap", cli_text)
+        self.assertIn('bash "${SCRIPT_DIR}/install_kernel.sh" auto', cli_text)
+        self.assertNotIn("wget -O", cli_text)
+        self.assertNotIn("v1.18.1", cli_text)
 
 
 if __name__ == "__main__":

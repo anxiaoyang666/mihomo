@@ -15,13 +15,19 @@ trap cleanup EXIT
 
 if [ -f "$ENV_FILE" ]; then source "$ENV_FILE"; fi
 
+# TLS 默认严格校验；只有 .env 里显式写 ALLOW_INSECURE_TLS=true 才跳过证书检查
+WGET_OPTS=(--timeout=30 --tries=2)
+if [ "$ALLOW_INSECURE_TLS" == "true" ]; then
+    WGET_OPTS+=(--no-check-certificate)
+fi
+
 echo "⬇️  开始更新 Geo 数据库..."
 
 GEOIP_URL="https://github.com/MetaCubeX/meta-rules-dat/releases/download/latest/geoip.dat"
 GEOSITE_URL="https://github.com/MetaCubeX/meta-rules-dat/releases/download/latest/geosite.dat"
 
 # GeoIP
-wget --no-check-certificate -O "$GEOIP_TMP" "$GEOIP_URL" >/dev/null 2>&1
+wget "${WGET_OPTS[@]}" -O "$GEOIP_TMP" "$GEOIP_URL" >/dev/null 2>&1
 if [ $? -eq 0 ] && [ -s "$GEOIP_TMP" ]; then
     mv "$GEOIP_TMP" "${GEO_DIR}/geoip.dat"
     echo "✅ GeoIP 更新成功"
@@ -30,7 +36,7 @@ else
 fi
 
 # GeoSite
-wget --no-check-certificate -O "$GEOSITE_TMP" "$GEOSITE_URL" >/dev/null 2>&1
+wget "${WGET_OPTS[@]}" -O "$GEOSITE_TMP" "$GEOSITE_URL" >/dev/null 2>&1
 if [ $? -eq 0 ] && [ -s "$GEOSITE_TMP" ]; then
     mv "$GEOSITE_TMP" "${GEO_DIR}/geosite.dat"
     echo "✅ GeoSite 更新成功"

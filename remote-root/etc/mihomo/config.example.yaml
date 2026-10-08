@@ -29,6 +29,9 @@ profile:
   store-selected: true
   store-fake-ip: true
 
+# 控制器对局域网开放，供 Zashboard 等外部 Dashboard 直连；secret 留空只是占位：
+# install.sh 会生成随机密钥写入 config.yaml 和 .env (MIHOMO_API_SECRET)，
+# update_subscription.sh 重新生成配置时会把这个密钥回填进来。
 external-controller: 0.0.0.0:9090
 secret: ""
 external-ui: ui

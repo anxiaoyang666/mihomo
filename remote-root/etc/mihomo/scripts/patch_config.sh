@@ -22,10 +22,11 @@ if [ -z "$PHYSICAL_IFACE" ]; then
 fi
 export PHYSICAL_IFACE="${PHYSICAL_IFACE}"
 
-python3 -c "
+# 路径走 argv，不拼进 Python 源码
+python3 - "$TARGET_FILE" <<'PY'
 import sys, yaml, os
 
-config_path = '$TARGET_FILE'
+config_path = sys.argv[1]
 tun_enabled = os.environ.get('TUN_ENABLED', 'true').lower() == 'true'
 dns_hijack_enabled = os.environ.get('DNS_HIJACK_ENABLED', 'true').lower() == 'true'
 local_cidr = os.environ.get('LOCAL_CIDR', '').strip()
@@ -98,4 +99,4 @@ try:
 except Exception as e:
     print(f'❌ 补丁应用失败: {e}')
     sys.exit(1)
-"
+PY

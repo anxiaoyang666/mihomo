@@ -7,6 +7,7 @@ else
     exit 1
 fi
 
+SCRIPT_PATH="${SCRIPT_PATH:-/etc/mihomo/scripts}"
 JOB_ID="# MIHOMO_AUTOMATION"
 TMP_DIR="$(mktemp -d)"
 TMP_CRON="${TMP_DIR}/crontab"
@@ -71,19 +72,25 @@ case $choice in
         add_cron "$t_geo" "${SCRIPT_PATH}/update_geo.sh" "Geo数据库更新"
         ;;
     3)
-        # 检查是否已保存订阅链接
-        if [ -z "$SUB_URL" ]; then
+        # 检查是否已保存订阅链接（.env 里的键是 SUB_URL_RAW / SUB_URL_AIRPORT，由 CONFIG_MODE 决定用哪个）
+        if [ "$CONFIG_MODE" == "raw" ]; then
+            CURRENT_SUB="$SUB_URL_RAW"
+        else
+            CURRENT_SUB="$SUB_URL_AIRPORT"
+        fi
+        if [ -z "$CURRENT_SUB" ]; then
             echo -e "\n⚠️  错误：系统中未找到已保存的订阅链接！"
-            echo "请先去 [菜单 3] -> [手动输入 URL] 并选择 '保存链接'。"
+            echo "请先去 [菜单 3] -> [粘贴订阅链接]，或在 Web 面板的订阅页保存链接。"
             exit 1
         fi
-        
-        echo "当前订阅链接: $SUB_URL"
+
+        echo "当前模式: ${CONFIG_MODE:-airport}"
+        echo "当前订阅链接: $CURRENT_SUB"
         read -p "请输入更新时间 (Cron格式，默认 0 5 * * * 即凌晨5点): " t_sub
         if [ -z "$t_sub" ]; then t_sub="0 5 * * *"; fi
-        
-        # 这里的命令不需要带 URL 参数，因为 manage_config.sh 会自动读取 .env 里的 SUB_URL
-        add_cron "$t_sub" "${SCRIPT_PATH}/manage_config.sh update" "订阅自动更新"
+
+        # update_subscription.sh 自己读 .env 里的 CONFIG_MODE / SUB_URL_*，不需要带参数
+        add_cron "$t_sub" "${SCRIPT_PATH}/update_subscription.sh" "订阅自动更新"
         ;;
     4)
         remove_cron

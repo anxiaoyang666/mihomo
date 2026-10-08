@@ -862,9 +862,12 @@
         </div>
 
         <div class="sidebar-foot">
-            <a href="/logout" class="nav-link text-danger border border-danger">
-                <i class="bi bi-box-arrow-left"></i> 退出登录
-            </a>
+            <!-- 退出登录只接受 POST，避免被跨站链接/预加载误触发 -->
+            <form method="POST" action="/logout" class="m-0">
+                <button type="submit" class="nav-link text-danger border border-danger bg-transparent">
+                    <i class="bi bi-box-arrow-left"></i> 退出登录
+                </button>
+            </form>
         </div>
     </aside>
 
@@ -1479,7 +1482,9 @@
 
     function loadLogs() {
         api('/logs').then(res => {
-            const rawLogs = res.logs || "";
+            // api() 失败时返回 {success:false}，没有 logs 字段就保持当前显示
+            if (!res || typeof res.logs !== 'string') return;
+            const rawLogs = res.logs;
             if (rawLogs === latestRawLogs) return;
             latestRawLogs = rawLogs;
             renderLogs(rawLogs);
@@ -1655,15 +1660,35 @@
         updateScheduleHint(kind, label);
     }
 
+    // 所有 /api 请求都带 X-Requested-With，后端对写操作强制校验这个头（CSRF 防护）。
+    // 这个函数永远返回一个对象，调用方可以放心读 res.success / res.message。
     async function api(path, data) {
-        const opts = data ? { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(data) } : {};
+        const headers = { 'X-Requested-With': 'XMLHttpRequest' };
+        const opts = data
+            ? { method: 'POST', headers: { ...headers, 'Content-Type': 'application/json' }, body: JSON.stringify(data) }
+            : { headers };
         try {
             const resp = await fetch('/api' + path, opts);
             if (resp.status === 401) {
                 window.location.href = '/login';
-                return;
+                return { success: false, message: '登录已失效，请重新登录。' };
             }
-            return resp.json();
+            let body = null;
+            try {
+                body = await resp.json();
+            } catch (parseError) {
+                body = null;
+            }
+            if (!resp.ok) {
+                const message = (body && (body.message || body.error)) || `服务端返回 HTTP ${resp.status}`;
+                showToast('请求失败：' + message, 'error');
+                return { success: false, message };
+            }
+            if (!body || typeof body !== 'object') {
+                showToast('请求失败：服务端返回了无法解析的数据', 'error');
+                return { success: false, message: '服务端返回了无法解析的数据' };
+            }
+            return body;
         } catch (error) {
             showToast('请求失败：' + error.message, 'error');
             return { success: false, message: error.message };
@@ -1864,13 +1889,13 @@
         crypto.getRandomValues(bytes);
         const token = Array.from(bytes, value => chars[value % chars.length]).join('');
         document.getElementById('syncToken').value = token;
-        showToast('已生成随机密钥', '保存同步设置后生效。', 'info');
+        showToast('已生成随机密钥，保存同步设置后生效。', 'info');
     }
 
     async function copySyncToken() {
         const token = (document.getElementById('syncToken')?.value || '').trim();
         if (!token) {
-            showToast('没有可复制的密钥', '请先生成或填写同步密钥。', 'warning');
+            showToast('没有可复制的密钥，请先生成或填写同步密钥。', 'warning');
             return;
         }
         try {
@@ -1879,7 +1904,7 @@
             document.getElementById('syncToken').select();
             document.execCommand('copy');
         }
-        showToast('已复制同步密钥', '可以粘贴到其他 mosctl / mihomo 面板。', 'success');
+        showToast('已复制同步密钥，可以粘贴到其他 mosctl / mihomo 面板。', 'success');
     }
 
     function renderSyncTestResults(results) {

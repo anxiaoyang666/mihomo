@@ -4,6 +4,7 @@ from datetime import timedelta
 from collections import deque
 import subprocess
 import base64
+import logging
 import os
 import re
 import secrets
@@ -12,6 +13,7 @@ import glob
 import json
 import shutil
 import tempfile
+import threading
 import time
 import zipfile
 from urllib import request as urlrequest
@@ -24,7 +26,7 @@ CONFIG_FILE = f"{MIHOMO_DIR}/config.yaml"
 LOG_FILE = "/var/log/mihomo.log"
 BACKUP_DIR = f"{MIHOMO_DIR}/backup"
 MANAGER_DIR = f"{MIHOMO_DIR}/manager"
-PANEL_VERSION = "0.1.23"
+PANEL_VERSION = "0.1.24"
 DEFAULT_PANEL_REPO_URL = "https://github.com/anxiaoyang666/mihomo.git"
 DEFAULT_PANEL_BRANCH = "main"
 PANEL_BACKUP_KEEP_COUNT = 3
@@ -35,9 +37,31 @@ RULE_SYNC_BEGIN = "# MOSCTL_MIHOMO_RULE_SYNC_BEGIN"
 RULE_SYNC_END = "# MOSCTL_MIHOMO_RULE_SYNC_END"
 FAKE_IP_FILTER_BEGIN = "# MOSCTL_MIHOMO_FAKE_IP_FILTER_BEGIN"
 FAKE_IP_FILTER_END = "# MOSCTL_MIHOMO_FAKE_IP_FILTER_END"
+# 日志只读文件尾部，避免把几百 MB 的日志整个读进内存
+LOG_TAIL_BYTES = 256 * 1024
+# 面板升级包的下载上限，防止异常源把磁盘写满
+DOWNLOAD_MAX_BYTES = 50 * 1024 * 1024
+# config.yaml 备份默认保留数量，.env 的 BACKUP_KEEP_COUNT 可覆盖
+DEFAULT_BACKUP_KEEP_COUNT = 10
+# 登录失败限流：同一 IP 连续失败 5 次后锁定 60 秒
+LOGIN_MAX_FAILURES = 5
+LOGIN_LOCKOUT_SECONDS = 60
+BUSY_MESSAGE = "另一个操作正在进行中，请稍后再试。"
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+log = logging.getLogger("mihomo-manager")
 
 app = Flask(__name__)
 app.permanent_session_lifetime = timedelta(days=365)
+# Cookie 只走同站请求且脚本不可读；请求体限制 1 MiB，/api/rule-sync 等接口不需要更大
+app.config.update(
+    SESSION_COOKIE_SAMESITE="Lax",
+    SESSION_COOKIE_HTTPONLY=True,
+    MAX_CONTENT_LENGTH=1 * 1024 * 1024,
+)
+
+# 配置写入 + 重启串行化。RLock 允许同一请求里外层路由和内层 update_mihomo_sync_block 先后加锁。
+CONFIG_LOCK = threading.RLock()
 
 def run_args(args, timeout=30):
     try:
@@ -53,10 +77,21 @@ def is_service_active(service):
     except Exception:
         return False
 
-def read_recent_log_lines(path, limit=100):
+def read_recent_log_lines(path, limit=100, tail_bytes=LOG_TAIL_BYTES):
+    """只读文件末尾 tail_bytes 字节再取最后 limit 行，日志再大也不会整个读进内存。"""
     try:
-        with open(path, "r", encoding="utf-8", errors="replace") as f:
-            return "".join(deque(f, maxlen=limit))
+        with open(path, "rb") as f:
+            f.seek(0, os.SEEK_END)
+            size = f.tell()
+            start = max(0, size - tail_bytes)
+            f.seek(start)
+            chunk = f.read()
+        text = chunk.decode("utf-8", errors="replace")
+        lines = text.splitlines(True)
+        # 从文件中间开始读时第一行多半是半截的，丢掉
+        if start > 0 and lines:
+            lines = lines[1:]
+        return "".join(deque(lines, maxlen=limit))
     except Exception as e:
         return str(e)
 
@@ -112,49 +147,122 @@ def env_line(key, value):
     return f'{key}={env_value_for_shell(value)}\n'
 
 def write_env(updates):
+    """.env 里有密码和各类密钥：先写 0600 的临时文件，再原子替换，不留半截文件也不留宽权限。"""
     lines = []
     if os.path.exists(ENV_FILE):
         with open(ENV_FILE, 'r', encoding='utf-8') as f:
             lines = f.readlines()
-    with open(ENV_FILE, 'w', encoding='utf-8') as f:
-        keys = set()
-        for line in lines:
-            parsed = parse_env_line(line)
-            if parsed:
-                k = parsed[0]
-                if k in updates:
-                    f.write(env_line(k, updates[k]))
-                    keys.add(k)
-                else:
-                    f.write(line)
-            else:
-                f.write(line)
-        for k, v in updates.items():
-            if k not in keys:
-                f.write(env_line(k, v))
+    out = []
+    keys = set()
+    for line in lines:
+        parsed = parse_env_line(line)
+        if parsed and parsed[0] in updates:
+            out.append(env_line(parsed[0], updates[parsed[0]]))
+            keys.add(parsed[0])
+        else:
+            out.append(line)
+    if out and not out[-1].endswith("\n"):
+        out[-1] += "\n"
+    for k, v in updates.items():
+        if k not in keys:
+            out.append(env_line(k, v))
+
+    env_dir = os.path.dirname(ENV_FILE)
+    os.makedirs(env_dir, exist_ok=True)
+    tmp_path = os.path.join(env_dir, f".env.{os.getpid()}.{secrets.token_hex(4)}.tmp")
+    fd = os.open(tmp_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        with os.fdopen(fd, 'w', encoding='utf-8') as f:
+            f.write("".join(out))
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_path, ENV_FILE)
+    except Exception:
+        try:
+            os.remove(tmp_path)
+        except OSError:
+            pass
+        raise
+    try:
+        os.chmod(ENV_FILE, 0o600)
+    except OSError:
+        pass
+
+def rotate_session_secret():
+    """换掉 Flask 签名密钥，所有已签发的会话立即失效。"""
+    secret = secrets.token_urlsafe(48)
+    write_env({"WEB_SESSION_SECRET": secret})
+    app.secret_key = secret
+    return secret
 
 def ensure_session_secret():
     env = read_env()
     secret = os.environ.get('WEB_SESSION_SECRET') or env.get('WEB_SESSION_SECRET')
     if not secret or secret == "mihomo-manager-secret":
-        secret = secrets.token_urlsafe(48)
-        write_env({"WEB_SESSION_SECRET": secret})
+        secret = rotate_session_secret()
     app.secret_key = secret
 
 ensure_session_secret()
 
-def check_creds(username, password):
+def web_credentials():
     env = read_env()
-    valid_user = os.environ.get('WEB_USER') or env.get('WEB_USER', 'admin')
-    valid_pass = os.environ.get('WEB_SECRET') or env.get('WEB_SECRET', 'admin')
-    return username == valid_user and password == valid_pass
+    user = os.environ.get('WEB_USER') or env.get('WEB_USER') or ''
+    password = os.environ.get('WEB_SECRET') or env.get('WEB_SECRET') or ''
+    return user, password
+
+def check_creds(username, password):
+    # 没有配置账号就拒绝登录，绝不退回 admin/admin 这种默认口令
+    valid_user, valid_pass = web_credentials()
+    if not valid_user or not valid_pass:
+        log.error("登录被拒绝：%s 缺少 WEB_USER / WEB_SECRET，请先在 .env 里配置账号。", ENV_FILE)
+        return False
+    username = str(username or "")
+    password = str(password or "")
+    return secrets.compare_digest(username.encode(), valid_user.encode()) and secrets.compare_digest(password.encode(), valid_pass.encode())
+
+LOGIN_FAILURES = {}
+LOGIN_FAILURES_LOCK = threading.Lock()
+
+def client_ip():
+    return (request.remote_addr or "unknown").strip()
+
+def login_locked(ip):
+    """返回该 IP 还要等多少秒才能再试，0 表示没锁。"""
+    now = time.time()
+    with LOGIN_FAILURES_LOCK:
+        entry = LOGIN_FAILURES.get(ip)
+        if not entry:
+            return 0
+        failures, lock_until = entry
+        if lock_until > now:
+            return int(lock_until - now) + 1
+        if failures >= LOGIN_MAX_FAILURES:
+            LOGIN_FAILURES.pop(ip, None)
+        return 0
+
+def record_login_failure(ip):
+    now = time.time()
+    with LOGIN_FAILURES_LOCK:
+        # 顺手清掉早已过期的记录，避免字典无限增长
+        for key in [k for k, (_, until) in LOGIN_FAILURES.items() if until and until < now - LOGIN_LOCKOUT_SECONDS]:
+            LOGIN_FAILURES.pop(key, None)
+        failures, _ = LOGIN_FAILURES.get(ip, (0, 0))
+        failures += 1
+        lock_until = now + LOGIN_LOCKOUT_SECONDS if failures >= LOGIN_MAX_FAILURES else 0
+        LOGIN_FAILURES[ip] = (failures, lock_until)
+        return failures
+
+def clear_login_failures(ip):
+    with LOGIN_FAILURES_LOCK:
+        LOGIN_FAILURES.pop(ip, None)
 
 def is_valid_web_username(value):
     return bool(re.fullmatch(r"[A-Za-z0-9_.-]{3,32}", str(value or "")))
 
 def update_cron(job_id, schedule, command, enabled):
+    """返回 (ok, message)。写 crontab 失败要让调用方知道，不能静默吞掉。"""
     try:
-        res = subprocess.run(["crontab", "-l"], capture_output=True, text=True)
+        res = subprocess.run(["crontab", "-l"], capture_output=True, text=True, timeout=15)
         current_cron = res.stdout.strip().split('\n') if res.stdout else []
         new_cron = []
         for line in current_cron:
@@ -163,8 +271,15 @@ def update_cron(job_id, schedule, command, enabled):
         if enabled:
             new_cron.append(f"{schedule} {command} {job_id}")
         cron_str = "\n".join(new_cron) + "\n"
-        subprocess.run(["crontab", "-"], input=cron_str, capture_output=True, text=True)
-    except: pass
+        result = subprocess.run(["crontab", "-"], input=cron_str, capture_output=True, text=True, timeout=15)
+        if result.returncode != 0:
+            detail = (result.stderr or result.stdout or "").strip()
+            log.error("写入 crontab 失败 (%s): %s", job_id, detail)
+            return False, f"写入定时任务失败 ({job_id.strip('# ')}): {detail or 'crontab 返回非零'}"
+        return True, ""
+    except Exception as e:
+        log.error("写入 crontab 异常 (%s): %s", job_id, e)
+        return False, f"写入定时任务失败 ({job_id.strip('# ')}): {e}"
 
 def parse_daily_time(value, default_hour, default_minute=0):
     match = re.match(r'^(\d{2}):(\d{2})$', str(value or ''))
@@ -209,8 +324,44 @@ def validate_config(path):
     checker = "/usr/bin/mihomo-core"
     if not os.path.exists(checker):
         return True, "未找到 mihomo-core，已跳过配置校验。"
-    result = subprocess.run([checker, "-t", "-d", MIHOMO_DIR, "-f", path], capture_output=True, text=True, timeout=30)
+    try:
+        result = subprocess.run([checker, "-t", "-d", MIHOMO_DIR, "-f", path], capture_output=True, text=True, timeout=30)
+    except subprocess.TimeoutExpired:
+        return False, "配置校验超时（30 秒），请检查配置里的远程资源是否可达。"
+    except Exception as e:
+        return False, f"配置校验无法执行：{e}"
     return result.returncode == 0, result.stdout + result.stderr
+
+def backup_keep_count():
+    try:
+        count = int(read_env().get("BACKUP_KEEP_COUNT", DEFAULT_BACKUP_KEEP_COUNT))
+    except (TypeError, ValueError):
+        count = DEFAULT_BACKUP_KEEP_COUNT
+    return max(1, count)
+
+def prune_config_backups(keep=None):
+    """只保留最新的 keep 份 config 备份（面板和 update_subscription.sh 共用同一批文件名模式）。"""
+    keep = backup_keep_count() if keep is None else keep
+    patterns = (f"{BACKUP_DIR}/config_*.yaml", f"{BACKUP_DIR}/config.before-rule-sync.*.yaml")
+    backups = [path for pattern in patterns for path in glob.glob(pattern) if os.path.isfile(path)]
+    backups.sort(key=lambda path: os.path.getmtime(path), reverse=True)
+    for path in backups[keep:]:
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+
+def write_tmp_config(text, suffix):
+    """把候选配置写到 MIHOMO_DIR 下的随机临时文件（mihomo -t 需要和 config.yaml 同目录才能解析相对路径）。"""
+    with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=MIHOMO_DIR, prefix="config.yaml.", suffix=suffix, delete=False) as f:
+        f.write(text)
+        return f.name
+
+def remove_quietly(path):
+    try:
+        os.remove(path)
+    except OSError:
+        pass
 
 def is_true(val):
     return str(val).lower() == 'true'
@@ -283,6 +434,7 @@ def write_config_text(text):
     if os.path.exists(CONFIG_FILE):
         os.makedirs(BACKUP_DIR, exist_ok=True)
         shutil.copy2(CONFIG_FILE, f"{BACKUP_DIR}/config.before-rule-sync.{time.strftime('%Y%m%d%H%M%S')}.yaml")
+        prune_config_backups()
     with open(CONFIG_FILE, "w", encoding="utf-8") as f:
         f.write(text)
 
@@ -451,20 +603,21 @@ def reapply_sync_blocks(source_path, target_path):
 
 
 def update_mihomo_sync_block(rule_contents):
-    new_text = render_sync_blocks(read_config_text(), rule_contents)
-    tmp_file = f"{CONFIG_FILE}.rulesync"
-    with open(tmp_file, "w", encoding="utf-8") as f:
-        f.write(new_text)
-    ok, message = validate_config(tmp_file)
-    if not ok:
+    if not CONFIG_LOCK.acquire(blocking=False):
+        return False, BUSY_MESSAGE
+    try:
+        new_text = render_sync_blocks(read_config_text(), rule_contents)
+        tmp_file = write_tmp_config(new_text, ".rulesync")
         try:
-            os.remove(tmp_file)
-        except OSError:
-            pass
-        return False, "规则写入后配置校验失败，已取消保存：\n" + message
-    os.remove(tmp_file)
-    write_config_text(new_text)
-    return True, "规则已写入 mihomo 配置"
+            ok, message = validate_config(tmp_file)
+        finally:
+            remove_quietly(tmp_file)
+        if not ok:
+            return False, "规则写入后配置校验失败，已取消保存：\n" + message
+        write_config_text(new_text)
+        return True, "规则已写入 mihomo 配置"
+    finally:
+        CONFIG_LOCK.release()
 
 def save_rule_content(rule_id, content):
     if rule_id not in SYNCABLE_RULE_IDS:
@@ -525,24 +678,29 @@ def broadcast_rule(rule_id, content):
 def apply_synced_rules(rules):
     if not isinstance(rules, dict):
         return False, "同步内容不合法"
-    current = read_mihomo_sync_rules()
-    applied = []
-    for rule_id, content in rules.items():
-        if rule_id not in SYNCABLE_RULE_IDS:
-            continue
-        if not is_safe_text(content):
-            return False, "规则内容不合法或过大"
-        current[rule_id] = "\n".join(normalize_rule_domains(content))
-        if current[rule_id]:
-            current[rule_id] += "\n"
-        applied.append(rule_id)
-    if not applied:
-        return False, "没有可同步的规则"
-    ok, message = update_mihomo_sync_block(current)
-    if not ok:
-        return False, message
-    schedule_mihomo_restart()
-    return True, "已同步规则：" + ", ".join(applied) + "，mihomo 将在后台重启"
+    if not CONFIG_LOCK.acquire(blocking=False):
+        return False, BUSY_MESSAGE
+    try:
+        current = read_mihomo_sync_rules()
+        applied = []
+        for rule_id, content in rules.items():
+            if rule_id not in SYNCABLE_RULE_IDS:
+                continue
+            if not is_safe_text(content):
+                return False, "规则内容不合法或过大"
+            current[rule_id] = "\n".join(normalize_rule_domains(content))
+            if current[rule_id]:
+                current[rule_id] += "\n"
+            applied.append(rule_id)
+        if not applied:
+            return False, "没有可同步的规则"
+        ok, message = update_mihomo_sync_block(current)
+        if not ok:
+            return False, message
+        schedule_mihomo_restart()
+        return True, "已同步规则：" + ", ".join(applied) + "，mihomo 将在后台重启"
+    finally:
+        CONFIG_LOCK.release()
 
 def test_sync_peers(data):
     peers = parse_peers(data.get("peers_text") or data.get("peers") or "")
@@ -640,8 +798,7 @@ def log_level_summary():
     if not os.path.exists(LOG_FILE):
         return levels
     try:
-        with open(LOG_FILE, "r", encoding="utf-8", errors="replace") as f:
-            lines = f.readlines()[-200:]
+        lines = read_recent_log_lines(LOG_FILE, 200).splitlines()
         for line in lines:
             match = re.search(r"level=([a-zA-Z]+)", line)
             if not match:
@@ -741,27 +898,61 @@ def parse_github_contents_text(text):
     payload = str(data.get("content") or "").replace("\n", "")
     return base64.b64decode(payload).decode("utf-8", "replace")
 
-def read_url_text(urls, timeout=15):
+def github_proxy_prefix():
+    """GitHub 代理前缀来自 .env 的 GH_PROXY，留空表示不用代理。只接受 http(s) 前缀。"""
+    prefix = str(read_env().get("GH_PROXY", "") or "").strip()
+    if not prefix:
+        return ""
+    if not prefix.startswith(("http://", "https://")):
+        return ""
+    return prefix if prefix.endswith("/") else prefix + "/"
+
+def github_candidate_urls(url):
+    """先直连 GitHub，失败再退到 GH_PROXY。代理是第三方，绝不能排在官方源前面。"""
+    if not url:
+        return []
+    prefix = github_proxy_prefix()
+    urls = [url]
+    if prefix and url.startswith(("https://github.com/", "https://raw.githubusercontent.com/")):
+        urls.append(prefix + url)
+    return urls
+
+def read_url_text(urls, timeout=15, max_bytes=DOWNLOAD_MAX_BYTES):
     last_error = ""
     for url in urls:
         try:
             req = urlrequest.Request(url, headers={"User-Agent": "mihomo-web-manager"})
             with urlrequest.urlopen(req, timeout=timeout) as resp:
-                return True, resp.read().decode("utf-8", "replace"), url
+                data = resp.read(max_bytes + 1)
+            if len(data) > max_bytes:
+                raise ValueError(f"响应超过 {max_bytes // (1024 * 1024)} MB 上限")
+            return True, data.decode("utf-8", "replace"), url
         except Exception as e:
             last_error = str(e)
     return False, last_error, ""
 
-def download_file(urls, output, timeout=30):
+def download_file(urls, output, timeout=30, max_bytes=DOWNLOAD_MAX_BYTES):
     last_error = ""
     for url in urls:
         try:
             req = urlrequest.Request(url, headers={"User-Agent": "mihomo-web-manager"})
             with urlrequest.urlopen(req, timeout=timeout) as resp, open(output, "wb") as f:
-                shutil.copyfileobj(resp, f)
+                declared = resp.headers.get("Content-Length")
+                if declared and declared.isdigit() and int(declared) > max_bytes:
+                    raise ValueError(f"文件大小 {int(declared) // (1024 * 1024)} MB 超过 {max_bytes // (1024 * 1024)} MB 上限")
+                written = 0
+                while True:
+                    chunk = resp.read(64 * 1024)
+                    if not chunk:
+                        break
+                    written += len(chunk)
+                    if written > max_bytes:
+                        raise ValueError(f"下载超过 {max_bytes // (1024 * 1024)} MB 上限，已中止")
+                    f.write(chunk)
             return True, url
         except Exception as e:
             last_error = str(e)
+            remove_quietly(output)
     return False, last_error
 
 def safe_extract_zip(archive, destination):
@@ -788,7 +979,8 @@ def remote_panel_version(settings=None):
     contents_url = github_contents_app_url(settings["repo_url"], settings["branch"])
     if not raw_url or not contents_url:
         return {"success": False, "latest_version": "", "source": "", "message": "当前只支持 GitHub 仓库地址。"}
-    ok, text, source = read_url_text([contents_url, f"https://gh-proxy.com/{raw_url}", raw_url], timeout=15)
+    # 顺序：GitHub API -> raw 直连 -> GH_PROXY 代理（仅当 .env 配置了 GH_PROXY）
+    ok, text, source = read_url_text([contents_url] + github_candidate_urls(raw_url), timeout=15)
     if ok:
         if source == contents_url:
             text = parse_github_contents_text(text)
@@ -826,6 +1018,7 @@ def panel_managed_targets():
         ("/etc/systemd/system/mihomo.service", "etc/systemd/system/mihomo.service", "file", 0o644),
         ("/etc/systemd/system/mihomo-manager.service", "etc/systemd/system/mihomo-manager.service", "file", 0o644),
         ("/etc/systemd/system/force-ip-forward.service", "etc/systemd/system/force-ip-forward.service", "file", 0o644),
+        ("/etc/logrotate.d/mihomo", "etc/logrotate.d/mihomo", "file", 0o644),
     ]
 
 def download_panel_source(tmpdir):
@@ -834,7 +1027,7 @@ def download_panel_source(tmpdir):
     if not archive_url:
         return False, "当前只支持 GitHub 仓库地址。", None, settings
     zip_path = os.path.join(tmpdir, "mihomo-panel.zip")
-    ok, source = download_file([f"https://gh-proxy.com/{archive_url}", archive_url], zip_path)
+    ok, source = download_file(github_candidate_urls(archive_url), zip_path)
     if not ok:
         return False, "下载升级包失败：\n" + source, None, settings
     try:
@@ -965,29 +1158,47 @@ def upgrade_panel():
         f"备份位置：{backup_root}"
     ), True
 
+def json_body():
+    """只接受 JSON 对象；数组/字符串/解析失败一律当空字典，调用方不用再逐个 isinstance。"""
+    data = request.get_json(silent=True)
+    return data if isinstance(data, dict) else {}
+
+def is_xhr_request():
+    return request.headers.get("X-Requested-With", "") == "XMLHttpRequest"
+
 def login_required(f):
     @wraps(f)
     def decorated(*args, **kwargs):
         if not session.get('logged_in'):
             if request.path.startswith('/api'): return jsonify({"error": "Unauthorized"}), 401
             return redirect('/login')
+        # 写操作必须带自定义头：浏览器跨站表单/简单请求加不了这个头，配合 SameSite=Lax 挡住 CSRF
+        if request.path.startswith('/api') and request.method not in ("GET", "HEAD", "OPTIONS") and not is_xhr_request():
+            return jsonify({"success": False, "message": "缺少 X-Requested-With 请求头"}), 403
         return f(*args, **kwargs)
     return decorated
 
 @app.route('/login', methods=['GET', 'POST'])
 def login():
     if request.method == 'POST':
+        ip = client_ip()
+        wait = login_locked(ip)
+        if wait > 0:
+            return render_template('login.html', error=f"登录失败次数过多，请 {wait} 秒后再试"), 429
         if check_creds(request.form.get('username'), request.form.get('password')):
+            clear_login_failures(ip)
             session['logged_in'] = True
             session.permanent = True
             return redirect('/')
-        return render_template('login.html', error="用户名或密码错误")
-    
+        failures = record_login_failure(ip)
+        log.warning("登录失败 ip=%s 连续失败 %d 次", ip, failures)
+        return render_template('login.html', error="用户名或密码错误"), 401
+
     if session.get('logged_in'):
         return redirect('/')
     return render_template('login.html')
 
-@app.route('/logout')
+@app.route('/logout', methods=['POST'])
 def logout():
     session.pop('logged_in', None)
     return redirect('/login')
@@ -1019,10 +1230,7 @@ def api_panel_upgrade_source():
 @app.route('/api/control', methods=['POST'])
 @login_required
 def control_service():
-    action = request.json.get('action')
-    if action == 'upgrade_panel':
-        ok, message, should_reload = upgrade_panel()
-        return jsonify({"success": ok, "message": message, "reload_after": 5 if should_reload else 0})
+    action = json_body().get('action')
     control_actions = {
         'start': ['systemctl', 'start', 'mihomo'],
         'stop': ['systemctl', 'stop', 'mihomo'],
@@ -1033,10 +1241,19 @@ def control_service():
         'net_init': ['bash', f'{SCRIPT_DIR}/gateway_init.sh'],
         'test_notify': ['bash', f'{SCRIPT_DIR}/notify.sh', '测试', 'Web端测试消息']
     }
-    if action in control_actions:
+    if action != 'upgrade_panel' and action not in control_actions:
+        return jsonify({"success": False, "message": "未知指令"})
+    # 升级面板 / 更新订阅 / 重启内核都会动配置或服务，和规则写入互斥
+    if not CONFIG_LOCK.acquire(blocking=False):
+        return jsonify({"success": False, "message": BUSY_MESSAGE})
+    try:
+        if action == 'upgrade_panel':
+            ok, message, should_reload = upgrade_panel()
+            return jsonify({"success": ok, "message": message, "reload_after": 5 if should_reload else 0})
         s, m = run_args(control_actions[action], timeout=180)
         return jsonify({"success": s, "message": m})
-    return jsonify({"success": False, "message": "未知指令"})
+    finally:
+        CONFIG_LOCK.release()
 
 @app.route('/api/config', methods=['GET', 'POST'])
 @login_required
@@ -1051,20 +1268,30 @@ def handle_config():
                 pass
         return jsonify({"content": c})
     if request.method == 'POST':
+        content = json_body().get('content') or ''
+        if not isinstance(content, str):
+            return jsonify({"success": False, "message": "配置内容必须是文本"}), 400
+        if not CONFIG_LOCK.acquire(blocking=False):
+            return jsonify({"success": False, "message": BUSY_MESSAGE})
+        tmp_file = None
         try:
-            content = request.json.get('content') or ''
-            tmp_file = f"{CONFIG_FILE}.webcheck"
-            with open(tmp_file, 'w', encoding='utf-8') as f:
-                f.write(content)
+            tmp_file = write_tmp_config(content, ".webcheck")
             ok, message = validate_config(tmp_file)
             if not ok:
-                try: os.remove(tmp_file)
-                except: pass
                 return jsonify({"success": False, "message": "配置校验失败，未保存：\n" + message})
+            if os.path.exists(CONFIG_FILE):
+                os.makedirs(BACKUP_DIR, exist_ok=True)
+                shutil.copy2(CONFIG_FILE, f"{BACKUP_DIR}/config_{time.strftime('%Y%m%d%H%M%S')}.yaml")
+                prune_config_backups()
             os.replace(tmp_file, CONFIG_FILE)
+            tmp_file = None
             return jsonify({"success": True, "message": "配置已保存"})
         except Exception as e:
             return jsonify({"success": False, "message": str(e)})
+        finally:
+            if tmp_file:
+                remove_quietly(tmp_file)
+            CONFIG_LOCK.release()
 
 @app.route('/api/logs')
 @login_required
@@ -1076,9 +1303,10 @@ def get_logs():
 @app.route('/api/account', methods=['POST'])
 @login_required
 def update_account_credentials():
-    data = request.json or {}
-    env = read_env()
-    valid_pass = os.environ.get('WEB_SECRET') or env.get('WEB_SECRET', 'admin')
+    data = json_body()
+    _, valid_pass = web_credentials()
+    if not valid_pass:
+        return jsonify({"success": False, "message": "服务端未配置 WEB_SECRET，请先在 .env 里设置账号。"})
     current_password = str(data.get('current_password') or '')
     new_user = str(data.get('web_user') or '').strip()
     new_password = str(data.get('web_secret') or '')
@@ -1101,6 +1329,8 @@ def update_account_credentials():
     os.environ["WEB_USER"] = new_user
     if "WEB_SECRET" in updates:
         os.environ["WEB_SECRET"] = updates["WEB_SECRET"]
+    # 换签名密钥让其他浏览器里的会话全部失效，不然旧会话改完密码还能继续用
+    rotate_session_secret()
     session.clear()
     return jsonify({"success": True, "message": "账号已更新，请使用新凭据重新登录。", "reload_after": 1})
 
@@ -1109,24 +1339,32 @@ def update_account_credentials():
 def api_rule_sync_settings():
     if request.method == "GET":
         return jsonify(read_sync_settings())
-    ok, message = write_sync_settings(request.json or {})
+    ok, message = write_sync_settings(json_body())
     return jsonify({"success": ok, "message": message, **read_sync_settings()})
 
 @app.route("/api/rule-sync-test", methods=["POST"])
 @login_required
 def api_rule_sync_test():
-    ok, message, results = test_sync_peers(request.json or {})
+    ok, message, results = test_sync_peers(json_body())
     return jsonify({"success": ok, "message": message, "results": results})
+
+def sync_token_matches(provided, expected):
+    if not expected or not provided:
+        return False
+    return secrets.compare_digest(str(provided).encode("utf-8"), str(expected).encode("utf-8"))
 
 @app.route("/api/rule-sync", methods=["POST"])
 def api_rule_sync():
-    env = read_env()
-    expected = env.get("RULE_SYNC_TOKEN", "")
-    provided = request.headers.get("X-Mosdns-Sync-Token", "")
-    data = request.json or {}
-    if not provided:
-        provided = str(data.get("token") or "")
-    if not expected or not secrets.compare_digest(provided, expected):
+    # 这个接口不走登录态，只认同步密钥。请求头里有密钥就先比对，不合法的请求连 JSON 都不解析。
+    expected = read_env().get("RULE_SYNC_TOKEN", "")
+    header_token = request.headers.get("X-Mosdns-Sync-Token", "")
+    if header_token and not sync_token_matches(header_token, expected):
+        return jsonify({"success": False, "message": "同步密钥错误"}), 403
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify({"success": False, "message": "请求体必须是 JSON 对象"}), 400
+    provided = header_token or str(data.get("token") or "")
+    if not sync_token_matches(provided, expected):
         return jsonify({"success": False, "message": "同步密钥错误"}), 403
     ok, message = apply_synced_rules(data.get("rules"))
     return jsonify({"success": ok, "message": message})
@@ -1152,11 +1390,16 @@ def api_rules(rule_id):
                 "content": read_mihomo_sync_rules().get(rule_id, ""),
             }
         )
-    content = (request.json or {}).get("content", "")
-    saved, save_message = save_rule_content(rule_id, content)
-    if not saved:
-        return jsonify({"success": False, "message": save_message})
-    ok, message = restart_mihomo()
+    content = json_body().get("content", "")
+    if not CONFIG_LOCK.acquire(blocking=False):
+        return jsonify({"success": False, "message": BUSY_MESSAGE})
+    try:
+        saved, save_message = save_rule_content(rule_id, content)
+        if not saved:
+            return jsonify({"success": False, "message": save_message})
+        ok, message = restart_mihomo()
+    finally:
+        CONFIG_LOCK.release()
     if ok:
         sync_message = broadcast_rule(rule_id, content)
         if sync_message:
@@ -1178,7 +1421,7 @@ def handle_settings():
         geo_schedule = cron_to_mode(e.get('CRON_GEO_SCHED', '0 4 * * *'), '04:00')
         
         return jsonify({
-            "web_user": os.environ.get('WEB_USER') or e.get('WEB_USER', 'admin'),
+            "web_user": os.environ.get('WEB_USER') or e.get('WEB_USER', ''),
             "web_port": e.get('WEB_PORT', '7838'),
             
             "config_mode": e.get('CONFIG_MODE', 'airport'),
@@ -1204,9 +1447,9 @@ def handle_settings():
         })
 
     if request.method == 'POST':
-        d = request.json
+        d = json_body()
         mode = d.get('config_mode', 'airport')
-        
+
         raw_airport = d.get('sub_url_airport', '')
         if isinstance(raw_airport, list):
             raw_airport = "\n".join(raw_airport)
@@ -1243,10 +1486,17 @@ def handle_settings():
         }
         
         write_env(updates)
-        
-        update_cron("# JOB_SUB", updates['CRON_SUB_SCHED'], f"bash {SCRIPT_DIR}/update_subscription.sh >/dev/null 2>&1", updates['CRON_SUB_ENABLED'] == 'true')
-        update_cron("# JOB_GEO", updates['CRON_GEO_SCHED'], f"bash {SCRIPT_DIR}/update_geo.sh >/dev/null 2>&1", updates['CRON_GEO_ENABLED'] == 'true')
-        
+
+        cron_errors = []
+        for ok, message in (
+            update_cron("# JOB_SUB", updates['CRON_SUB_SCHED'], f"bash {SCRIPT_DIR}/update_subscription.sh >/dev/null 2>&1", updates['CRON_SUB_ENABLED'] == 'true'),
+            update_cron("# JOB_GEO", updates['CRON_GEO_SCHED'], f"bash {SCRIPT_DIR}/update_geo.sh >/dev/null 2>&1", updates['CRON_GEO_ENABLED'] == 'true'),
+        ):
+            if not ok:
+                cron_errors.append(message)
+        if cron_errors:
+            return jsonify({"success": False, "message": "设置已写入 .env，但定时任务更新失败：\n" + "\n".join(cron_errors)})
+
         return jsonify({"success": True, "message": "配置已成功保存！"})
 
 if __name__ == '__main__':

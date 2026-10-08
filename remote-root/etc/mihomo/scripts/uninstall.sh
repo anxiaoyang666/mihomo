@@ -2,6 +2,11 @@
 
 # ==========================================
 # Mihomo 一键卸载脚本 (完整版)
+# 完整回退 install.sh 和 gateway_init.sh 留下的所有东西。
+# 用法: uninstall.sh [-y] [--purge | --keep-data]
+#   -y          跳过第一次确认（CLI 菜单已经确认过时使用）
+#   --purge     不询问，直接删除 /etc/mihomo 数据目录
+#   --keep-data 不询问，保留 /etc/mihomo
 # ==========================================
 
 # 颜色
@@ -17,53 +22,87 @@ cleanup() {
 }
 trap cleanup EXIT
 
-echo -e "${RED}⚠️  警告：即将执行卸载操作！${NC}"
-echo "此操作将执行以下清理："
-echo "1. 停止并删除系统服务 (Mihomo Core + Web Manager)"
-echo "2. 删除程序文件、管理脚本及 Python 虚拟环境"
-echo "3. 清理所有相关的 Crontab 自动任务 (保活/更新)"
+ASSUME_YES=0
+DATA_MODE="ask"
+for arg in "$@"; do
+    case "$arg" in
+        -y|--yes) ASSUME_YES=1 ;;
+        --purge) DATA_MODE="purge" ;;
+        --keep-data) DATA_MODE="keep" ;;
+    esac
+done
 
-read -p "确认卸载吗？(y/n): " confirm
-if [[ "$confirm" != "y" ]]; then
-    echo "已取消。"
-    exit 0
+if [ "$ASSUME_YES" -ne 1 ]; then
+    echo -e "${RED}⚠️  警告：即将执行卸载操作！${NC}"
+    echo "此操作将执行以下清理："
+    echo "1. 停止并删除系统服务 (mihomo / mihomo-manager / force-ip-forward)"
+    echo "2. 删除 /usr/bin/mihomo、/usr/bin/mihomo-core 和日志轮转配置"
+    echo "3. 清理所有相关的 Crontab 自动任务 (保活/更新/看门狗)"
+    echo "4. 删除网关初始化写入的 sysctl 转发配置"
+
+    read -p "确认卸载吗？(y/n): " confirm
+    if [[ "$confirm" != "y" ]]; then
+        echo "已取消。"
+        exit 0
+    fi
 fi
 
 echo "--------------------------------"
 
 # 1. 停止并禁用服务
-echo -e "${YELLOW}[1/4] 停止系统服务...${NC}"
-# 同时停止主服务和管理端服务
-systemctl stop mihomo mihomo-manager 2>/dev/null
-systemctl disable mihomo mihomo-manager 2>/dev/null
+echo -e "${YELLOW}[1/5] 停止系统服务...${NC}"
+systemctl stop mihomo mihomo-manager force-ip-forward 2>/dev/null
+systemctl disable mihomo mihomo-manager force-ip-forward 2>/dev/null
 
 # 删除服务文件
 rm -f /etc/systemd/system/mihomo.service
 rm -f /etc/systemd/system/mihomo-manager.service
+rm -f /etc/systemd/system/force-ip-forward.service
 systemctl daemon-reload
+systemctl reset-failed mihomo mihomo-manager force-ip-forward 2>/dev/null
 echo "✅ 服务已移除。"
 
-# 2. 清理 Crontab 任务 (核心新增)
-echo -e "${YELLOW}[2/4] 清理自动化任务...${NC}"
-# 逻辑：列出当前任务 -> 过滤掉含 gateway_init 的(保活任务) -> 过滤掉含 MIHOMO_AUTOMATION 的(更新任务) -> 写回
-crontab -l 2>/dev/null | grep -F -v -- "gateway_init.sh" | grep -F -v -- "MIHOMO_AUTOMATION" > "$TMP_CRON" || true
-crontab "$TMP_CRON"
+# 2. 清理 Crontab 任务
+echo -e "${YELLOW}[2/5] 清理自动化任务...${NC}"
+# 本项目写入 crontab 的几种标记：
+#   gateway_init.sh check   -> gateway_init.sh 的保活任务
+#   # MIHOMO_AUTOMATION     -> cron_manager.sh 添加的任务
+#   # JOB_SUB / # JOB_GEO   -> 面板 app.py update_cron 添加的任务
+#   /etc/mihomo/scripts/    -> 兜底，凡是调用本项目脚本的行都清掉
+crontab -l 2>/dev/null \
+    | grep -F -v -- "gateway_init.sh" \
+    | grep -F -v -- "MIHOMO_AUTOMATION" \
+    | grep -F -v -- "# JOB_SUB" \
+    | grep -F -v -- "# JOB_GEO" \
+    | grep -F -v -- "/etc/mihomo/scripts/" > "$TMP_CRON" || true
+if [ -s "$TMP_CRON" ]; then
+    crontab "$TMP_CRON"
+else
+    crontab -r 2>/dev/null || true
+fi
 echo "✅ Crontab 任务已清理。"
 
-# 3. 删除文件
-echo -e "${YELLOW}[3/4] 删除程序文件...${NC}"
-rm -f /usr/bin/mihomo-cli
-# 这里会连带删除 venv 目录，因为它在 tools 里面
-rm -rf /etc/mihomo-tools
-echo "✅ 脚本、虚拟环境及 CLI 工具已删除。"
+# 3. 删除网关初始化写入的系统配置
+echo -e "${YELLOW}[3/5] 清理网关系统配置...${NC}"
+rm -f /etc/sysctl.d/99-mihomo-gateway.conf
+rm -f /etc/logrotate.d/mihomo
+echo "✅ sysctl / logrotate 配置已删除。"
 
-# 4. 询问是否删除数据
-echo -e "${YELLOW}[4/4] 数据清理选项${NC}"
-echo -e "${YELLOW}❓ 是否同时删除配置文件和数据？(/etc/mihomo)${NC}"
-echo -e "${RED}注意：删除后，你的订阅、节点、Geo数据库将全部丢失！${NC}"
-read -p "输入 'del' 确认删除数据，直接回车保留: " del_data
+# 4. 删除程序文件
+echo -e "${YELLOW}[4/5] 删除程序文件...${NC}"
+rm -f /usr/bin/mihomo /usr/bin/mihomo-core /usr/bin/mihomo-core.new
+echo "✅ CLI 工具和内核已删除。"
 
-if [[ "$del_data" == "del" ]]; then
+# 5. 询问是否删除数据
+echo -e "${YELLOW}[5/5] 数据清理选项${NC}"
+if [ "$DATA_MODE" == "ask" ]; then
+    echo -e "${YELLOW}❓ 是否同时删除配置文件和数据？(/etc/mihomo)${NC}"
+    echo -e "${RED}注意：删除后，你的订阅、节点、Geo数据库将全部丢失！${NC}"
+    read -p "输入 'del' 确认删除数据，直接回车保留: " del_data
+    if [[ "$del_data" == "del" ]]; then DATA_MODE="purge"; else DATA_MODE="keep"; fi
+fi
+
+if [[ "$DATA_MODE" == "purge" ]]; then
     echo "正在清除所有数据..."
     rm -rf /etc/mihomo
     echo "✅ 数据目录已清除。"
