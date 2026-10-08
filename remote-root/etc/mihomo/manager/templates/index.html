@@ -796,6 +796,30 @@
         .device-kv li { display: flex; justify-content: space-between; gap: 8px; }
         .device-kv li span:first-child { min-width: 0; overflow-wrap: anywhere; }
         .device-kv li span:last-child { color: var(--text-muted); white-space: nowrap; }
+        /* 爱快数据源 */
+        .device-source { margin: -6px 0 10px; font-size: 12px; color: var(--text-muted); }
+        .device-source strong { color: var(--text-main, inherit); font-weight: 600; }
+        .ikuai-card { margin-bottom: 14px; }
+        .ikuai-card > summary { cursor: pointer; display: flex; align-items: center; gap: 8px; font-weight: 700; font-size: 14px; list-style: none; }
+        .ikuai-card > summary::-webkit-details-marker { display: none; }
+        .ikuai-card > summary::before { content: '\25B8'; color: var(--text-muted); transition: transform .15s; }
+        .ikuai-card[open] > summary::before { transform: rotate(90deg); }
+        .ikuai-form { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 12px; margin-top: 12px; }
+        .ikuai-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+        .ikuai-hint, .ikuai-status { margin-top: 10px; font-size: 12px; color: var(--text-muted); line-height: 1.6; }
+        .ikuai-status.error { color: var(--danger); }
+        .device-household { margin-bottom: 14px; }
+        .device-household .device-stats { margin-top: 10px; }
+        .device-name-sub { display: block; margin-top: 2px; color: var(--text-muted); font-size: 11px; font-weight: 500; font-family: SFMono-Regular, Menlo, Consolas, monospace; overflow-wrap: anywhere; }
+        .device-tag.role { background: rgba(85,214,139,.14); color: var(--accent); }
+        .device-tag.wifi { background: rgba(110,216,232,.12); color: var(--accent-2); }
+        .device-proxy-line { margin-top: 8px; font-size: 12px; color: var(--accent-2); overflow-wrap: anywhere; }
+        .device-apps { display: grid; gap: 6px; margin-top: 6px; font-size: 12px; }
+        .device-app { display: grid; grid-template-columns: minmax(80px, 1fr) minmax(0, 2fr) auto; gap: 8px; align-items: center; }
+        .device-app-name { min-width: 0; overflow-wrap: anywhere; }
+        .device-app-bar { height: 6px; border-radius: 3px; background: rgba(168,173,180,.16); overflow: hidden; }
+        .device-app-bar span { display: block; height: 100%; background: var(--accent-2); border-radius: 3px; }
+        .device-app-value { color: var(--text-muted); white-space: nowrap; }
 
         @media (max-width: 1100px) {
             .control-strip,
@@ -807,7 +831,8 @@
         @media (max-width: 768px) {
             .devices-strip,
             .device-main,
-            .device-details-grid { grid-template-columns: 1fr; }
+            .device-details-grid,
+            .ikuai-form { grid-template-columns: 1fr; }
             .device-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
         }
 
@@ -1063,7 +1088,30 @@
                     </div>
                 </div>
 
-                <p class="device-explainer">这里只统计经过本网关的连接。设备直连国内站点、或路由器做了 NAT 再转发的流量，分别不会出现或会合并显示在上级路由名下。同网段通过 ARP 看到但没有流量经过网关的设备以灰色列出。只覆盖网关直连的网段。</p>
+                <div class="device-source" id="deviceDataSource">数据来源：--</div>
+
+                <details class="panel ikuai-card" id="ikuaiCard">
+                    <summary>爱快数据源 <span class="small-pill device-tag muted" id="ikuaiCardBadge">未配置</span></summary>
+                    <div class="ikuai-hint">配置后设备列表以爱快的终端为准（名称、MAC、实时速率、今日 / 累计流量），mihomo 只补充代理明细。在爱快「系统设置」里申请 API Token（建议只读）。面板只读取终端列表、DHCP 绑定和应用统计，不会修改路由器配置。</div>
+                    <div class="ikuai-form">
+                        <div>
+                            <label class="form-label fw-bold" for="ikuaiUrl">爱快地址</label>
+                            <input class="form-control" id="ikuaiUrl" placeholder="https://<上级路由 IP>" autocomplete="off" spellcheck="false">
+                        </div>
+                        <div>
+                            <label class="form-label fw-bold" for="ikuaiToken">API Token <span class="small-pill device-tag role" id="ikuaiTokenBadge" style="display:none">已设置</span></label>
+                            <input class="form-control" id="ikuaiToken" type="password" placeholder="留空则保持不变" autocomplete="new-password" spellcheck="false">
+                        </div>
+                    </div>
+                    <div class="ikuai-actions">
+                        <button class="soft-button" type="button" onclick="testIkuai(this)"><i class="bi bi-plug"></i> 测试连接</button>
+                        <button class="action-button primary" type="button" onclick="saveIkuai(this)"><i class="bi bi-save"></i> 保存</button>
+                        <button class="soft-button" type="button" onclick="clearIkuaiToken(this)"><i class="bi bi-x-circle"></i> 清除 Token</button>
+                    </div>
+                    <div class="ikuai-status" id="ikuaiStatus">--</div>
+                </details>
+
+                <p class="device-explainer" id="deviceExplainer">这里只统计经过本网关的连接。设备直连国内站点、或路由器做了 NAT 再转发的流量，分别不会出现或会合并显示在上级路由名下。同网段通过 ARP 看到但没有流量经过网关的设备以灰色列出。只覆盖网关直连的网段。</p>
 
                 <div class="control-strip devices-strip">
                     <div class="metric-card">
@@ -1088,16 +1136,19 @@
                     </div>
                 </div>
 
+                <div class="panel device-household" id="deviceHousehold" style="display:none"></div>
+
                 <div class="panel">
                     <div class="panel-title-row">
                         <div>
                             <h2 class="panel-title">设备列表</h2>
-                            <div class="text-muted small mt-1">按连接来源 IP 聚合，90 秒内有连接算在线；时间按浏览器时区显示</div>
+                            <div class="text-muted small mt-1" id="deviceListHint">按连接来源 IP 聚合，90 秒内有连接算在线；时间按浏览器时区显示</div>
                         </div>
                         <select class="form-select device-sort" id="deviceSort" onchange="renderDevices()" aria-label="设备排序">
                             <option value="default">在线 › 速率 › 最近活动</option>
                             <option value="rate">实时速率</option>
                             <option value="total">累计流量</option>
+                            <option value="today">今日流量</option>
                             <option value="last_seen">最近活动</option>
                             <option value="ip">IP 地址</option>
                         </select>
@@ -1594,6 +1645,13 @@
     let latestDevicesPayload = null;
     const deviceDetailsOpen = new Set();   // 展开状态按 IP 记，刷新后保持
     const deviceDirtyNotes = new Set();    // 备注改了还没保存的 IP，刷新时不重绘这一行
+    const deviceAppsCache = new Map();     // IP -> {at, apps, error}，爱快应用统计在浏览器里缓存 30 秒
+    const deviceAppsLoading = new Set();
+    const DEVICE_APPS_CACHE_MS = 30000;
+    let householdDetailsOpen = false;
+    let ikuaiSettingsLoaded = false;
+    let ikuaiSavedUrl = null;
+    let ikuaiUrlPrefilled = false;
 
     function formatBytesText(value) {
         const parts = formatBytes(value);
@@ -1624,7 +1682,9 @@
             total: (a, b) => total(b) - total(a) || byLastSeen(a, b),
             last_seen: byLastSeen,
             ip: (a, b) => String(a.ip).localeCompare(String(b.ip), undefined, { numeric: true }),
-            default: (a, b) => Number(b.online) - Number(a.online) || rate(b) - rate(a) || byLastSeen(a, b)
+            today: (a, b) => (b.today_total || 0) - (a.today_total || 0) || rate(b) - rate(a),
+            // 在线优先 › 当前总速率 › 今日流量（mihomo 行没有 today_total，按 0 算）› 最近活动
+            default: (a, b) => Number(b.online) - Number(a.online) || rate(b) - rate(a) || (b.today_total || 0) - (a.today_total || 0) || byLastSeen(a, b)
         };
         const sorter = sorters[mode] || sorters.default;
         // 只在 ARP 里、没流量的设备不管按什么排都放最后
@@ -1652,7 +1712,122 @@
         return tags.join('');
     }
 
+    const DEVICE_ROLE_TEXT = { proxy_gateway: '代理网关', router: '路由器' };
+
+    function ikuaiDeviceTags(device) {
+        const tags = [];
+        if (DEVICE_ROLE_TEXT[device.role]) tags.push(`<span class="small-pill device-tag role">${DEVICE_ROLE_TEXT[device.role]}</span>`);
+        const kind = [device.vendor, device.model || device.type].filter(Boolean).join(' · ');
+        if (kind) tags.push(`<span class="small-pill device-tag muted" title="厂商 / 类型">${escapeHtml(kind)}</span>`);
+        if (device.wireless && (device.wireless.ssid || device.wireless.signal)) {
+            const signal = device.wireless.signal ? ` · ${device.wireless.signal} dBm` : '';
+            tags.push(`<span class="small-pill device-tag wifi" title="无线">${escapeHtml((device.wireless.ssid || 'Wi-Fi') + signal)}</span>`);
+        }
+        if (device.proxy) tags.push('<span class="small-pill device-tag inbound" title="这台设备用自己的 IP 直连 mihomo">直连代理</span>');
+        return tags.join('');
+    }
+
+    function renderDeviceApps(ip) {
+        const cached = deviceAppsCache.get(ip);
+        if (deviceAppsLoading.has(ip) && !cached) return '<div class="text-muted">加载中…</div>';
+        if (!cached) return '<div class="text-muted">展开后从爱快读取</div>';
+        if (cached.error) return `<div class="text-muted">${escapeHtml(cached.error)}</div>`;
+        const apps = cached.apps || [];
+        if (!apps.length) return '<div class="text-muted">爱快暂无这台设备的应用统计</div>';
+        const max = Math.max(...apps.map(app => app.total || 0), 1);
+        return apps.map(app => `
+            <div class="device-app" title="↑ ${formatBytesText(app.total_up)} · ↓ ${formatBytesText(app.total_down)} · ${app.connections || 0} 个连接">
+                <span class="device-app-name">${escapeHtml(app.appname)}</span>
+                <span class="device-app-bar"><span style="width:${Math.max(2, Math.round((app.total || 0) / max * 100))}%"></span></span>
+                <span class="device-app-value">${formatBytesText(app.total)}${(app.rate_up || app.rate_down) ? ` · ↓ ${formatRate(app.rate_down)}` : ''}</span>
+            </div>`).join('');
+    }
+
+    function proxyLists(proxy) {
+        const domains = (proxy.top_domains || []).map(item => `<li><span>${escapeHtml(item.host)}</span><span>${formatBytesText(item.bytes)} · ${item.count || 0} 次</span></li>`).join('')
+            || '<li><span>暂无域名记录</span><span></span></li>';
+        const chains = (proxy.chains || []).map(item => `<li><span>${escapeHtml(item.label)}</span><span>${formatBytesText(item.bytes)}</span></li>`).join('')
+            || '<li><span>暂无出口记录</span><span></span></li>';
+        return `<div><div class="device-sub-title">代理访问最多的域名（按流量）</div><ul class="device-kv">${domains}</ul></div>
+                <div><div class="device-sub-title">出口链路</div><ul class="device-kv">${chains}</ul></div>`;
+    }
+
+    // 爱快模式的设备行：名字来自 面板备注 → 爱快备注 → DHCP 标签 → 终端名 → 主机名
+    function renderIkuaiRowInner(device, now) {
+        const online = Boolean(device.online);
+        const meta = [online ? (device.since ? `在线 · 上线于 ${device.since}` : '在线') : (device.offline_at ? `离线 · 下线于 ${formatAgo(device.offline_at, now)}` : '离线')];
+        if (online) meta.push(`${device.connections || 0} 个连接`);
+        const sub = [device.ip, device.mac].filter(Boolean).join(' · ');
+        const proxy = device.proxy;
+        const proxyLine = proxy
+            ? `<div class="device-proxy-line">经 mihomo 代理：↓ ${formatRate(proxy.rate_down)} · ↑ ${formatRate(proxy.rate_up)} · 累计 ↓ ${formatBytesText(proxy.download)} ↑ ${formatBytesText(proxy.upload)} · ${proxy.active_connections || 0} 个连接</div>`
+            : '';
+        return `
+            <div class="device-main">
+                <div class="device-identity">
+                    <span class="state-dot ${online ? 'running' : 'stopped'}" title="${online ? '在线' : '离线'}"></span>
+                    <div class="min-w-0">
+                        <strong class="device-ip">${escapeHtml(device.name || device.ip)}${ikuaiDeviceTags(device)}</strong>
+                        <span class="device-name-sub">${escapeHtml(sub)}</span>
+                        <span class="device-meta">${escapeHtml(meta.join(' · '))}</span>
+                    </div>
+                </div>
+                <div class="device-note"><input class="form-control device-note-input" placeholder="备注（优先作为名称）" maxlength="80" value="${escapeHtml(device.note || '')}" data-original="${escapeHtml(device.note || '')}" aria-label="设备备注"></div>
+                <div class="device-stats">
+                    <div><span>↓ 实时</span><strong>${formatRate(device.rate_down)}</strong></div>
+                    <div><span>↑ 实时</span><strong>${formatRate(device.rate_up)}</strong></div>
+                    <div><span>今日</span><strong>${formatBytesText(device.today_total)}</strong></div>
+                    <div><span>累计 ↓/↑</span><strong title="↓ ${formatBytesText(device.total_down)} · ↑ ${formatBytesText(device.total_up)}">${formatBytesText((device.total_down || 0) + (device.total_up || 0))}</strong></div>
+                </div>
+            </div>
+            ${proxyLine}
+            <details class="device-details" data-apps-ip="${escapeHtml(device.ip)}"${deviceDetailsOpen.has(device.ip) ? ' open' : ''}>
+                <summary>应用流量（爱快）${proxy ? ' · 代理域名与出口' : ''}</summary>
+                <div class="device-details-grid">
+                    <div><div class="device-sub-title">应用流量 Top 8（按累计）</div><div class="device-apps">${renderDeviceApps(device.ip)}</div></div>
+                    ${proxy ? proxyLists(proxy) : ''}
+                </div>
+            </details>`;
+    }
+
+    // 展开时才向爱快要应用统计；同一 IP 30 秒内不重复请求
+    async function loadDeviceApps(ip) {
+        const cached = deviceAppsCache.get(ip);
+        if (deviceAppsLoading.has(ip) || (cached && Date.now() - cached.at < DEVICE_APPS_CACHE_MS)) return;
+        deviceAppsLoading.add(ip);
+        deviceAppsCache.delete(ip);
+        refreshDeviceAppsView(ip);
+        let entry;
+        try {
+            // 不走 api()：没有 MAC 的设备会 404，这里只在展开区里提示，不弹全局错误
+            const resp = await fetch(`/api/devices/${encodeURIComponent(ip)}/apps`, { headers: { 'X-Requested-With': 'XMLHttpRequest' } });
+            if (resp.status === 401) {
+                window.location.href = '/login';
+                return;
+            }
+            const body = await resp.json().catch(() => null);
+            entry = body && body.success
+                ? { at: Date.now(), apps: body.apps || [] }
+                : { at: Date.now(), error: (body && body.message) || `读取失败（HTTP ${resp.status}）` };
+        } catch (error) {
+            entry = { at: Date.now(), error: '读取失败：' + error.message };
+        } finally {
+            deviceAppsLoading.delete(ip);
+        }
+        deviceAppsCache.set(ip, entry);
+        refreshDeviceAppsView(ip);
+    }
+
+    function refreshDeviceAppsView(ip) {
+        document.querySelectorAll('#deviceList .device-row').forEach(row => {
+            if (row.dataset.ip !== ip) return;
+            const box = row.querySelector('.device-apps');
+            if (box) box.innerHTML = renderDeviceApps(ip);
+        });
+    }
+
     function renderDeviceRowInner(device, now) {
+        if (device.source === 'ikuai') return renderIkuaiRowInner(device, now);
         const neighbourOnly = device.seen_via === 'neighbour';
         const online = Boolean(device.online);
         const stateText = NEIGHBOUR_STATE_TEXT[device.neighbour_state] || (device.neighbour_state ? 'ARP ' + device.neighbour_state : 'ARP 可见');
@@ -1721,9 +1896,18 @@
         setText('deviceRateUpUnit', up.unit + '/s');
         setText('deviceTotalDown', '累计 ' + formatBytesText(totals.download || 0));
         setText('deviceTotalUp', '累计 ' + formatBytesText(totals.upload || 0));
-        setText('deviceSampledAt', data.sampled_at
-            ? `采样于 ${new Date(data.sampled_at * 1000).toLocaleTimeString()}，每 ${data.sample_interval || 5} 秒一次`
-            : '等待首次采样');
+        const ikuaiMode = data.data_source === 'ikuai';
+        const ikuai = data.ikuai || {};
+        if (ikuaiMode) {
+            setText('deviceSampledAt', ikuai.fetched_at
+                ? `爱快更新于 ${new Date(ikuai.fetched_at * 1000).toLocaleTimeString()}，每 ${data.ikuai_interval || 10} 秒一次`
+                : '等待爱快数据');
+        } else {
+            setText('deviceSampledAt', data.sampled_at
+                ? `采样于 ${new Date(data.sampled_at * 1000).toLocaleTimeString()}，每 ${data.sample_interval || 5} 秒一次`
+                : '等待首次采样');
+        }
+        renderDeviceSource(data);
         const ctrl = data.controller || {};
         const state = document.getElementById('deviceControllerState');
         if (state) {
@@ -1735,6 +1919,65 @@
             : (ctrl.error || (data.sampler_running ? `面板启动后每 ${data.sample_interval || 5} 秒读取一次` : '采样线程未运行')));
     }
 
+    function ikuaiHost(url) {
+        try {
+            return new URL(url).host;
+        } catch (error) {
+            return url || '';
+        }
+    }
+
+    const DEVICE_EXPLAINER_MIHOMO = document.getElementById('deviceExplainer')?.textContent || '';
+    const DEVICE_EXPLAINER_IKUAI = '设备列表来自爱快：每台终端的名称、实时速率和流量都以爱快为准。爱快把代理流量转发到本网关时做了 NAT，这部分在 mihomo 里只能看到爱快的 IP，因此汇总在上方的「全家合计」里；只有用自己 IP 直连本网关的设备才会显示各自的代理明细。';
+
+    function renderDeviceSource(data) {
+        const el = document.getElementById('deviceDataSource');
+        const ikuai = data.ikuai || {};
+        if (el) {
+            if (data.data_source === 'ikuai') {
+                const warn = ikuai.error ? `（最近一次拉取失败：${escapeHtml(ikuai.error)}，显示的是上次数据）` : '';
+                el.innerHTML = `数据来源：<strong>爱快 ${escapeHtml(ikuaiHost(data.ikuai_url))}</strong>${warn}`;
+            } else if (ikuai.configured) {
+                el.innerHTML = `数据来源：<strong>mihomo 连接</strong>（爱快尚未连通${ikuai.error ? '：' + escapeHtml(ikuai.error) : ''}）`;
+            } else {
+                el.innerHTML = '数据来源：<strong>mihomo 连接（未配置爱快）</strong>';
+            }
+        }
+        const explainer = document.getElementById('deviceExplainer');
+        if (explainer) explainer.textContent = data.data_source === 'ikuai' ? DEVICE_EXPLAINER_IKUAI : DEVICE_EXPLAINER_MIHOMO;
+        setText('deviceListHint', data.data_source === 'ikuai'
+            ? '每台终端来自爱快的在线 / 离线列表；展开可查看爱快按应用统计的流量'
+            : '按连接来源 IP 聚合，90 秒内有连接算在线；时间按浏览器时区显示');
+    }
+
+    // 经爱快转发的代理流量：mihomo 里来源都是爱快的 IP，没法分到设备，单独汇总成一张卡片
+    function renderHousehold(data) {
+        const card = document.getElementById('deviceHousehold');
+        if (!card) return;
+        const via = data.data_source === 'ikuai' ? data.proxy_via_router : null;
+        card.style.display = via ? '' : 'none';
+        if (!via) return;
+        if (card.contains(document.activeElement)) return;
+        card.innerHTML = `
+            <div class="panel-title-row">
+                <div>
+                    <h2 class="panel-title">经爱快转发的代理流量（全家合计）</h2>
+                    <div class="text-muted small mt-1">mihomo 里来源为 ${escapeHtml(via.ip)} 的连接，属于爱快 NAT 后面的所有设备</div>
+                </div>
+            </div>
+            <div class="device-stats">
+                <div><span>↓ 实时</span><strong>${formatRate(via.rate_down)}</strong></div>
+                <div><span>↑ 实时</span><strong>${formatRate(via.rate_up)}</strong></div>
+                <div><span>↓ 累计</span><strong>${formatBytesText(via.download_total)}</strong></div>
+                <div><span>↑ 累计</span><strong>${formatBytesText(via.upload_total)}</strong></div>
+            </div>
+            <details class="device-details" id="householdDetails"${householdDetailsOpen ? ' open' : ''}>
+                <summary>${via.active_connections || 0} 个活动连接 · 域名与出口</summary>
+                <div class="device-details-grid">${proxyLists(via)}</div>
+            </details>`;
+        card.querySelector('#householdDetails')?.addEventListener('toggle', event => { householdDetailsOpen = event.target.open; });
+    }
+
     function renderDevices() {
         const data = latestDevicesPayload;
         const list = document.getElementById('deviceList');
@@ -1743,6 +1986,7 @@
         const now = Date.now() / 1000;
         const devices = sortDevices(data.devices || [], document.getElementById('deviceSort')?.value || 'default');
         const ctrl = data.controller || {};
+        renderHousehold(data);
         if (empty) {
             empty.style.display = devices.length ? 'none' : '';
             if (!devices.length) {
@@ -1813,8 +2057,11 @@
         list.addEventListener('toggle', event => {
             const ip = event.target.closest?.('.device-row')?.dataset.ip;
             if (!ip) return;
+            const wasOpen = deviceDetailsOpen.has(ip);
             if (event.target.open) deviceDetailsOpen.add(ip);
             else deviceDetailsOpen.delete(ip);
+            // 重绘带 open 的行也会触发 toggle；只有用户从收起变展开时才去读爱快的应用统计
+            if (event.target.open && !wasOpen && event.target.dataset.appsIp) loadDeviceApps(ip);
         }, true);
         list.addEventListener('input', event => {
             const input = event.target;
@@ -1850,6 +2097,7 @@
                 latestDevicesPayload = res;
                 renderDevicesHeader(res);
                 renderDevices();
+                prefillIkuaiUrl();
             }
         } finally {
             if (trigger) setActionBusy(trigger, false);
@@ -1858,6 +2106,7 @@
 
     function startDevicePolling() {
         if (devicesInterval) clearInterval(devicesInterval);
+        if (!ikuaiSettingsLoaded) loadIkuaiSettings();
         loadDevices();
         devicesInterval = setInterval(() => loadDevices(), 5000);
     }
@@ -1866,6 +2115,103 @@
         if (devicesInterval) {
             clearInterval(devicesInterval);
             devicesInterval = null;
+        }
+    }
+
+    // ---- 爱快数据源设置 ----
+    function renderIkuaiSettings(res) {
+        const urlInput = document.getElementById('ikuaiUrl');
+        const tokenInput = document.getElementById('ikuaiToken');
+        ikuaiSavedUrl = res.url || '';
+        if (urlInput && document.activeElement !== urlInput) urlInput.value = ikuaiSavedUrl;
+        prefillIkuaiUrl();
+        if (tokenInput && document.activeElement !== tokenInput) tokenInput.value = '';
+        const tokenBadge = document.getElementById('ikuaiTokenBadge');
+        if (tokenBadge) tokenBadge.style.display = res.token_set ? '' : 'none';
+        const badge = document.getElementById('ikuaiCardBadge');
+        if (badge) {
+            badge.textContent = res.configured ? (res.last_error ? '有错误' : (res.last_ok_at ? '已连接' : '已配置')) : '未配置';
+            badge.className = `small-pill device-tag ${res.configured ? (res.last_error ? 'warn' : 'role') : 'muted'}`;
+        }
+        const status = document.getElementById('ikuaiStatus');
+        if (status) {
+            const parts = [];
+            if (res.last_ok_at) parts.push(`上次成功：${new Date(res.last_ok_at * 1000).toLocaleString()}`);
+            if (res.last_error) parts.push(`最近错误：${res.last_error}`);
+            if (!parts.length) parts.push(res.configured ? '已保存，等待首次拉取（每 10 秒一次）' : '未配置，设备列表使用 mihomo 连接数据');
+            status.textContent = parts.join(' · ');
+            status.classList.toggle('error', Boolean(res.last_error));
+        }
+        const card = document.getElementById('ikuaiCard');
+        if (card && !ikuaiSettingsLoaded) card.open = !res.configured;
+    }
+
+    // 没保存过地址时用默认路由的下一跳预填一次，通常就是爱快
+    function prefillIkuaiUrl() {
+        const urlInput = document.getElementById('ikuaiUrl');
+        const upstream = latestDevicesPayload?.upstream_router;
+        if (ikuaiUrlPrefilled || ikuaiSavedUrl !== '' || !urlInput || !upstream || urlInput.value || document.activeElement === urlInput) return;
+        urlInput.value = `https://${upstream}`;
+        ikuaiUrlPrefilled = true;
+    }
+
+    async function loadIkuaiSettings() {
+        const res = await api('/ikuai-settings');
+        if (res && 'token_set' in res) {
+            renderIkuaiSettings(res);
+            ikuaiSettingsLoaded = true;
+        }
+    }
+
+    function ikuaiFormValues() {
+        return {
+            url: (document.getElementById('ikuaiUrl')?.value || '').trim(),
+            token: (document.getElementById('ikuaiToken')?.value || '').trim()
+        };
+    }
+
+    async function testIkuai(trigger = null) {
+        if (trigger?.classList?.contains('is-busy')) return;
+        if (trigger) setActionBusy(trigger, true);
+        try {
+            const res = await api('/ikuai-test', ikuaiFormValues());
+            showToast(res.message || (res.success ? '连接正常' : '连接失败'), res.success ? 'success' : 'error');
+        } finally {
+            if (trigger) setActionBusy(trigger, false);
+        }
+    }
+
+    async function saveIkuai(trigger = null) {
+        if (trigger?.classList?.contains('is-busy')) return;
+        if (trigger) setActionBusy(trigger, true);
+        try {
+            const res = await api('/ikuai-settings', ikuaiFormValues());
+            showToast(res.message || (res.success ? '已保存' : '保存失败'), res.success ? 'success' : 'error');
+            if (res.success) {
+                deviceAppsCache.clear();
+                renderIkuaiSettings(res);
+                await loadDevices();
+            }
+        } finally {
+            if (trigger) setActionBusy(trigger, false);
+        }
+    }
+
+    async function clearIkuaiToken(trigger = null) {
+        if (trigger?.classList?.contains('is-busy')) return;
+        if (!await askConfirm('确定清除已保存的爱快 Token？清除后设备列表改回使用 mihomo 连接数据。')) return;
+        if (trigger) setActionBusy(trigger, true);
+        try {
+            const url = (document.getElementById('ikuaiUrl')?.value || '').trim();
+            const res = await api('/ikuai-settings', { url, clear_token: true });
+            showToast(res.message || (res.success ? 'Token 已清除' : '清除失败'), res.success ? 'success' : 'error');
+            if (res.success) {
+                deviceAppsCache.clear();
+                renderIkuaiSettings(res);
+                await loadDevices();
+            }
+        } finally {
+            if (trigger) setActionBusy(trigger, false);
         }
     }
 

@@ -15,13 +15,15 @@ import ipaddress
 import json
 import shutil
 import signal
+import ssl
 import sys
 import tempfile
 import threading
 import time
 import zipfile
+from urllib import error as urlerror
 from urllib import request as urlrequest
-from urllib.parse import quote
+from urllib.parse import quote, unquote, urlencode, urlsplit
 
 MIHOMO_DIR = "/etc/mihomo"
 SCRIPT_DIR = "/etc/mihomo/scripts"
@@ -34,7 +36,7 @@ SUBSCRIPTION_STATE_FILE = f"{MIHOMO_DIR}/.last_subscription"
 SUBSCRIPTION_LOG = "/var/log/mihomo-subscription.log"
 GEO_LOG = "/var/log/mihomo-geo.log"
 MANAGER_DIR = f"{MIHOMO_DIR}/manager"
-PANEL_VERSION = "0.1.29"
+PANEL_VERSION = "0.1.30"
 DEFAULT_PANEL_REPO_URL = "https://github.com/anxiaoyang666/mihomo.git"
 DEFAULT_PANEL_BRANCH = "main"
 PANEL_BACKUP_KEEP_COUNT = 3
@@ -1325,6 +1327,10 @@ def device_sampler_loop():
                 refresh_device_neighbours()
                 last_neigh = now
             sample_devices_once()
+            try:
+                poll_ikuai()
+            except Exception as e:
+                log.warning("拉取爱快终端失败：%s", e)
             if now - last_persist >= DEVICE_PERSIST_INTERVAL:
                 with DEVICE_LOCK:
                     dirty = DEVICE_STATE["dirty"]
@@ -1439,8 +1445,14 @@ def neighbour_only_ips(devices, neighbours, local_ips):
     return sorted(out, key=ip_sort_key)
 
 def devices_snapshot(now=None):
-    """/api/devices 的响应。时间全是 epoch 秒，容器跑在 UTC，由浏览器按本地时区格式化。"""
+    """/api/devices 的响应。时间全是 epoch 秒，容器跑在 UTC，由浏览器按本地时区格式化。
+    配置了爱快且至少成功拉取过一次时以爱快的终端为准，否则是纯 mihomo 连接视图。"""
     now = int(now if now is not None else time.time())
+    ikuai = ikuai_settings()
+    if ikuai_configured(ikuai):
+        snapshot = ikuai_devices_snapshot(now, ikuai)
+        if snapshot is not None:
+            return snapshot
     controller = mihomo_controller_settings()
     with DEVICE_LOCK:
         notes = DEVICE_STATE["notes"]
@@ -1459,6 +1471,9 @@ def devices_snapshot(now=None):
     lan_rows = [item for item in items if item["kind"] == "lan"]
     return {
         "devices": items,
+        "data_source": "mihomo",
+        "ikuai": ikuai_status(ikuai),
+        "proxy_via_router": None,
         "controller": {
             "reachable": bool(sampled_at) and not error,
             "error": error,
@@ -1485,8 +1500,14 @@ def devices_snapshot(now=None):
     }
 
 def devices_summary(now=None):
-    """概览页的"设备 在线 N / 共 M"：lan_* 口径和设备页一致（含只在 ARP 里的设备）。"""
+    """概览页的"设备 在线 N / 共 M"：lan_* 口径和设备页一致（含只在 ARP 里的设备；爱快模式下是爱快的终端数）。"""
     now = int(now if now is not None else time.time())
+    ikuai = ikuai_settings()
+    if ikuai_configured(ikuai):
+        snapshot = ikuai_devices_snapshot(now, ikuai)
+        if snapshot is not None:
+            totals = snapshot["totals"]
+            return {"online": totals["online"], "total": totals["devices"], "lan_online": totals["lan_online"], "lan_total": totals["lan_total"]}
     with DEVICE_LOCK:
         devices = DEVICE_STATE["devices"]
         records = list(devices.values())
@@ -1533,6 +1554,578 @@ def set_device_note(ip, note):
         DEVICE_STATE["dirty"] = True
     save_device_state()
     return True, "备注已保存" if note else "备注已清除"
+
+# ---------------------------------------------------------------------------
+# 爱快数据源
+#
+# 爱快是全家的网关：它有到 fake-ip 段（198.18.0.0/16）和 Telegram 段的静态路由指向本机，并对这些流量做了
+# SNAT，所以 mihomo 看到的大部分代理连接来源都是爱快自己的 IP。爱快却认识每一台终端（含不认 DHCP 121
+# 的 Android），有名字、MAC、实时速率和累计流量，所以配置了爱快之后设备列表以它为准：
+#   - 设备行来自爱快的在线 / 离线终端；
+#   - 直接以自己 IP 连到 mihomo 的设备，附上 mihomo 的代理明细（域名 / 出口）；
+#   - 经爱快转发、来源是爱快 IP 的代理流量，单独作为“全家合计”展示，不当成一台设备。
+# 爱快的数据只放内存，不落盘。
+# ---------------------------------------------------------------------------
+IKUAI_POLL_INTERVAL = 10          # 在线终端
+IKUAI_SLOW_INTERVAL = 300         # DHCP 静态分配 + 离线终端
+IKUAI_TIMEOUT = 5
+IKUAI_PAGE_LIMIT = 100
+IKUAI_MAX_PAGES = 10
+IKUAI_APPS_CACHE_SECONDS = 30
+IKUAI_APPS_TOP = 8
+IKUAI_TOKEN_MAX_LEN = 1024
+IKUAI_OK_CODES = (0, 20000)
+# mihomo 的 fake-ip 地址也会出现在爱快的终端表里（MAC 是本机的），不是真设备
+FAKE_IP_NETWORK = ipaddress.ip_network("198.18.0.0/15")
+IKUAI_ONLINE_PATH = "/api/v4.0/monitoring/clients-online"
+IKUAI_OFFLINE_PATH = "/api/v4.0/monitoring/clients-offline"
+IKUAI_STATIC_PATH = "/api/v4.0/network/dhcp/static"
+IKUAI_APPS_PATH = "/api/v4.0/monitoring/clients/app-protocols/load"
+
+IKUAI_LOCK = threading.Lock()
+IKUAI_STATE = {
+    "online": [],             # clients-online 原始记录
+    "offline": [],            # clients-offline 原始记录
+    "static": [],             # DHCP 静态分配
+    "fetched_at": 0,          # 上次在线终端拉取成功的时间
+    "slow_fetched_at": 0,     # 上次 DHCP / 离线终端拉取成功的时间
+    "polled_at": 0,           # 上次尝试拉取在线终端的时间（成功失败都算，控制轮询间隔）
+    "slow_polled_at": 0,
+    "error": "",              # 在线终端最近一次失败原因，成功后清空
+    "slow_error": "",         # DHCP / 离线终端最近一次失败原因
+    "error_at": 0,
+    "apps_cache": {},         # ip -> (时间, 应用列表)
+}
+
+def ikuai_settings():
+    env = read_env()
+    return {"url": str(env.get("IKUAI_URL") or "").strip(), "token": str(env.get("IKUAI_TOKEN") or "").strip()}
+
+def ikuai_configured(settings=None):
+    settings = settings or ikuai_settings()
+    return bool(settings["url"] and settings["token"])
+
+def validate_ikuai_url(url):
+    """只允许 http/https、内网或回环 IP、或不带空格的主机名；返回 (ok, 规范化后的 URL 或错误信息)。
+    面板会带着 Token 去请求这个地址，不能让它指向公网 IP。"""
+    url = str(url or "").strip()
+    if not url:
+        return False, "请填写爱快地址"
+    if len(url) > 300 or any(ch.isspace() for ch in url):
+        return False, "爱快地址不能包含空格"
+    try:
+        parts = urlsplit(url)
+        port = parts.port
+    except ValueError:
+        return False, "爱快地址格式不正确"
+    if parts.scheme not in ("http", "https"):
+        return False, "爱快地址必须以 http:// 或 https:// 开头"
+    if parts.username or parts.password or parts.query or parts.fragment or parts.path not in ("", "/"):
+        return False, "爱快地址只填协议、主机和端口，例如 https://10.10.10.253"
+    host = parts.hostname or ""
+    if not host:
+        return False, "爱快地址缺少主机"
+    try:
+        addr = ipaddress.ip_address(host)
+    except ValueError:
+        addr = None
+    if addr is not None:
+        if not (addr.is_private or addr.is_loopback or addr.is_link_local):
+            return False, "爱快地址必须是内网 IP"
+    elif not re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9.-]{0,251}[A-Za-z0-9])?", host):
+        return False, "爱快主机名不合法"
+    netloc = f"[{host}]" if addr is not None and addr.version == 6 else host
+    if port:
+        netloc += f":{port}"
+    return True, f"{parts.scheme}://{netloc}"
+
+def validate_ikuai_token(token):
+    if not is_safe_text(token, IKUAI_TOKEN_MAX_LEN) or any(ch.isspace() for ch in token):
+        return False
+    return all(32 < ord(ch) < 127 for ch in token)
+
+def ikuai_unwrap(envelope):
+    """爱快的响应：{code: 0|20000 表示成功, message, data, results}；有 data（且不是 null）就取 data，否则取 results。"""
+    if not isinstance(envelope, dict):
+        return False, "爱快返回的不是 JSON 对象"
+    try:
+        code = int(envelope.get("code"))
+    except (TypeError, ValueError):
+        code = None
+    if code not in IKUAI_OK_CODES:
+        message = str(envelope.get("message") or "").strip() or f"错误码 {envelope.get('code')}"
+        return False, f"爱快返回错误：{message}"
+    payload = envelope.get("data")
+    if payload is None:
+        payload = envelope.get("results")
+    return True, payload
+
+def ikuai_http_get(base_url, token, path, params=None, timeout=IKUAI_TIMEOUT):
+    """GET 爱快接口，返回解析后的 JSON。爱快用自签证书，只对这个用户配置的地址关闭证书校验。
+    HTTP >= 400 时抛 RuntimeError（带上爱快的 message）。测试里会替换掉这个函数。"""
+    url = base_url.rstrip("/") + path + ("?" + urlencode(params) if params else "")
+    req = urlrequest.Request(url, headers={
+        "Authorization": "Bearer " + token,
+        "Accept": "application/json",
+        "User-Agent": "mihomo-web-manager",
+    })
+    context = None
+    if url.startswith("https://"):
+        context = ssl.create_default_context()
+        context.check_hostname = False
+        context.verify_mode = ssl.CERT_NONE
+    try:
+        with urlrequest.urlopen(req, timeout=timeout, context=context) as resp:
+            body = resp.read(8 * 1024 * 1024).decode("utf-8", "replace")
+    except urlerror.HTTPError as e:
+        detail = ""
+        try:
+            data = json.loads(e.read(64 * 1024).decode("utf-8", "replace"))
+            detail = str(data.get("message") or "") if isinstance(data, dict) else ""
+        except Exception:
+            pass
+        raise RuntimeError(f"HTTP {e.code}" + (f"：{detail}" if detail else ""))
+    try:
+        return json.loads(body)
+    except ValueError:
+        raise RuntimeError("爱快返回的不是 JSON")
+
+def ikuai_call(base_url, token, path, params=None):
+    try:
+        envelope = ikuai_http_get(base_url, token, path, params)
+    except Exception as e:
+        reason = getattr(e, "reason", None)
+        return False, f"请求爱快失败：{reason or e}"
+    return ikuai_unwrap(envelope)
+
+def ikuai_fetch_pages(base_url, token, path, list_key, total_key):
+    """分页拉完一个列表（每页 IKUAI_PAGE_LIMIT 条，最多 IKUAI_MAX_PAGES 页）。返回 (ok, 列表或错误信息)。"""
+    items = []
+    for page in range(1, IKUAI_MAX_PAGES + 1):
+        ok, payload = ikuai_call(base_url, token, path, {"limit": IKUAI_PAGE_LIMIT, "page": page})
+        if not ok:
+            return False, payload
+        if not isinstance(payload, dict):
+            return False, "爱快返回的数据格式不对"
+        batch = payload.get(list_key)
+        batch = [item for item in batch if isinstance(item, dict)] if isinstance(batch, list) else []
+        items.extend(batch)
+        total = first_number(payload.get(total_key))
+        if not batch or len(batch) < IKUAI_PAGE_LIMIT or len(items) >= total:
+            break
+    return True, items
+
+def ikuai_record_error(key, message, now):
+    with IKUAI_LOCK:
+        IKUAI_STATE[key] = str(message)[:300]
+        IKUAI_STATE["error_at"] = now
+
+def poll_ikuai(now=None, force_slow=False, settings=None):
+    """采样线程每轮调一次：在线终端每 IKUAI_POLL_INTERVAL 秒、DHCP 和离线终端每 IKUAI_SLOW_INTERVAL 秒。
+    失败时保留上次的数据，只记录错误。没配置爱快就什么都不做。"""
+    now = int(now if now is not None else time.time())
+    settings = settings or ikuai_settings()
+    if not ikuai_configured(settings):
+        return False
+    url, token = settings["url"], settings["token"]
+    with IKUAI_LOCK:
+        due_fast = now - IKUAI_STATE["polled_at"] >= IKUAI_POLL_INTERVAL
+        due_slow = force_slow or not IKUAI_STATE["slow_polled_at"] or now - IKUAI_STATE["slow_polled_at"] >= IKUAI_SLOW_INTERVAL
+        if due_fast:
+            IKUAI_STATE["polled_at"] = now
+        if due_slow:
+            IKUAI_STATE["slow_polled_at"] = now
+    if due_fast:
+        ok, result = ikuai_fetch_pages(url, token, IKUAI_ONLINE_PATH, "data", "total")
+        if ok:
+            with IKUAI_LOCK:
+                IKUAI_STATE["online"] = result
+                IKUAI_STATE["fetched_at"] = now
+                IKUAI_STATE["error"] = ""
+        else:
+            ikuai_record_error("error", result, now)
+    if due_slow:
+        ok_static, statics = ikuai_fetch_pages(url, token, IKUAI_STATIC_PATH, "static_data", "static_total")
+        ok_offline, offline = ikuai_fetch_pages(url, token, IKUAI_OFFLINE_PATH, "offline_data", "offline_total")
+        with IKUAI_LOCK:
+            if ok_static:
+                IKUAI_STATE["static"] = statics
+            if ok_offline:
+                IKUAI_STATE["offline"] = offline
+            if ok_static and ok_offline:
+                IKUAI_STATE["slow_fetched_at"] = now
+                IKUAI_STATE["slow_error"] = ""
+        if not (ok_static and ok_offline):
+            ikuai_record_error("slow_error", statics if not ok_static else offline, now)
+    return True
+
+def reset_ikuai_state():
+    """改了爱快地址或 Token 后，旧路由器的数据不能再显示。"""
+    with IKUAI_LOCK:
+        IKUAI_STATE.update({
+            "online": [], "offline": [], "static": [], "fetched_at": 0, "slow_fetched_at": 0,
+            "polled_at": 0, "slow_polled_at": 0, "error": "", "slow_error": "", "error_at": 0, "apps_cache": {},
+        })
+
+def ikuai_status(settings=None):
+    settings = settings or ikuai_settings()
+    with IKUAI_LOCK:
+        fetched_at = IKUAI_STATE["fetched_at"]
+        error = IKUAI_STATE["error"] or IKUAI_STATE["slow_error"]
+        error_at = IKUAI_STATE["error_at"]
+        fast_error = IKUAI_STATE["error"]
+    configured = ikuai_configured(settings)
+    return {
+        "configured": configured,
+        "ok": configured and bool(fetched_at) and not fast_error,
+        "error": error if configured else "",
+        "error_at": error_at if configured else 0,
+        "fetched_at": fetched_at if configured else 0,
+    }
+
+def ikuai_settings_payload():
+    settings = ikuai_settings()
+    status = ikuai_status(settings)
+    return {
+        "url": settings["url"],
+        "token_set": bool(settings["token"]),
+        "configured": status["configured"],
+        "last_ok_at": status["fetched_at"],
+        "last_error": status["error"],
+        "last_error_at": status["error_at"],
+    }
+
+def save_ikuai_settings(data):
+    """保存 IKUAI_URL / IKUAI_TOKEN。URL 留空表示不再使用爱快；Token 留空保持原值，clear_token 才清除。"""
+    data = data if isinstance(data, dict) else {}
+    current = ikuai_settings()
+    url = str(data.get("url") or "").strip()
+    if url:
+        ok, result = validate_ikuai_url(url)
+        if not ok:
+            return False, result
+        url = result
+    token_raw = data.get("token")
+    token = str(token_raw).strip() if isinstance(token_raw, str) else ""
+    clear_token = data.get("clear_token") is True or is_true(data.get("clear_token"))
+    if clear_token:
+        token = ""
+    elif not token:
+        token = current["token"]
+    elif not validate_ikuai_token(token):
+        return False, "Token 不合法（不能包含空格或特殊字符）"
+    write_env({"IKUAI_URL": url, "IKUAI_TOKEN": token})
+    if url != current["url"] or token != current["token"]:
+        reset_ikuai_state()
+    if not url:
+        return True, "已停用爱快数据源"
+    if clear_token:
+        return True, "Token 已清除，设备列表改回使用 mihomo 连接数据"
+    return True, "爱快设置已保存" + ("" if token else "，但还没有填写 Token")
+
+def test_ikuai_connection(data):
+    """用提交的值（空字段回落到已保存的值）拉一页在线终端，不写 .env。"""
+    data = data if isinstance(data, dict) else {}
+    saved = ikuai_settings()
+    url = str(data.get("url") or "").strip() or saved["url"]
+    token_raw = data.get("token")
+    token = (str(token_raw).strip() if isinstance(token_raw, str) else "") or saved["token"]
+    ok, result = validate_ikuai_url(url)
+    if not ok:
+        return False, result
+    if not token:
+        return False, "请填写 API Token"
+    if not validate_ikuai_token(token):
+        return False, "Token 不合法（不能包含空格或特殊字符）"
+    ok, payload = ikuai_call(result, token, IKUAI_ONLINE_PATH, {"limit": IKUAI_PAGE_LIMIT, "page": 1})
+    if not ok:
+        return False, payload
+    if not isinstance(payload, dict):
+        return False, "爱快返回的数据格式不对"
+    rows = payload.get("data") if isinstance(payload.get("data"), list) else []
+    total = first_number(payload.get("total")) or len(rows)
+    return True, f"连接正常，在线终端 {total} 台"
+
+def is_fake_ip(ip):
+    try:
+        return ipaddress.ip_address(ip) in FAKE_IP_NETWORK
+    except ValueError:
+        return False
+
+def ikuai_text(value):
+    """爱快的 hostname 有时是 URL 编码的（空格成了 %20），解一层；"Unknown" 之类的占位当空。"""
+    text = str(value or "").strip()
+    if "%" in text:
+        try:
+            text = unquote(text).strip()
+        except Exception:
+            pass
+    return "" if text.lower() in ("unknown", "--", "null", "none") else text[:120]
+
+def ikuai_rate(client, number_key, text_key):
+    """当前速率（字节/秒）。
+
+    在线终端里 upload / download 是当前速率：实测样本里它们只有 0~3000 量级，而同一条记录的
+    total_up / total_down 是几十 MB 到几百 GB 的累计字节；uprate / downrate 在这版固件里是空串
+    （老固件里是格式化好的文字）。所以以 upload / download 为准，取不到数字时才看 uprate / downrate。"""
+    value = client.get(number_key)
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return max(0, int(value))
+    for raw in (value, client.get(text_key)):
+        text = str(raw or "").strip()
+        if re.fullmatch(r"\d+(?:\.\d+)?", text):
+            return int(float(text))
+    return 0
+
+def ikuai_static_index(statics):
+    by_mac, by_ip = {}, {}
+    for item in statics:
+        mac = str(item.get("mac") or "").lower()
+        ip = str(item.get("ip_addr") or "")
+        if mac:
+            by_mac.setdefault(mac, item)
+        if ip:
+            by_ip.setdefault(ip, item)
+    return by_mac, by_ip
+
+def ikuai_device_name(ip, client, static, notes):
+    """名字优先级：面板备注 → 爱快备注 → DHCP 静态分配的标签（纯数字跳过）→ 终端名 → 主机名。返回 (名字, 来源)。"""
+    note = notes.get(ip, "")
+    if note:
+        return note, "note"
+    comment = ikuai_text(client.get("comment"))
+    if comment:
+        return comment, "comment"
+    tag = ikuai_text(static.get("tagname"))
+    if tag and not tag.isdigit():
+        return tag, "dhcp_tag"
+    term = ikuai_text(client.get("termname")) or ikuai_text(static.get("termname"))
+    if term:
+        return term, "termname"
+    host = ikuai_text(client.get("hostname")) or ikuai_text(static.get("hostname"))
+    if host:
+        return host, "hostname"
+    return "", ""
+
+def proxy_detail(device, notes, now):
+    """mihomo 记录里前端需要的那部分：累计、实时、域名、出口。"""
+    payload = device_payload(device.get("ip", ""), device, notes, now)
+    return {
+        "upload": payload["upload_total"],
+        "download": payload["download_total"],
+        "rate_up": payload["rate_up"],
+        "rate_down": payload["rate_down"],
+        "active_connections": payload["active_connections"],
+        "top_domains": payload["top_domains"],
+        "chains": payload["chains"],
+    }
+
+def ikuai_device_rows(online, offline, statics, notes, mihomo_devices, local_ips, router_ips, now):
+    """爱快的在线 + 离线终端合成设备行：先按 MAC 再按 IP 去重（在线优先），跳过 fake-ip 段。"""
+    static_by_mac, static_by_ip = ikuai_static_index(statics)
+    rows = []
+    seen_macs, seen_ips = set(), set()
+    for is_online, clients in ((True, online), (False, offline)):
+        for client in clients:
+            ip = str(client.get("ip_addr") or "").strip()
+            mac = str(client.get("mac") or "").strip().lower()
+            if not ip or is_fake_ip(ip):
+                continue
+            try:
+                if ipaddress.ip_address(ip).is_loopback:
+                    continue
+            except ValueError:
+                continue
+            if (mac and mac in seen_macs) or ip in seen_ips:
+                continue
+            if mac:
+                seen_macs.add(mac)
+            seen_ips.add(ip)
+            static = static_by_mac.get(mac) or static_by_ip.get(ip) or {}
+            name, name_source = ikuai_device_name(ip, client, static, notes)
+            role = "proxy_gateway" if ip in local_ips else ("router" if ip in router_ips else "")
+            ssid = ikuai_text(client.get("ssid"))
+            signal_value = first_number(client.get("signal"))
+            rate_up = ikuai_rate(client, "upload", "uprate") if is_online else 0
+            rate_down = ikuai_rate(client, "download", "downrate") if is_online else 0
+            total_up = max(0, first_number(client.get("total_up")))
+            total_down = max(0, first_number(client.get("total_down")))
+            connections = max(0, first_number(client.get("connect_num"))) if is_online else 0
+            mihomo = mihomo_devices.get(ip)
+            row = {
+                "ip": ip,
+                "mac": mac,
+                "name": name,
+                "name_source": name_source,
+                "note": notes.get(ip, ""),
+                "vendor": ikuai_text(client.get("client_vendor")),
+                "model": ikuai_text(client.get("client_model")),
+                "type": ikuai_text(client.get("device_type")) or ikuai_text(client.get("client_type")),
+                "online": is_online,
+                "rate_up": rate_up,
+                "rate_down": rate_down,
+                "total_up": total_up,
+                "total_down": total_down,
+                "today_total": max(0, first_number(client.get("today_total"))),
+                "connections": connections,
+                "since": str(client.get("uptime") or "")[:32] if is_online else "",
+                "offline_at": 0 if is_online else first_number(client.get("logout_time")),
+                "interface": str(client.get("interface") or "")[:32],
+                "source": "ikuai",
+                "role": role,
+                "kind": "lan",
+                "seen_via": "ikuai",
+                "is_gateway": False,
+                "is_upstream_router": False,
+                # 和 mihomo 行同名的字段，前端排序沿用
+                "upload_total": total_up,
+                "download_total": total_down,
+                "active_connections": connections,
+                "last_seen": first_number(client.get("timestamp")) if is_online else first_number(client.get("logout_time")),
+            }
+            if ssid or signal_value:
+                row["wireless"] = {"ssid": ssid, "signal": signal_value}
+            # 爱快自己 IP 下的代理流量是全家合计（proxy_via_router），不挂在路由器这一行上
+            if mihomo is not None and device_kind(mihomo) == "lan" and ip not in router_ips:
+                row["proxy"] = proxy_detail(mihomo, notes, now)
+            rows.append(row)
+    return rows
+
+def ikuai_router_ips(upstream, settings):
+    ips = {upstream} if upstream else set()
+    try:
+        host = urlsplit(settings["url"]).hostname or ""
+        ipaddress.ip_address(host)
+        ips.add(host)
+    except ValueError:
+        pass
+    return ips
+
+def ikuai_devices_snapshot(now, settings):
+    """爱快模式下的 /api/devices；爱快没配置或从没成功过时返回 None，调用方退回纯 mihomo 视图。"""
+    with IKUAI_LOCK:
+        if not IKUAI_STATE["fetched_at"]:
+            return None
+        online = list(IKUAI_STATE["online"])
+        offline = list(IKUAI_STATE["offline"])
+        statics = list(IKUAI_STATE["static"])
+    controller = mihomo_controller_settings()
+    with DEVICE_LOCK:
+        notes = dict(DEVICE_STATE["notes"])
+        upstream = DEVICE_STATE["upstream_router"]
+        local_ips = set(DEVICE_STATE["local_ips"])
+        mihomo_devices = DEVICE_STATE["devices"]
+        router_ips = ikuai_router_ips(upstream, settings)
+        rows = ikuai_device_rows(online, offline, statics, notes, mihomo_devices, local_ips, router_ips, now)
+        matched = {row["ip"] for row in rows}
+        extra = []
+        for key, device in mihomo_devices.items():
+            kind = device_kind(device)
+            if kind in ("remote", "gateway"):
+                extra.append(device_payload(key, device, notes, now, None, upstream))
+            elif key not in matched and key != upstream and now - first_number(device.get("last_seen")) <= DEVICE_ONLINE_SECONDS:
+                # 爱快不认识、但正在直连 mihomo 的内网来源（比如别的网段），不丢
+                extra.append(device_payload(key, device, notes, now, None, upstream))
+        for item in extra:
+            item["source"] = "mihomo"
+        via_router = None
+        if upstream and upstream in mihomo_devices:
+            detail = proxy_detail(mihomo_devices[upstream], notes, now)
+            via_router = {
+                "ip": upstream,
+                "upload_total": detail["upload"],
+                "download_total": detail["download"],
+                "rate_up": detail["rate_up"],
+                "rate_down": detail["rate_down"],
+                "active_connections": detail["active_connections"],
+                "top_domains": detail["top_domains"],
+                "chains": detail["chains"],
+            }
+        sampled_at = DEVICE_STATE["sampled_at"]
+        error = DEVICE_STATE["controller_error"]
+        error_at = DEVICE_STATE["controller_error_at"]
+    # 默认排序：在线优先，再按当前总速率降序，再按今日流量降序
+    rows.sort(key=lambda item: (not item["online"], -(item["rate_up"] + item["rate_down"]), -item["today_total"]))
+    extra.sort(key=lambda item: (not item["online"], -(item["rate_up"] + item["rate_down"])))
+    online_rows = [row for row in rows if row["online"]]
+    return {
+        "devices": rows + extra,
+        "data_source": "ikuai",
+        "ikuai": ikuai_status(settings),
+        "ikuai_url": settings["url"],
+        "proxy_via_router": via_router,
+        "controller": {
+            "reachable": bool(sampled_at) and not error,
+            "error": error,
+            "error_at": error_at,
+            "base_url": controller["base_url"],
+        },
+        "sampled_at": sampled_at,
+        "sample_interval": DEVICE_SAMPLE_INTERVAL,
+        "ikuai_interval": IKUAI_POLL_INTERVAL,
+        "online_seconds": DEVICE_ONLINE_SECONDS,
+        "sampler_running": DEVICE_SAMPLER_STARTED,
+        "upstream_router": upstream,
+        "totals": {
+            "devices": len(rows),
+            "online": len(online_rows),
+            "lan_total": len(rows),
+            "lan_online": len(online_rows),
+            "neighbour_only": 0,
+            "upload": sum(row["total_up"] for row in rows),
+            "download": sum(row["total_down"] for row in rows),
+            "today": sum(row["today_total"] for row in rows),
+            "rate_up": sum(row["rate_up"] for row in rows),
+            "rate_down": sum(row["rate_down"] for row in rows),
+        },
+    }
+
+def ikuai_lookup_mac(ip):
+    with IKUAI_LOCK:
+        for client in list(IKUAI_STATE["online"]) + list(IKUAI_STATE["offline"]):
+            if str(client.get("ip_addr") or "").strip() == ip and client.get("mac"):
+                return str(client.get("mac")).strip().lower()
+    return ""
+
+def device_apps(ip, now=None):
+    """/api/devices/<ip>/apps：爱快按应用协议统计的流量，前 IKUAI_APPS_TOP 个（按累计）。返回 (响应, HTTP 状态)。"""
+    now = int(now if now is not None else time.time())
+    ip = normalize_source_ip(ip)
+    try:
+        ipaddress.ip_address(ip)
+    except ValueError:
+        return {"success": False, "message": "IP 地址不合法"}, 400
+    settings = ikuai_settings()
+    if not ikuai_configured(settings):
+        return {"success": False, "message": "还没有配置爱快数据源"}, 400
+    with IKUAI_LOCK:
+        cached = IKUAI_STATE["apps_cache"].get(ip)
+    if cached and now - cached[0] < IKUAI_APPS_CACHE_SECONDS:
+        return {"success": True, "ip": ip, "apps": cached[1], "cached": True}, 200
+    mac = ikuai_lookup_mac(ip)
+    if not mac:
+        return {"success": False, "message": "爱快里没有这台设备"}, 404
+    ok, payload = ikuai_call(settings["url"], settings["token"], IKUAI_APPS_PATH, {"ip": ip, "mac": mac, "limit": 20})
+    if not ok:
+        return {"success": False, "message": payload}, 502
+    rows = payload.get("data") if isinstance(payload, dict) else payload
+    rows = [item for item in rows if isinstance(item, dict)] if isinstance(rows, list) else []
+    rows.sort(key=lambda item: first_number(item.get("total")), reverse=True)
+    apps = [{
+        "appname": str(item.get("appname") or "未知应用")[:80],
+        "total": max(0, first_number(item.get("total"))),
+        "total_up": max(0, first_number(item.get("total_up"))),
+        "total_down": max(0, first_number(item.get("total_down"))),
+        "rate_up": max(0, first_number(item.get("upload"))),
+        "rate_down": max(0, first_number(item.get("download"))),
+        "connections": max(0, first_number(item.get("conn_cnt"))),
+    } for item in rows[:IKUAI_APPS_TOP]]
+    with IKUAI_LOCK:
+        cache = IKUAI_STATE["apps_cache"]
+        for key in [key for key, value in cache.items() if now - value[0] >= IKUAI_APPS_CACHE_SECONDS]:
+            cache.pop(key, None)
+        cache[ip] = (now, apps)
+    return {"success": True, "ip": ip, "apps": apps, "cached": False}, 200
 
 def collect_overview():
     env = read_env()
@@ -1966,6 +2559,29 @@ def api_device_note(ip):
         ok, message = set_device_note(ip, note)
     except Exception as e:
         return jsonify({"success": False, "message": f"保存备注失败：{e}"})
+    return jsonify({"success": ok, "message": message})
+
+@app.route('/api/devices/<ip>/apps')
+@login_required
+def api_device_apps(ip):
+    payload, status = device_apps(ip)
+    return jsonify(payload), status
+
+@app.route('/api/ikuai-settings', methods=['GET', 'POST'])
+@login_required
+def api_ikuai_settings():
+    if request.method == 'GET':
+        return jsonify(ikuai_settings_payload())
+    try:
+        ok, message = save_ikuai_settings(json_body())
+    except Exception as e:
+        ok, message = False, f"保存失败：{e}"
+    return jsonify({"success": ok, "message": message, **ikuai_settings_payload()})
+
+@app.route('/api/ikuai-test', methods=['POST'])
+@login_required
+def api_ikuai_test():
+    ok, message = test_ikuai_connection(json_body())
     return jsonify({"success": ok, "message": message})
 
 @app.route('/api/panel-upgrade-source')
