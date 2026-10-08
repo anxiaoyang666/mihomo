@@ -19,7 +19,7 @@ def text(path):
 
 class MihomoFinalHardeningContractTest(unittest.TestCase):
     def test_release_version_is_0122(self):
-        self.assertIn('PANEL_VERSION = "0.1.24"', text(APP))
+        self.assertIn('PANEL_VERSION = "0.1.25"', text(APP))
 
     def test_frontend_uses_local_vendor_assets(self):
         index = text(INDEX)
@@ -37,7 +37,9 @@ class MihomoFinalHardeningContractTest(unittest.TestCase):
         install = text(INSTALL)
 
         self.assertIn("write_env_line()", install)
-        self.assertIn("printf '%s=%q\\n'", install)
+        # 用 shlex.quote 而不是 printf %q：%q 对含换行/控制字符的值会输出 $'...'，app.py 的 shlex 解析认不全
+        self.assertIn('shlex.quote(sys.argv[2])', install)
+        self.assertNotIn("=%q", install)
         self.assertIn('write_env_line "WEB_SESSION_SECRET" "$session_secret"', install)
         self.assertIn('write_env_line "RULE_SYNC_TOKEN" "$sync_token"', install)
         self.assertIn('write_env_line "RULE_SYNC_ENABLED" "false"', install)
@@ -45,13 +47,21 @@ class MihomoFinalHardeningContractTest(unittest.TestCase):
         self.assertNotIn('cat > "$INSTALL_DIR/.env" <<EOF', install)
 
     def test_legacy_env_writes_use_safe_upsert(self):
-        for path in [CLI, SCRIPTS / "manage_config.sh", SCRIPTS / "set_notify.sh"]:
-            source = text(path)
-            with self.subTest(path=path.name):
-                self.assertIn("upsert_env()", source)
-                self.assertIn("shlex.quote", source)
-                self.assertNotIn('sed -i "s|^SUB_URL=.*|SUB_URL=\\"$url\\"|"', source)
-                self.assertNotIn('sed -i "s|^NOTIFY_URL=.*|NOTIFY_URL=\\"$url\\"|"', source)
+        # upsert_env 只有一份实现：scripts/envutil.sh；CLI source 它，不再各自复制一份 Python 片段
+        envutil = text(SCRIPTS / "envutil.sh")
+        self.assertIn("upsert_env()", envutil)
+        self.assertIn("get_env()", envutil)
+        self.assertIn("shlex.quote", envutil)
+
+        cli = text(CLI)
+        self.assertIn('source "${SCRIPT_DIR}/envutil.sh"', cli)
+        self.assertNotIn("shlex.quote", cli)
+        self.assertNotIn('sed -i "s|^SUB_URL=.*|SUB_URL=\\"$url\\"|"', cli)
+        for path in SCRIPTS.glob("*.sh"):
+            if path.name == "envutil.sh":
+                continue
+            with self.subTest(script=path.name):
+                self.assertNotIn("upsert_env()", text(path), "upsert_env 只能定义在 envutil.sh 里")
 
     def test_uninstall_uses_temp_crontab_cleanup(self):
         uninstall = text(SCRIPTS / "uninstall.sh")
@@ -72,7 +82,6 @@ class MihomoFinalHardeningContractTest(unittest.TestCase):
 
         self.assertIn("RestartSec=3", text(SYSTEMD / "mihomo.service"))
         self.assertIn("RestartSec=3", text(SYSTEMD / "mihomo-manager.service"))
-        self.assertNotIn("NoNewPrivileges=true", text(SCRIPTS / "service_ctl.sh"))
 
 
 if __name__ == "__main__":

@@ -26,7 +26,7 @@ CONFIG_FILE = f"{MIHOMO_DIR}/config.yaml"
 LOG_FILE = "/var/log/mihomo.log"
 BACKUP_DIR = f"{MIHOMO_DIR}/backup"
 MANAGER_DIR = f"{MIHOMO_DIR}/manager"
-PANEL_VERSION = "0.1.24"
+PANEL_VERSION = "0.1.25"
 DEFAULT_PANEL_REPO_URL = "https://github.com/anxiaoyang666/mihomo.git"
 DEFAULT_PANEL_BRANCH = "main"
 PANEL_BACKUP_KEEP_COUNT = 3
@@ -52,7 +52,8 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 log = logging.getLogger("mihomo-manager")
 
 app = Flask(__name__)
-app.permanent_session_lifetime = timedelta(days=365)
+# 登录态 30 天：有登录限流和改密后轮换密钥兜底，不需要再签发一年期 cookie
+app.permanent_session_lifetime = timedelta(days=30)
 # Cookie 只走同站请求且脚本不可读；请求体限制 1 MiB，/api/rule-sync 等接口不需要更大
 app.config.update(
     SESSION_COOKIE_SAMESITE="Lax",
@@ -95,16 +96,29 @@ def read_recent_log_lines(path, limit=100, tail_bytes=LOG_TAIL_BYTES):
     except Exception as e:
         return str(e)
 
+def yaml_scalar_text(raw):
+    """取一行 YAML 标量的值：去掉一层匹配的引号，未加引号时去掉行尾 ' # 注释'。"""
+    raw = str(raw or "").strip()
+    if len(raw) >= 2 and raw[0] in "\"'" and raw[-1] == raw[0]:
+        return raw[1:-1]
+    for quote in ("\"", "'"):
+        if raw.startswith(quote):
+            end = raw.find(quote, 1)
+            if end > 0:
+                return raw[1:end]
+    return re.split(r"\s+#", raw, maxsplit=1)[0].strip()
+
 def config_value(key):
+    """只认顶层（0 缩进）的 key:，嵌套在别的段落里的同名键（比如 proxy 节点里的 secret:）不算。"""
     if not os.path.exists(CONFIG_FILE):
         return ""
     try:
         with open(CONFIG_FILE, "r", encoding="utf-8") as f:
             for line in f:
-                match = re.match(rf"^\s*{re.escape(key)}\s*:\s*(.*?)\s*$", line)
+                match = re.match(rf"^{re.escape(key)}\s*:(.*)$", line.rstrip("\r\n"))
                 if match:
-                    return match.group(1).strip().strip('"').strip("'")
-    except:
+                    return yaml_scalar_text(match.group(1))
+    except Exception:
         pass
     return ""
 
@@ -117,24 +131,59 @@ def read_env():
                     parsed = parse_env_line(line)
                     if parsed:
                         env_data[parsed[0]] = parsed[1]
-        except: pass
+        except Exception: pass
     return env_data
 
+ANSI_C_ESCAPES = {"a": "\a", "b": "\b", "e": "\x1b", "E": "\x1b", "f": "\f", "n": "\n", "r": "\r", "t": "\t", "v": "\v",
+                  "\\": "\\", "'": "'", '"': '"', "?": "?"}
+
+def decode_ansi_c_quoted(body):
+    """解码 bash 的 $'...' 字面量（printf %q 对含换行/控制字符的值会输出这种形式）。"""
+    def repl(match):
+        esc = match.group(0)[1:]
+        if esc[0] in ANSI_C_ESCAPES:
+            return ANSI_C_ESCAPES[esc[0]]
+        if esc[0] == "x":
+            return chr(int(esc[1:], 16))
+        if esc[0] in "uU":
+            return chr(int(esc[1:], 16))
+        return chr(int(esc, 8))
+    return re.sub(r"\\(?:x[0-9A-Fa-f]{1,2}|u[0-9A-Fa-f]{1,4}|U[0-9A-Fa-f]{1,8}|[0-7]{1,3}|.)", repl, body)
+
+def strip_one_quote_layer(raw):
+    raw = raw.strip()
+    if len(raw) >= 2 and raw[0] in "\"'" and raw[-1] == raw[0]:
+        return raw[1:-1]
+    return raw
+
 def parse_env_line(line):
+    """解析 .env 的一行 KEY=value。
+
+    先按 shell 语法（shlex）解析，这样 KEY='a b'、KEY=a\\ b、KEY="x" # 注释 都正确；
+    未加引号的值里的 # 不是注释起点（shlex 的 comments=True 会把它截断，所以这里不用）。
+    bash printf %q 写出的 $'...' 形式 shlex 不认识，单独解码；引号不配对时退回简单切分。
+    """
     stripped = line.strip()
     if not stripped or stripped.startswith('#') or '=' not in stripped:
         return None
-    try:
-        parts = shlex.split(stripped, comments=True, posix=True)
-    except ValueError:
-        parts = [stripped]
-    if not parts or '=' not in parts[0]:
-        return None
-    key, value = parts[0].split('=', 1)
+    key, _, raw = stripped.partition('=')
     key = key.strip()
+    if key.startswith('export '):
+        key = key[len('export '):].strip()
     if not re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]*', key):
         return None
-    return key, value
+    raw = raw.strip()
+    if raw.startswith("$'"):
+        match = re.match(r"\$'((?:[^'\\]|\\.)*)'", raw)
+        body = match.group(1) if match else raw[2:].rstrip("'")
+        return key, decode_ansi_c_quoted(body)
+    try:
+        parts = shlex.split(raw, comments=False, posix=True)
+    except ValueError:
+        return key, strip_one_quote_layer(raw)
+    if not parts:
+        return key, ""
+    return key, parts[0]
 
 def env_value_for_shell(value):
     normalized = str(value if value is not None else '')
@@ -454,12 +503,32 @@ def is_yaml_section_at_or_above(line, indent_len):
         return False
     return len(line_indent(line)) <= indent_len and re.match(r"^[^#:\s][^#]*:\s*(?:#.*)?$", line[indent_len:]) is not None
 
+PROXY_GROUP_NAME_RE = re.compile(r"^\s*-\s*\{?\s*name\s*:\s*(?:\"([^\"]*)\"|'([^']*)'|([^,}#\n]+))")
+
+def proxy_group_names(text):
+    """列出顶层 proxy-groups: 下每个策略组的 name（支持 - {name: x, ...} 流式和 - name: x 块式）。"""
+    lines = text.splitlines()
+    start = find_yaml_top_level_key(lines, "proxy-groups")
+    if start < 0:
+        return []
+    names = []
+    for line in lines[start + 1:section_end_index(lines, start)]:
+        match = PROXY_GROUP_NAME_RE.match(line)
+        if not match:
+            continue
+        name = next((group for group in match.groups() if group is not None), "").strip()
+        if name:
+            names.append(name)
+    return names
+
 def proxy_policy_name(text):
+    """同步规则里"强制代理"要指向的策略组：只在真实存在的 proxy-groups 条目里挑，
+    注释/规则行里提到的名字不算（否则一行注释就能把规则指向不存在的组，配置校验失败）。"""
+    names = proxy_group_names(text)
     for preferred in ("♻️ 自动选择", "🚀 默认代理", "Final", "GLOBAL"):
-        if preferred in text:
+        if preferred in names:
             return preferred
-    match = re.search(r"(?m)^\s*-\s*name:\s*['\"]?([^'\"\n]+)['\"]?\s*$", text)
-    return match.group(1).strip() if match else "PROXY"
+    return names[0] if names else "PROXY"
 
 def read_mihomo_sync_rules(text=None):
     if text is None:
@@ -763,7 +832,7 @@ def mihomo_api_get(path, timeout=2):
 def first_number(value):
     try:
         return int(value or 0)
-    except:
+    except Exception:
         return 0
 
 def latest_delay(proxy):
@@ -808,7 +877,7 @@ def log_level_summary():
                 levels["warn"] += 1
             elif level in levels:
                 levels[level] += 1
-    except:
+    except Exception:
         pass
     return levels
 
@@ -1264,7 +1333,7 @@ def handle_config():
             try:
                 with open(CONFIG_FILE,'r', encoding='utf-8') as f:
                     c = f.read()
-            except:
+            except Exception:
                 pass
         return jsonify({"content": c})
     if request.method == 'POST':
@@ -1503,6 +1572,6 @@ if __name__ == '__main__':
     env = read_env()
     try:
         port = int(env.get('WEB_PORT', 7838))
-    except:
+    except Exception:
         port = 7838
     app.run(host='0.0.0.0', port=port)

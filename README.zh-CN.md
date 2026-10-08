@@ -49,9 +49,14 @@ GH_PROXY="https://gh-proxy.com/"
 
 其他可选的 `.env` 配置：
 
+- `GH_PROXY`：GitHub 代理前缀，只在直连 GitHub 失败后作为回退使用（留空表示不用代理）
 - `MIHOMO_API_SECRET`：`external-controller` 的访问密钥，由 `install.sh` 生成并同时写入 `config.yaml` 和 `.env`（面板和 9090 端口的外部 Dashboard 都用它）
 - `BACKUP_KEEP_COUNT`：`config.yaml` 备份保留数量，默认 `10`
 - `ALLOW_INSECURE_TLS=true`：下载订阅 / Geo 数据时跳过 TLS 证书校验（默认关闭）
+- `GATEWAY_AUTOFIX=false`：让每分钟一次的 `gateway_init.sh check` 定时任务不再自动修正 ip_forward / rp_filter / FORWARD / MASQUERADE（默认 `true`；手动执行脚本仍会应用）
+- `RULE_SYNC_ENABLED`：`true` 时把面板里的强制直连 / 强制代理规则推送到其他 mosctl / mihomo 面板（默认 `false`）
+- `RULE_SYNC_TOKEN`：规则同步的共享密钥，由 `install.sh` 生成，各节点必须一致
+- `RULE_SYNC_PEERS`：其他面板地址，用 `|` 分隔（面板的同步设置页会写这个键）
 
 面板升级会保留本地运行状态：
 
@@ -68,8 +73,10 @@ bash -c 'set -e; TMP=$(mktemp -d); mkdir -p /etc/mihomo/backup; curl -fL -o "$TM
 import sys, zipfile
 zipfile.ZipFile(sys.argv[1]).extractall(sys.argv[2])
 PY
-SRC=$(find "$TMP" -maxdepth 3 -type d -name remote-root | head -n1); test -n "$SRC"; BACKUP="/etc/mihomo/backup/manager.before-upgrade.$(date +%Y%m%d%H%M%S)"; [ -d /etc/mihomo/manager ] && cp -a /etc/mihomo/manager "$BACKUP" || true; install -m 0755 "$SRC/usr/bin/mihomo" /usr/bin/mihomo; rm -rf /etc/mihomo/manager /etc/mihomo/scripts /etc/mihomo/templates; mkdir -p /etc/mihomo/manager /etc/mihomo/scripts /etc/mihomo/templates; cp -a "$SRC/etc/mihomo/manager/." /etc/mihomo/manager/; cp -a "$SRC/etc/mihomo/scripts/." /etc/mihomo/scripts/; cp -a "$SRC/etc/mihomo/templates/." /etc/mihomo/templates/; install -m 0644 "$SRC/etc/systemd/system/mihomo.service" /etc/systemd/system/mihomo.service; install -m 0644 "$SRC/etc/systemd/system/mihomo-manager.service" /etc/systemd/system/mihomo-manager.service; install -m 0644 "$SRC/etc/systemd/system/force-ip-forward.service" /etc/systemd/system/force-ip-forward.service; systemctl daemon-reload; systemctl restart mihomo-manager; rm -rf "$TMP"; echo "Mihomo panel upgraded. Backup: $BACKUP"'
+SRC=$(find "$TMP" -maxdepth 3 -type d -name remote-root | head -n1); test -n "$SRC"; BACKUP="/etc/mihomo/backup/manager.before-upgrade.$(date +%Y%m%d%H%M%S)"; [ -d /etc/mihomo/manager ] && cp -a /etc/mihomo/manager "$BACKUP" || true; install -m 0755 "$SRC/usr/bin/mihomo" /usr/bin/mihomo; rm -rf /etc/mihomo/manager /etc/mihomo/scripts /etc/mihomo/templates; mkdir -p /etc/mihomo/manager /etc/mihomo/scripts /etc/mihomo/templates; cp -a "$SRC/etc/mihomo/manager/." /etc/mihomo/manager/; cp -a "$SRC/etc/mihomo/scripts/." /etc/mihomo/scripts/; cp -a "$SRC/etc/mihomo/templates/." /etc/mihomo/templates/; install -m 0644 "$SRC/etc/systemd/system/mihomo.service" /etc/systemd/system/mihomo.service; install -m 0644 "$SRC/etc/systemd/system/mihomo-manager.service" /etc/systemd/system/mihomo-manager.service; install -m 0644 "$SRC/etc/systemd/system/force-ip-forward.service" /etc/systemd/system/force-ip-forward.service; install -m 0644 "$SRC/etc/mihomo/config.example.yaml" /etc/mihomo/config.example.yaml; mkdir -p /etc/logrotate.d; install -m 0644 "$SRC/etc/logrotate.d/mihomo" /etc/logrotate.d/mihomo; systemctl daemon-reload; systemctl restart mihomo-manager; rm -rf "$TMP"; echo "Mihomo panel upgraded. Backup: $BACKUP"'
 ```
+
+这条命令替换的文件和面板在线升级管理的一致：`/usr/bin/mihomo`、`manager/`、`scripts/`、`templates/`、`config.example.yaml`、三个 systemd 单元和 `/etc/logrotate.d/mihomo`；`.env`、`config.yaml` 和 `ui/` 不会被动。
 
 ## 目录结构
 

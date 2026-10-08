@@ -79,7 +79,7 @@ class KernelInstallContractTest(unittest.TestCase):
 
 class SplitBrainContractTest(unittest.TestCase):
     def test_core_binary_path_is_single_source_of_truth(self):
-        for name in ("install_kernel.sh", "manage_config.sh", "service_ctl.sh"):
+        for name in ("install_kernel.sh", "update_subscription.sh"):
             source = text(SCRIPTS / name)
             with self.subTest(script=name):
                 self.assertIn('CORE_BIN="/usr/bin/mihomo-core"', source)
@@ -95,22 +95,16 @@ class SplitBrainContractTest(unittest.TestCase):
         self.assertIn('upsert_env "SUB_URL_RAW" "$url"', cli)
         self.assertNotIn('upsert_env "SUB_URL" ', cli)
 
-        manage = text(SCRIPTS / "manage_config.sh")
-        self.assertIn('upsert_env "SUB_URL_RAW" "$url"', manage)
-        self.assertNotIn('upsert_env "SUB_URL" ', manage)
-
-        cron = text(SCRIPTS / "cron_manager.sh")
-        self.assertIn("SUB_URL_RAW", cron)
-        self.assertIn("SUB_URL_AIRPORT", cron)
-        self.assertIn('"${SCRIPT_PATH}/update_subscription.sh" "订阅自动更新"', cron)
+        update = text(SCRIPTS / "update_subscription.sh")
+        self.assertIn('"$CONFIG_MODE" == "raw"', update)
+        self.assertIn("SUB_URL_RAW", update)
+        self.assertIn("SUB_URL_AIRPORT", update)
 
     def test_notify_env_names_match(self):
-        set_notify = text(SCRIPTS / "set_notify.sh")
+        app = text(APP)
         notify = text(SCRIPTS / "notify.sh")
 
-        self.assertIn('upsert_env "NOTIFY_API_URL" "$url"', set_notify)
-        self.assertIn('upsert_env "NOTIFY_API" "true"', set_notify)
-        self.assertNotIn("NOTIFY_URL", set_notify.replace("NOTIFY_API_URL", ""))
+        self.assertIn('"NOTIFY_API_URL"', app)
         self.assertIn('-n "$NOTIFY_API_URL"', notify)
 
 
@@ -150,11 +144,10 @@ class EnvFileContractTest(unittest.TestCase):
         self.assertIn("缺少 WEB_USER / WEB_SECRET", app)
 
     def test_shell_upsert_env_sets_0600(self):
-        for path in (CLI, SCRIPTS / "manage_config.sh", SCRIPTS / "set_notify.sh"):
-            source = text(path)
-            with self.subTest(path=path.name):
-                self.assertIn("os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600", source)
-                self.assertIn('chmod 600 "$ENV_FILE"', source)
+        source = text(SCRIPTS / "envutil.sh")
+        self.assertIn("os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600", source)
+        self.assertIn('chmod 600 "$ENV_FILE"', source)
+        self.assertIn("os.replace(tmp, path)", source)
 
     def test_login_page_no_longer_advertises_default_credentials(self):
         self.assertNotIn("默认 admin", text(LOGIN))
@@ -285,12 +278,11 @@ class SmallFixesContractTest(unittest.TestCase):
         self.assertIn('2>"${TMP_DIR}/tg.err"', notify)
 
     def test_python_snippets_take_paths_via_argv(self):
-        patch = text(SCRIPTS / "patch_config.sh")
         update = text(SCRIPTS / "update_subscription.sh")
+        geo = text(SCRIPTS / "update_geo.sh")
 
-        self.assertIn('python3 - "$TARGET_FILE" <<\'PY\'', patch)
-        self.assertIn("config_path = sys.argv[1]", patch)
-        self.assertNotIn("config_path = '$TARGET_FILE'", patch)
+        self.assertIn('python3 - "$CONFIG_FILE" <<\'PY\'', geo)
+        self.assertIn("open(sys.argv[1]", geo)
         self.assertIn('python3 - "$TEMPLATE_FILE" "$TEMP_NEW" <<\'PY\'', update)
         self.assertIn('python3 - "$TEMP_NEW" <<\'PY\'', update)
         self.assertNotIn("template_path = '$TEMPLATE_FILE'", update)

@@ -34,10 +34,10 @@ class MihomoSecurityHardeningContractTest(unittest.TestCase):
         script_names = [
             "update_subscription.sh",
             "install_kernel.sh",
-            "manage_config.sh",
-            "manage_ui.sh",
+            "update_geo.sh",
             "notify.sh",
-            "apply_settings.sh",
+            "uninstall.sh",
+            "gateway_init.sh",
         ]
 
         for name in script_names:

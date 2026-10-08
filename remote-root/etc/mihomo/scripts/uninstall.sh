@@ -66,7 +66,7 @@ echo "✅ 服务已移除。"
 echo -e "${YELLOW}[2/5] 清理自动化任务...${NC}"
 # 本项目写入 crontab 的几种标记：
 #   gateway_init.sh check   -> gateway_init.sh 的保活任务
-#   # MIHOMO_AUTOMATION     -> cron_manager.sh 添加的任务
+#   # MIHOMO_AUTOMATION     -> 旧版 cron_manager.sh（已删除）添加的任务，老安装可能还留着
 #   # JOB_SUB / # JOB_GEO   -> 面板 app.py update_cron 添加的任务
 #   /etc/mihomo/scripts/    -> 兜底，凡是调用本项目脚本的行都清掉
 crontab -l 2>/dev/null \

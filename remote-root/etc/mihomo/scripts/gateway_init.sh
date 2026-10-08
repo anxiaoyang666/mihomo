@@ -4,11 +4,22 @@
 # Mihomo 网关网络初始化脚本 (智能持久化版)
 # ==========================================
 
+# 模式: check (每分钟 cron 静默保活) / init 或不带参数 (首次运行/手动执行)
+MODE="$1"
+
 # 1. 环境加载
 if [ -f "/etc/mihomo/.env" ]; then source /etc/mihomo/.env; fi
+
+# .env 里 GATEWAY_AUTOFIX=false 时，cron 的 check 什么都不做（手动执行仍然生效）。
+# 适合自己管理 iptables/sysctl、不希望每分钟被改回去的场景。放在最前面，连网卡探测都不做。
+if [ "$MODE" == "check" ] && [ "${GATEWAY_AUTOFIX:-true}" == "false" ]; then
+    exit 0
+fi
+
 # 兜底路径 (防止 .env 不存在或变量缺失)
 SCRIPT_PATH="${SCRIPT_PATH:-/etc/mihomo/scripts}"
 CURRENT_SCRIPT="${SCRIPT_PATH}/gateway_init.sh"
+SYSCTL_FILE="/etc/sysctl.d/99-mihomo-gateway.conf"
 TMP_DIR="$(mktemp -d)"
 TMP_CRON="${TMP_DIR}/gateway_crontab"
 
@@ -21,9 +32,6 @@ trap cleanup EXIT
 GREEN='\033[0;32m'
 YELLOW='\033[0;33m'
 NC='\033[0m'
-
-# 模式: check (静默保活) / init (首次运行/强制)
-MODE="$1"
 
 log() {
     # 只有非 check 模式才输出日志，避免 cron 邮件轰炸
@@ -40,18 +48,34 @@ fi
 
 # ==========================================
 # 核心功能：规则检测与应用
+# 每一步都先读当前值、不一样才写：check 模式每分钟跑一次，不能每次都重写 sysctl / iptables。
 # ==========================================
+
+# 持久化文件：ip_forward 和 rp_filter 一起写进去，重启后 sysctl 自己恢复，不用等 cron 修
+ensure_sysctl_file() {
+    local desired
+    desired="$(printf 'net.ipv4.ip_forward=1\nnet.ipv4.conf.all.rp_filter=0\nnet.ipv4.conf.default.rp_filter=0\n')"
+    if [ ! -f "$SYSCTL_FILE" ] || [ "$(cat "$SYSCTL_FILE" 2>/dev/null)" != "$desired" ]; then
+        printf '%s\n' "$desired" > "$SYSCTL_FILE"
+        return 0
+    fi
+    return 1
+}
+
 apply_rules() {
     local changed=0
 
     # A. 开启内核转发
     # --------------------------------------
     # 读取当前状态
-    local ip_fwd=$(sysctl -n net.ipv4.ip_forward)
+    local ip_fwd=$(sysctl -n net.ipv4.ip_forward 2>/dev/null)
     if [ "$ip_fwd" != "1" ]; then
         sysctl -w net.ipv4.ip_forward=1 > /dev/null
-        echo "net.ipv4.ip_forward=1" > /etc/sysctl.d/99-mihomo-gateway.conf
         log "✅ 内核转发已开启"
+        changed=1
+    fi
+    if ensure_sysctl_file; then
+        log "✅ 已写入持久化配置 ${SYSCTL_FILE}"
         changed=1
     fi
 
@@ -79,10 +103,11 @@ apply_rules() {
 
     # D. 关闭反向路径过滤 (RP_Filter)
     # --------------------------------------
-    # 这个一般重启后会重置，所以每次都刷一遍比较保险
+    # 新插的网卡会继承 conf/default 的值，所以每个接口都要看一眼；但只有值不是 0 的才写
     local rp_changed=0
     for i in /proc/sys/net/ipv4/conf/*/rp_filter; do
-        if [ "$(cat "$i")" != "0" ]; then
+        [ -f "$i" ] || continue
+        if [ "$(cat "$i" 2>/dev/null)" != "0" ]; then
             echo 0 > "$i"
             rp_changed=1
         fi

@@ -98,10 +98,12 @@ PY
   fi
 }
 
+# .env 的每一行都用 Python shlex.quote 引用：bash 的 printf %q 遇到换行/控制字符会输出 $'...'，
+# 面板 app.py 和 scripts/envutil.sh 用 shlex 解析时认不全这种形式。
 write_env_line() {
   local key="$1"
   local value="$2"
-  printf '%s=%q\n' "$key" "$value"
+  python3 -c 'import shlex, sys; print(sys.argv[1] + "=" + shlex.quote(sys.argv[2]))' "$key" "$value"
 }
 
 copy_payload() {
@@ -136,29 +138,35 @@ copy_payload() {
   fi
 }
 
-# 读 .env 里某个键的值（.env 是 shell 语法，用 shlex 解析）
+# env_get / env_upsert 和 remote-root/etc/mihomo/scripts/envutil.sh 的 get_env / upsert_env 是同一套逻辑。
+# 安装脚本在 scripts/ 目录装好之前就要读写 .env（而且可能是 curl | bash 单文件运行），所以这里保留一份副本；
+# 改动引用/解析规则时两边要一起改。
+
+# 读 .env 里某个键的值（.env 是 shell 语法，用 shlex 解析；未加引号的值里的 # 不是注释）
 env_get() {
   local key="$1"
   [ -f "$INSTALL_DIR/.env" ] || return 0
   python3 - "$INSTALL_DIR/.env" "$key" <<'PY'
-import re, shlex, sys
+import shlex, sys
 path, key = sys.argv[1], sys.argv[2]
 value = ""
 for line in open(path, encoding="utf-8"):
     line = line.strip()
     if not line or line.startswith("#") or "=" not in line:
         continue
-    try:
-        parts = shlex.split(line, comments=True, posix=True)
-    except ValueError:
+    name, _, raw = line.partition("=")
+    if name.strip() != key:
         continue
-    if parts and parts[0].startswith(key + "="):
-        value = parts[0].split("=", 1)[1]
+    try:
+        parts = shlex.split(raw.strip(), comments=False, posix=True)
+        value = parts[0] if parts else ""
+    except ValueError:
+        value = raw.strip()
 print(value, end="")
 PY
 }
 
-# 在 .env 里新增或替换一个键（0600 临时文件 + 原子替换）
+# 在 .env 里新增或替换一个键（shlex 引用，0600 临时文件 + 原子替换）
 env_upsert() {
   local key="$1"
   local value="$2"
@@ -223,7 +231,7 @@ write_env_file() {
 }
 
 # 控制器 (external-controller, 9090) 必须对局域网开放：Zashboard/MetaCubeXD 这类外部 Dashboard 是在
-# 用户浏览器里直接连 9090 的（面板的"打开 Dashboard"按钮、manage_ui.sh 都指向 http://<ip>:9090/ui），
+# 用户浏览器里直接连 9090 的（面板的"打开 Dashboard"按钮和 CLI 的面板信息都指向 http://<ip>:9090/ui），
 # 所以不能把它绑回 127.0.0.1，而是给它配一个随机 secret：
 #   - 写进 config.yaml 的 secret:（内核用它鉴权）
 #   - 写进 .env 的 MIHOMO_API_SECRET（面板 app.py 用它访问控制器，update_subscription.sh 用它回填新配置）

@@ -14,35 +14,15 @@ CORE_BIN="/usr/bin/mihomo-core"
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[0;33m'; BLUE='\033[0;34m'; NC='\033[0m'
 if [ -f "$ENV_FILE" ]; then source "$ENV_FILE"; fi
 
-upsert_env() {
-    local key=$1
-    local value=$2
-    python3 - "$ENV_FILE" "$key" "$value" <<'PY'
-import os, pathlib, re, shlex, sys
-
-path = pathlib.Path(sys.argv[1])
-key = sys.argv[2]
-value = sys.argv[3]
-line = f"{key}={shlex.quote(value)}\n"
-lines = path.read_text(encoding="utf-8").splitlines(keepends=True) if path.exists() else []
-pattern = re.compile(rf"^\s*{re.escape(key)}=")
-for index, existing in enumerate(lines):
-    if pattern.match(existing):
-        lines[index] = line
-        break
-else:
-    if lines and not lines[-1].endswith("\n"):
-        lines[-1] += "\n"
-    lines.append(line)
-# .env 里有密码：0600 临时文件 + 原子替换
-tmp = path.with_name(f".env.{os.getpid()}.tmp")
-fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-with os.fdopen(fd, "w", encoding="utf-8") as f:
-    f.write("".join(lines))
-os.replace(tmp, path)
-PY
-    chmod 600 "$ENV_FILE"
-}
+# .env 写入统一走 scripts/envutil.sh 的 upsert_env（shlex 引用 + 0600 原子替换），这里不再复制一份
+if [ -f "${SCRIPT_DIR}/envutil.sh" ]; then
+    source "${SCRIPT_DIR}/envutil.sh"
+else
+    upsert_env() {
+        echo -e "${RED}缺少 ${SCRIPT_DIR}/envutil.sh，无法写入 .env，请重新安装工具箱。${NC}" >&2
+        return 1
+    }
+fi
 
 check_status() {
     if systemctl is-active --quiet $SVC_CORE; then c="${GREEN}运行中${NC}"; else c="${RED}已停止${NC}"; fi

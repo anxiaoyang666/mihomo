@@ -52,6 +52,18 @@ class MihomoInstallContractTest(unittest.TestCase):
         )
         self.assertIn("WEB_PORT=7838 WEB_USER=admin WEB_SECRET='your-password'", text)
 
+    def test_readmes_list_every_env_key_and_upgrade_one_liner_matches_layout(self):
+        for name, text in (("README.md", readme_source()), ("README.zh-CN.md", readme_zh_source())):
+            with self.subTest(readme=name):
+                for key in ("GH_PROXY", "MIHOMO_API_SECRET", "BACKUP_KEEP_COUNT", "ALLOW_INSECURE_TLS",
+                            "GATEWAY_AUTOFIX", "RULE_SYNC_ENABLED", "RULE_SYNC_TOKEN", "RULE_SYNC_PEERS"):
+                    self.assertIn(f"`{key}", text, f"{name} 缺少 .env 键 {key} 的说明")
+                # 一次性升级命令要和 app.py panel_managed_targets 覆盖同一批文件
+                self.assertIn('cp -a "$SRC/etc/mihomo/scripts/." /etc/mihomo/scripts/', text)
+                self.assertIn('install -m 0644 "$SRC/etc/logrotate.d/mihomo" /etc/logrotate.d/mihomo', text)
+                self.assertIn('install -m 0644 "$SRC/etc/mihomo/config.example.yaml" /etc/mihomo/config.example.yaml', text)
+                self.assertIn('install -m 0644 "$SRC/etc/systemd/system/force-ip-forward.service"', text)
+
     def test_chinese_readme_documents_one_click_install(self):
         text = readme_zh_source()
 
