@@ -282,12 +282,51 @@ if [ "$FILE_CHANGED" -eq 1 ]; then
     BACKUP_FILE="${BACKUP_DIR}/config_$(date +%Y%m%d%H%M%S).yaml"
     [ -f "$CONFIG_FILE" ] && cp "$CONFIG_FILE" "$BACKUP_FILE"
     prune_backups
+    # 留一份旧内容给面板比较：没碰 TUN/端口等网络结构就热加载，不断开连接
+    OLD_COPY="${TMP_DIR}/config_old.yaml"
+    if [ -f "$CONFIG_FILE" ]; then cp "$CONFIG_FILE" "$OLD_COPY"; else : > "$OLD_COPY"; fi
     mv "$TEMP_NEW" "$CONFIG_FILE"
-    systemctl restart mihomo
-    sleep 3
-    # 重启后没起来就回滚，不然 Restart=always 会让网关一直崩溃循环
-    if ! systemctl is-active --quiet mihomo; then
-        echo "❌ mihomo 重启失败，正在回滚到更新前的配置..."
+
+    APPLY_ACTION="restarted"
+    if [ -f "${MIHOMO_DIR}/manager/app.py" ]; then
+        # 由面板的 apply_config_change 决定热加载还是重启（热加载失败会自动改为重启）；stdout 只输出动作
+        APPLY_ACTION="$(python3 - "$OLD_COPY" "$CONFIG_FILE" <<'PY'
+import subprocess, sys
+sys.path.insert(0, "/etc/mihomo/manager")
+old_path, new_path = sys.argv[1], sys.argv[2]
+try:
+    import app
+except Exception as e:
+    print(f"⚠️ 无法加载面板，直接重启: {e}", file=sys.stderr)
+    ok = subprocess.run(["systemctl", "restart", "mihomo"]).returncode == 0
+    print("restarted")
+    sys.exit(0 if ok else 1)
+with open(old_path, encoding="utf-8") as f:
+    old_text = f.read()
+with open(new_path, encoding="utf-8") as f:
+    new_text = f.read()
+ok, message, action = app.apply_config_change(old_text, new_text)
+print(message, file=sys.stderr)
+print(action)
+sys.exit(0 if ok else 1)
+PY
+)"
+        APPLY_RC=$?
+        APPLY_ACTION="$(printf '%s\n' "$APPLY_ACTION" | tail -n 1)"
+    else
+        systemctl restart mihomo
+        APPLY_RC=$?
+    fi
+    # 应用失败或应用后没在运行就回滚，不然 Restart=always 会让网关一直崩溃循环
+    APPLY_FAILED=0
+    if [ "$APPLY_RC" -ne 0 ]; then
+        APPLY_FAILED=1
+    else
+        sleep 3
+        systemctl is-active --quiet mihomo || APPLY_FAILED=1
+    fi
+    if [ "$APPLY_FAILED" -eq 1 ]; then
+        echo "❌ 新配置应用失败，正在回滚到更新前的配置..."
         if [ -f "$BACKUP_FILE" ]; then
             cp "$BACKUP_FILE" "$CONFIG_FILE"
             systemctl restart mihomo
@@ -296,9 +335,16 @@ if [ "$FILE_CHANGED" -eq 1 ]; then
         bash "$NOTIFY_SCRIPT" "❌ 订阅更新失败" "新配置启动失败，已回滚到更新前的配置。"
         exit 1
     fi
-    echo "🎉 更新完成并重启。"
-    RESULT_MSG="配置已更新并重启"
-    
+    if [ "$APPLY_ACTION" = "reloaded" ]; then
+        echo "🎉 更新完成并热加载（未中断连接）。"
+        RESULT_MSG="配置已更新并热加载（未中断连接）"
+        APPLY_LABEL="已热加载"
+    else
+        echo "🎉 更新完成并重启。"
+        RESULT_MSG="配置已更新并重启"
+        APPLY_LABEL="已重启"
+    fi
+
     # --- 文案转换逻辑 ---
     if [ "$CONFIG_MODE" == "raw" ]; then
         MODE_NAME="配置托管"
@@ -306,7 +352,7 @@ if [ "$FILE_CHANGED" -eq 1 ]; then
         MODE_NAME="节点订阅"
     fi
     
-    bash "$NOTIFY_SCRIPT" "♻️ 订阅更新成功" "模式: ${MODE_NAME}"
+    bash "$NOTIFY_SCRIPT" "♻️ 订阅更新成功" "模式: ${MODE_NAME}，${APPLY_LABEL}"
 else
     rm -f "$TEMP_NEW"
     RESULT_MSG="配置无变更"

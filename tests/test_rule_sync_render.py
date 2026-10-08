@@ -99,6 +99,9 @@ class FakeResponse:
     def getcode(self):
         return self.status
 
+    def read(self):
+        return b"{}"
+
 
 class RuleSyncRenderTest(unittest.TestCase):
     def setUp(self):
@@ -242,9 +245,11 @@ class RuleSyncRenderTest(unittest.TestCase):
         self.config_path().write_text(self.legacy_config(), encoding="utf-8")
         ok, message, action = self.app.save_rule_content("force-nocn", "openai.com\nclaude.ai\n")
         self.assertTrue(ok, message)
-        self.assertEqual(action, "restart")
+        self.assertEqual(action, "reloaded", message)
         self.assertIn("一次性升级", message)
-        self.assertEqual(self.puts, [], "迁移走重启，不调用热刷新")
+        # 迁移只改 rules / rule-providers / fake-ip-filter：整份配置热加载，不重启
+        self.assertEqual([(m, u.split("/")[-1]) for m, u, _h, _t in self.puts[:1]], [("PUT", "configs?force=true")])
+        self.assertEqual(self.restarts, [])
         config = self.config_path().read_text(encoding="utf-8")
         self.assertEqual(self.app.sync_blocks_mode(config), "provider")
         self.assertEqual(self.app.read_mihomo_sync_rules(), {"force-cn": "a.cn\nb.cn\n", "force-nocn": "openai.com\nclaude.ai\n"})

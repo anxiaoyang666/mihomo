@@ -24,6 +24,11 @@ import zipfile
 from urllib import error as urlerror
 from urllib import request as urlrequest
 from urllib.parse import quote, unquote, urlencode, urlsplit
+try:
+    # 网关上由 install.sh 装 python3-yaml；没有时无法比较配置，改配置一律保守重启
+    import yaml
+except ImportError:
+    yaml = None
 
 MIHOMO_DIR = "/etc/mihomo"
 SCRIPT_DIR = "/etc/mihomo/scripts"
@@ -36,7 +41,7 @@ SUBSCRIPTION_STATE_FILE = f"{MIHOMO_DIR}/.last_subscription"
 SUBSCRIPTION_LOG = "/var/log/mihomo-subscription.log"
 GEO_LOG = "/var/log/mihomo-geo.log"
 MANAGER_DIR = f"{MIHOMO_DIR}/manager"
-PANEL_VERSION = "0.1.34"
+PANEL_VERSION = "0.1.35"
 DEFAULT_PANEL_REPO_URL = "https://github.com/anxiaoyang666/mihomo.git"
 DEFAULT_PANEL_BRANCH = "main"
 PANEL_BACKUP_KEEP_COUNT = 3
@@ -909,8 +914,15 @@ def update_mihomo_sync_block(rule_contents):
             restore_rule_provider_files(snapshot)
             return False, "规则写入后配置校验失败，已取消保存：\n" + message, None
         write_config_text(new_text)
+        # 这次改写只动 rules / rule-providers / dns.fake-ip-filter，不涉及网络结构，热加载整个配置即可；
+        # 热加载失败才交给调用方重启（收到同步时要先回响应再在后台重启）
+        reloaded, detail = hot_reload_mihomo()
+        if reloaded:
+            if upgrading:
+                return True, "同步规则已一次性升级为规则集格式并热加载，未中断连接", "reloaded"
+            return True, "已写入规则集配置并热加载，未中断连接", "reloaded"
         if upgrading:
-            return True, "同步规则已一次性升级为规则集格式（本次需重启 mihomo，之后保存无需重启）", "restart"
+            return True, f"同步规则已一次性升级为规则集格式（热加载失败：{detail}，改为重启 mihomo）", "restart"
         return True, "已写入规则集配置（本次需重启 mihomo）", "restart"
     finally:
         CONFIG_LOCK.release()
@@ -938,6 +950,84 @@ def schedule_mihomo_restart():
         stderr=subprocess.DEVNULL,
         close_fds=True,
     )
+
+# 改了这些键需要重启：TUN、监听端口/地址、控制器、出站接口、DNS 监听方式。
+# 其余（proxies / proxy-groups / rules / rule-providers / log-level / dns.nameserver / fake-ip-filter 等）
+# 用控制器 PUT /configs 热加载即可，进程和已有连接都不受影响（v1.19.32 实测）。
+RESTART_TOP_LEVEL_KEYS = (
+    "tun", "port", "socks-port", "mixed-port", "redir-port", "tproxy-port", "allow-lan", "bind-address",
+    "ipv6", "listeners", "external-controller", "external-controller-tls", "external-ui", "secret",
+    "interface-name", "routing-mark", "profile",
+)
+RESTART_DNS_KEYS = ("listen", "enable", "enhanced-mode", "fake-ip-range")
+CONFIG_COMPARE_FAILED_REASON = "无法比较配置，保守起见重启"
+HOT_RELOAD_TIMEOUT = 30
+
+def config_needs_restart(old_text, new_text):
+    """返回 (是否需要重启, 原因列表)。两边都能解析成映射才比较，否则保守重启。"""
+    if yaml is None:
+        return True, [CONFIG_COMPARE_FAILED_REASON]
+    try:
+        old = yaml.safe_load(old_text or "")
+        new = yaml.safe_load(new_text or "")
+    except Exception:
+        return True, [CONFIG_COMPARE_FAILED_REASON]
+    if not isinstance(old, dict) or not isinstance(new, dict):
+        return True, [CONFIG_COMPARE_FAILED_REASON]
+    reasons = [f"修改了 {key}" for key in RESTART_TOP_LEVEL_KEYS if old.get(key) != new.get(key)]
+    old_dns = old.get("dns") if isinstance(old.get("dns"), dict) else {}
+    new_dns = new.get("dns") if isinstance(new.get("dns"), dict) else {}
+    reasons += [f"修改了 dns.{key}" for key in RESTART_DNS_KEYS if old_dns.get(key) != new_dns.get(key)]
+    return bool(reasons), reasons
+
+def hot_reload_mihomo(path=None):
+    """让运行中的 mihomo 重新读配置文件（PUT /configs?force=true），不重启进程、不断开已有连接。
+    path 默认是 CONFIG_FILE。"""
+    path = path or CONFIG_FILE
+    settings = mihomo_controller_settings()
+    headers = {"User-Agent": "mihomo-web-manager", "Content-Type": "application/json"}
+    if settings.get("secret"):
+        headers["Authorization"] = "Bearer " + settings["secret"]
+    body = json.dumps({"path": path, "payload": ""}).encode("utf-8")
+    try:
+        req = urlrequest.Request(settings["base_url"] + "/configs?force=true", data=body, headers=headers, method="PUT")
+        with urlrequest.urlopen(req, timeout=HOT_RELOAD_TIMEOUT) as resp:
+            status = getattr(resp, "status", None) or resp.getcode()
+    except urlerror.HTTPError as e:
+        detail = ""
+        try:
+            detail = e.read().decode("utf-8", "replace").strip()
+        except Exception:
+            pass
+        return False, f"HTTP {e.code}" + (f"：{detail[:200]}" if detail else "")
+    except Exception as e:
+        return False, str(e)
+    if status not in (200, 204):
+        return False, f"HTTP {status}"
+    ok, info = mihomo_api_get("/version", timeout=5)
+    if not ok:
+        return False, "热加载后控制器无响应：" + str(info.get("error") if isinstance(info, dict) else info)
+    return True, "ok"
+
+def apply_config_change(old_text, new_text):
+    """config.yaml 已写成 new_text 之后让它生效。返回 (ok, 说明, 动作)，动作为 unchanged / reloaded / restarted。
+
+    没碰网络结构的改动走热加载；改了 TUN/端口等、或无法比较时重启；热加载失败退回重启。"""
+    if config_text_key(old_text) == config_text_key(new_text):
+        return True, CONFIG_UNCHANGED_MESSAGE, "unchanged"
+    needs_restart, reasons = config_needs_restart(old_text, new_text)
+    if needs_restart:
+        ok, output = restart_mihomo()
+        if ok:
+            return True, "已重启（因为" + "，".join(reasons) + "）", "restarted"
+        return False, "mihomo 重启失败（" + "，".join(reasons) + "）：\n" + output, "restarted"
+    reloaded, detail = hot_reload_mihomo()
+    if reloaded:
+        return True, "已热加载，未中断连接", "reloaded"
+    ok, output = restart_mihomo()
+    if ok:
+        return True, f"热加载失败，已改为重启：{detail}", "restarted"
+    return False, f"热加载失败，改为重启也失败：{detail}\n" + output, "restarted"
 
 
 def local_ipv4_addresses():
@@ -2975,7 +3065,7 @@ def handle_config():
             return jsonify({"success": False, "message": BUSY_MESSAGE})
         tmp_file = None
         try:
-            # 内容和当前 config.yaml 一样（只忽略换行符差异和末尾换行）就什么都不做，前端也不重启
+            # 内容和当前 config.yaml 一样（只忽略换行符差异和末尾换行）就什么都不做，也不重启/热加载
             if os.path.exists(CONFIG_FILE) and config_text_key(content) == config_text_key(read_config_text()):
                 return jsonify({"success": True, "unchanged": True, "message": CONFIG_UNCHANGED_MESSAGE})
             tmp_file = write_tmp_config(content, ".webcheck")
@@ -2986,9 +3076,14 @@ def handle_config():
                 os.makedirs(BACKUP_DIR, exist_ok=True)
                 shutil.copy2(CONFIG_FILE, f"{BACKUP_DIR}/config_{time.strftime('%Y%m%d%H%M%S')}.yaml")
                 prune_config_backups()
+            old_text = read_config_text() if os.path.exists(CONFIG_FILE) else ""
             os.replace(tmp_file, CONFIG_FILE)
             tmp_file = None
-            return jsonify({"success": True, "message": "配置已保存"})
+            # 后端知道新旧内容：没碰网络结构就热加载（不断连接），否则才重启
+            ok, message, action = apply_config_change(old_text, content)
+            if not ok:
+                message = "配置已保存，但" + message
+            return jsonify({"success": ok, "message": message, "action": action})
         except Exception as e:
             return jsonify({"success": False, "message": str(e)})
         finally:

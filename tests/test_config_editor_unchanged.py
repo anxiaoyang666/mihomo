@@ -16,6 +16,8 @@ class ConfigEditorUnchangedTest(unittest.TestCase):
         app.jsonify = lambda payload: payload
         self.validated = []
         app.validate_config = lambda path: self.validated.append(path) or (True, "ok")
+        # 保存后的热加载/重启由 test_config_hot_reload 覆盖，这里不碰真实控制器和 systemctl
+        app.apply_config_change = lambda old, new: (True, "已热加载，未中断连接", "reloaded")
         self.original = TEMPLATE.read_text(encoding="utf-8")
         (self.dir / "config.yaml").write_text(self.original, encoding="utf-8")
 

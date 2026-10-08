@@ -92,11 +92,13 @@ class MihomoRuleSyncContractTest(unittest.TestCase):
         self.assertIn('id="syncLoadMode"', text)
         self.assertIn("'同步规则加载方式：' + res.load_mode", text)
 
-    def test_config_editor_only_restarts_when_content_changed(self):
+    def test_config_editor_lets_backend_reload_or_restart(self):
         html = index_source()
         save_fn = html[html.find("async function saveConfig"): html.find("async function saveAndUpdateSub")]
-        self.assertIn("if (res.success && !res.unchanged) await control('restart');", save_fn)
-        self.assertNotIn("if (res.success) await control('restart');", save_fn)
+        # 保存后由后端决定热加载/重启，前端不再另外调 control('restart')
+        self.assertIn("api('/config', {content: content})", save_fn)
+        self.assertNotIn("control('restart')", save_fn)
+        self.assertIn("showToast(res.message", save_fn)
         app_text = app_source()
         self.assertIn('CONFIG_UNCHANGED_MESSAGE = "配置内容没有变化，未重启"', app_text)
         self.assertIn('"unchanged": True', app_text)

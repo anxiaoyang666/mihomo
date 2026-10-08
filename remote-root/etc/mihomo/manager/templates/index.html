@@ -1200,7 +1200,7 @@
                         <div class="card">
                             <div class="card-header d-flex justify-content-between align-items-center">
                                 <span><i class="bi bi-file-earmark-code"></i> 配置文件 config.yaml</span>
-                                <button class="action-button primary" onclick="saveConfig(this)"><i class="bi bi-save"></i> 保存重启</button>
+                                <button class="action-button primary" onclick="saveConfig(this)"><i class="bi bi-save"></i> 保存生效</button>
                             </div>
                             <div class="card-body p-0">
                                 <textarea id="config-editor" class="form-control"></textarea>
@@ -2500,14 +2500,14 @@
 
     async function saveConfig(trigger = null) {
         if (trigger?.classList?.contains('is-busy')) return;
-        if (!await askConfirm('确定保存并重启服务？')) return;
+        if (!await askConfirm('确定保存并应用配置？只改节点/规则等会热加载；改了 TUN、端口等网络设置才会重启。')) return;
         const content = document.getElementById('config-editor').value;
         setActionBusy(trigger, true);
         try {
+            // 后端保存后自己决定热加载还是重启（action: reloaded / restarted / unchanged），这里不再另外重启
             const res = await api('/config', {content: content});
-            showToast(res.message, res.success ? 'success' : 'error');
-            // 内容没变时后端返回 unchanged，不重启
-            if (res.success && !res.unchanged) await control('restart');
+            showToast(res.message, res.success ? 'success' : 'error', 4200);
+            if (res.success && !res.unchanged) loadOverview();
             return res;
         } finally {
             setActionBusy(trigger, false);
