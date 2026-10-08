@@ -1300,6 +1300,7 @@
                                     <button class="action-button primary" onclick="saveSyncSettings(this)"><i class="bi bi-save"></i> 保存同步</button>
                                     <button class="soft-button" onclick="testSyncPeers(this)"><i class="bi bi-wifi"></i> 测试连通性</button>
                                 </div>
+                                <div class="small text-muted mt-3" id="syncJobSummary" style="white-space: pre-wrap;"></div>
                                 <div class="sync-test-list mt-3" id="syncTestResults"></div>
                             </div>
                         </div>
@@ -2632,7 +2633,13 @@
         setActionBusy(trigger, true);
         try {
             const res = await api('/rules/' + encodeURIComponent(ruleId), {content: editor ? editor.value : ''});
-            showToast(res.message || (res.success ? '规则已保存' : '保存失败'), res.success ? 'success' : 'error', 6000);
+            if (res.success && res.sync_job) {
+                showToast('已保存，正在同步…\n' + (res.message || ''), 'success', 6000);
+                // 不 await：按钮马上恢复，同步结果到了再单独提示
+                pollSyncJob(res.sync_job);
+            } else {
+                showToast(res.message || (res.success ? '规则已保存' : '保存失败'), res.success ? 'success' : 'error', 6000);
+            }
             loadOverview();
             return res;
         } finally {
@@ -2640,7 +2647,75 @@
         }
     }
 
+    // 规则同步在后端后台线程里进行，保存接口立即返回任务 id，这里按 id 轮询结果。
+    // 节点里可能有本机上游的 mihomo，它重启时浏览器的连接会断：轮询失败（断网、502、面板重启）一律静默重试，
+    // 直到任务结束或超过期限，中途不弹任何错误。
+    const SYNC_POLL_INTERVAL_MS = 2000;
+    const SYNC_POLL_DEADLINE_MS = 120000;
+    const SYNC_SELF_MESSAGE = '本机（跳过）';
+
+    async function fetchSyncJob(jobId) {
+        // 不走 api()：api() 失败会弹 toast，轮询要求完全静默
+        try {
+            const resp = await fetch('/api/rule-sync-jobs/' + encodeURIComponent(jobId), {
+                headers: { 'X-Requested-With': 'XMLHttpRequest' }
+            });
+            if (!resp.ok) return null;
+            const body = await resp.json();
+            return body && body.job ? body.job : null;
+        } catch (error) {
+            return null;
+        }
+    }
+
+    function summarizeSyncJob(job) {
+        const results = (job && job.results) || [];
+        const skipped = results.filter(item => item.success && item.message === SYNC_SELF_MESSAGE).length;
+        const failed = results.filter(item => !item.success);
+        const succeeded = results.length - skipped - failed.length;
+        let text = `同步完成：成功 ${succeeded} / 失败 ${failed.length} / 本机跳过 ${skipped}`;
+        if (failed.length) {
+            text += '\n失败节点：\n' + failed.map(item => `${item.peer}：${item.message || '未知错误'}`).join('\n');
+        }
+        return { text, failedCount: failed.length };
+    }
+
+    function renderSyncJobSummary(job) {
+        const box = document.getElementById('syncJobSummary');
+        if (!box) return;
+        if (!job) {
+            box.textContent = '';
+            return;
+        }
+        const started = job.started_at ? new Date(job.started_at * 1000).toLocaleString() : '--';
+        const head = `最近一次同步（${started}，${job.rule_id || '--'}）：`;
+        box.textContent = job.finished_at
+            ? head + summarizeSyncJob(job).text
+            : head + `进行中 ${job.done || 0} / ${job.total || 0}`;
+    }
+
+    async function pollSyncJob(jobId) {
+        const deadline = Date.now() + SYNC_POLL_DEADLINE_MS;
+        while (Date.now() < deadline) {
+            await new Promise(resolve => setTimeout(resolve, SYNC_POLL_INTERVAL_MS));
+            const job = await fetchSyncJob(jobId);
+            if (job && job.finished_at) {
+                const summary = summarizeSyncJob(job);
+                showToast(summary.text, summary.failedCount ? 'warning' : 'success', 9000);
+                renderSyncJobSummary(job);
+                return job;
+            }
+        }
+        showToast('同步结果未取回，可稍后在规则同步区域查看', 'warning', 9000);
+        return null;
+    }
+
+    async function loadSyncJobSummary() {
+        renderSyncJobSummary(await fetchSyncJob('latest'));
+    }
+
     async function loadSyncSettings() {
+        loadSyncJobSummary();
         const res = await api('/rule-sync-settings');
         const enabled = document.getElementById('syncEnabled');
         const token = document.getElementById('syncToken');

@@ -36,7 +36,7 @@ SUBSCRIPTION_STATE_FILE = f"{MIHOMO_DIR}/.last_subscription"
 SUBSCRIPTION_LOG = "/var/log/mihomo-subscription.log"
 GEO_LOG = "/var/log/mihomo-geo.log"
 MANAGER_DIR = f"{MIHOMO_DIR}/manager"
-PANEL_VERSION = "0.1.32"
+PANEL_VERSION = "0.1.33"
 DEFAULT_PANEL_REPO_URL = "https://github.com/anxiaoyang666/mihomo.git"
 DEFAULT_PANEL_BRANCH = "main"
 PANEL_BACKUP_KEEP_COUNT = 3
@@ -768,16 +768,94 @@ def is_self_peer(peer, own_port):
         return False
     return port == own_port and host in local_ipv4_addresses()
 
-def broadcast_rule(rule_id, content):
+# 规则同步在后台线程里推送：保存规则的请求不再等各节点返回。
+# 节点里可能有本机上游的 mihomo，它重启时会断掉浏览器经由它的连接，同步等在请求里就会让页面误报“请求中断”。
+SYNC_JOBS = []
+SYNC_JOBS_LOCK = threading.Lock()
+SYNC_JOBS_KEEP = 5
+SYNC_PEER_TIMEOUT = 15
+SYNC_BUSY_RETRIES = 3
+SYNC_BUSY_DELAY = 3
+SYNC_SELF_MESSAGE = "本机（跳过）"
+# 对端忙时的提示：mosctl 返回 409“操作进行中，请稍后再试”，mihomo 返回 200 + “另一个操作正在进行中，请稍后再试。”
+SYNC_BUSY_HINTS = ("稍后再试", "操作进行中", "正在进行中")
+
+
+def sync_peer_busy(message):
+    return any(hint in str(message or "") for hint in SYNC_BUSY_HINTS)
+
+
+def push_rule_to_peer(peer, payload, headers):
+    """推给一个节点，返回 (成功, 说明)。对端忙（409 或忙碌提示）时隔 SYNC_BUSY_DELAY 秒重试，最多 SYNC_BUSY_RETRIES 次。"""
+    url = peer.rstrip("/") + "/api/rule-sync"
+    attempt = 0
+    while True:
+        busy = False
+        try:
+            req = urlrequest.Request(url, data=payload, headers=headers, method="POST")
+            with urlrequest.urlopen(req, timeout=SYNC_PEER_TIMEOUT) as resp:
+                body = json.loads(resp.read().decode("utf-8", "replace"))
+            if not isinstance(body, dict):
+                body = {}
+            if body.get("success"):
+                return True, "成功"
+            message = str(body.get("message") or "未知错误")
+            busy = sync_peer_busy(message)
+        except urlerror.HTTPError as exc:
+            message = str(exc)
+            busy = exc.code == 409
+            exc.close()
+        except Exception as exc:
+            message = str(exc)
+        if not busy or attempt >= SYNC_BUSY_RETRIES:
+            if busy and attempt:
+                message += f"（已重试 {attempt} 次）"
+            return False, message
+        attempt += 1
+        time.sleep(SYNC_BUSY_DELAY)
+
+
+def sync_job_snapshot(job):
+    with SYNC_JOBS_LOCK:
+        return json.loads(json.dumps(job))
+
+
+def find_sync_job(job_id):
+    with SYNC_JOBS_LOCK:
+        if job_id == "latest":
+            job = SYNC_JOBS[-1] if SYNC_JOBS else None
+        else:
+            job = next((item for item in SYNC_JOBS if item["id"] == job_id), None)
+    return sync_job_snapshot(job) if job else None
+
+
+def run_broadcast_job(job, peers, payload, headers):
+    for peer in peers:
+        try:
+            ok, message = push_rule_to_peer(peer, payload, headers)
+        except Exception as exc:  # 线程里不能把异常抛丢，任务要能结束
+            ok, message = False, str(exc)
+        with SYNC_JOBS_LOCK:
+            job["results"].append({"peer": peer, "success": ok, "message": message})
+            job["done"] += 1
+    with SYNC_JOBS_LOCK:
+        job["finished_at"] = int(time.time())
+
+
+def start_broadcast(rule_id, content):
+    """在后台推送规则，返回 (任务 id 或 None, 给用户的说明)。
+
+    依赖请求的东西（source、设置、本机端口、本机识别）都在这里取好再起线程；线程不持有操作锁。
+    """
     if rule_id not in SYNCABLE_RULE_IDS:
-        return ""
+        return None, ""
     settings = read_sync_settings()
     if not settings["enabled"]:
-        return "规则同步未启用。"
+        return None, "规则同步未启用。"
     if not settings["peers"]:
-        return "规则同步已启用，但没有配置其他节点。"
+        return None, "规则同步已启用，但没有配置其他节点。"
     if not settings["token"]:
-        return "规则同步已启用，但缺少同步密钥。"
+        return None, "规则同步已启用，但缺少同步密钥。"
 
     payload = json.dumps(
         {
@@ -786,25 +864,38 @@ def broadcast_rule(rule_id, content):
             "source": request.host_url.rstrip("/"),
         }
     ).encode("utf-8")
-    headers = {"Content-Type": "application/json", "X-Mosdns-Sync-Token": settings["token"]}
-    results = []
+    headers = {
+        "Content-Type": "application/json",
+        "X-Mosdns-Sync-Token": settings["token"],
+    }
     own_port = read_env().get("WEB_PORT", "7838")
+    remote_peers = []
+    results = []
     for peer in settings["peers"]:
         if is_self_peer(peer, own_port):
-            results.append(f"{peer}: 本机（跳过）")
-            continue
-        url = peer.rstrip("/") + "/api/rule-sync"
-        try:
-            req = urlrequest.Request(url, data=payload, headers=headers, method="POST")
-            with urlrequest.urlopen(req, timeout=15) as resp:
-                body = json.loads(resp.read().decode("utf-8", "replace"))
-            if body.get("success"):
-                results.append(f"{peer}: 成功")
-            else:
-                results.append(f"{peer}: 失败 - {body.get('message', '未知错误')}")
-        except Exception as exc:
-            results.append(f"{peer}: 失败 - {exc}")
-    return "同步结果：\n" + "\n".join(results)
+            results.append({"peer": peer, "success": True, "message": SYNC_SELF_MESSAGE})
+        else:
+            remote_peers.append(peer)
+    job = {
+        "id": secrets.token_hex(4),
+        "rule_id": rule_id,
+        "started_at": int(time.time()),
+        "finished_at": None,
+        "total": len(settings["peers"]),
+        "done": len(results),
+        "results": results,
+    }
+    with SYNC_JOBS_LOCK:
+        SYNC_JOBS.append(job)
+        del SYNC_JOBS[:-SYNC_JOBS_KEEP]
+    threading.Thread(
+        target=run_broadcast_job,
+        args=(job, remote_peers, payload, headers),
+        name="rule-sync-" + job["id"],
+        daemon=True,
+    ).start()
+    return job["id"], f"正在后台同步到 {len(remote_peers)} 个节点…"
+
 
 def apply_synced_rules(rules):
     if not isinstance(rules, dict):
@@ -2802,16 +2893,30 @@ def api_rules(rule_id):
         ok, message = restart_mihomo()
     finally:
         CONFIG_LOCK.release()
+    sync_job = None
     if ok:
-        sync_message = broadcast_rule(rule_id, content)
-        if sync_message:
+        # 同步在后台线程里进行，不持有 CONFIG_LOCK；前端拿 sync_job 轮询结果
+        sync_job, sync_message = start_broadcast(rule_id, content)
+        if sync_job:
+            message = "规则已保存并重启 mihomo；" + sync_message
+        elif sync_message:
             message = "规则已保存并重启 mihomo\n\n" + sync_message
     return jsonify(
         {
             "success": ok,
             "message": message if ok else "规则已保存，但 mihomo 重启失败：\n" + message,
+            "sync_job": sync_job,
         }
     )
+
+@app.route("/api/rule-sync-jobs/<job_id>")
+@login_required
+def api_rule_sync_job(job_id):
+    # job_id 为 latest 时返回最近一次同步任务；还没有任务时 job 为 null
+    job = find_sync_job(job_id)
+    if job is None and job_id != "latest":
+        return jsonify({"success": False, "message": "同步任务不存在或已过期"}), 404
+    return jsonify({"success": True, "job": job})
 
 @app.route('/api/settings', methods=['GET', 'POST'])
 @login_required

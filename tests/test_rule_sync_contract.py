@@ -26,7 +26,7 @@ class MihomoRuleSyncContractTest(unittest.TestCase):
         self.assertIn("RULE_SYNC_END", text)
         self.assertIn("def read_sync_settings", text)
         self.assertIn("def write_sync_settings", text)
-        self.assertIn("def broadcast_rule", text)
+        self.assertIn("def start_broadcast", text)
         self.assertIn("def apply_synced_rules", text)
         self.assertIn('@app.route("/api/rule-sync-settings", methods=["GET", "POST"])', text)
         self.assertIn('@app.route("/api/rule-sync-test", methods=["POST"])', text)
@@ -59,7 +59,7 @@ class MihomoRuleSyncContractTest(unittest.TestCase):
         text = app_source()
 
         self.assertIn("def apply_synced_rules(rules):", text)
-        self.assertNotIn("broadcast_rule(rule_id, content)", text[text.find("def apply_synced_rules"): text.find("def api_rule_sync")])
+        self.assertNotIn("start_broadcast(", text[text.find("def apply_synced_rules"): text.find("def api_rule_sync")])
 
     def test_received_sync_defers_restart_until_after_http_response(self):
         text = app_source()
