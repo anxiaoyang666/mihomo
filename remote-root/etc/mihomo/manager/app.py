@@ -36,7 +36,7 @@ SUBSCRIPTION_STATE_FILE = f"{MIHOMO_DIR}/.last_subscription"
 SUBSCRIPTION_LOG = "/var/log/mihomo-subscription.log"
 GEO_LOG = "/var/log/mihomo-geo.log"
 MANAGER_DIR = f"{MIHOMO_DIR}/manager"
-PANEL_VERSION = "0.1.33"
+PANEL_VERSION = "0.1.34"
 DEFAULT_PANEL_REPO_URL = "https://github.com/anxiaoyang666/mihomo.git"
 DEFAULT_PANEL_BRANCH = "main"
 PANEL_BACKUP_KEEP_COUNT = 3
@@ -47,6 +47,17 @@ RULE_SYNC_BEGIN = "# MOSCTL_MIHOMO_RULE_SYNC_BEGIN"
 RULE_SYNC_END = "# MOSCTL_MIHOMO_RULE_SYNC_END"
 FAKE_IP_FILTER_BEGIN = "# MOSCTL_MIHOMO_FAKE_IP_FILTER_BEGIN"
 FAKE_IP_FILTER_END = "# MOSCTL_MIHOMO_FAKE_IP_FILTER_END"
+RULE_PROVIDERS_BEGIN = "# MOSCTL_MIHOMO_RULE_PROVIDERS_BEGIN"
+RULE_PROVIDERS_END = "# MOSCTL_MIHOMO_RULE_PROVIDERS_END"
+# 同步规则的域名放在规则文件里，config.yaml 只通过 file 类型的 rule-provider 引用；
+# 改规则时写文件再 PUT /providers/rules/<name> 热刷新，不用重启 mihomo
+RULES_DIR = f"{MIHOMO_DIR}/rules"
+RULE_PROVIDER_NAMES = {"force-cn": "mosctl_force_cn", "force-nocn": "mosctl_force_nocn"}
+RULE_PROVIDER_FILES = {
+    "force-cn": f"{RULES_DIR}/mosctl-force-cn.yaml",
+    "force-nocn": f"{RULES_DIR}/mosctl-force-nocn.yaml",
+}
+RULES_UNCHANGED_MESSAGE = "规则内容没有变化，未重启"
 # 日志只读文件尾部，避免把几百 MB 的日志整个读进内存
 LOG_TAIL_BYTES = 256 * 1024
 # 面板升级包的下载上限，防止异常源把磁盘写满
@@ -564,9 +575,16 @@ def proxy_policy_name(text):
             return preferred
     return names[0] if names else "PROXY"
 
-def read_mihomo_sync_rules(text=None):
-    if text is None:
-        text = read_config_text()
+def sync_blocks_mode(text):
+    """config.yaml 里同步规则的形态：provider（规则集 + 规则文件）、legacy（域名直接内联）、none（还没有）。"""
+    if RULE_PROVIDERS_BEGIN in text and f"RULE-SET,{RULE_PROVIDER_NAMES['force-cn']}," in text:
+        return "provider"
+    if RULE_SYNC_BEGIN in text:
+        return "legacy"
+    return "none"
+
+def read_legacy_inline_sync_rules(text):
+    """旧格式：域名以 - DOMAIN-SUFFIX,x,策略 的形式内联在 rules: 的标记块里。"""
     rules = {"force-cn": [], "force-nocn": []}
     in_block = False
     for line in text.splitlines():
@@ -584,30 +602,124 @@ def read_mihomo_sync_rules(text=None):
             if len(parts) == 3:
                 target = "force-cn" if parts[2] == "DIRECT" else "force-nocn"
                 rules[target].append(parts[1])
-    return {key: "\n".join(value) + ("\n" if value else "") for key, value in rules.items()}
+    return {key: rule_content_text(value) for key, value in rules.items()}
 
-def build_mihomo_sync_rule_lines(rule_contents, proxy_policy, item_indent=""):
-    block = [f"{item_indent}{RULE_SYNC_BEGIN}\n"]
-    for domain in normalize_rule_domains(rule_contents.get("force-cn", "")):
-        block.append(f"{item_indent}- DOMAIN-SUFFIX,{domain},DIRECT\n")
-    for domain in normalize_rule_domains(rule_contents.get("force-nocn", "")):
-        block.append(f"{item_indent}- DOMAIN-SUFFIX,{domain},{proxy_policy}\n")
-    block.append(f"{item_indent}{RULE_SYNC_END}\n")
+def rule_content_text(domains):
+    return "\n".join(domains) + ("\n" if domains else "")
+
+def read_rule_provider_file(path):
+    """读 payload: 列表（- '+.example.com'），还原成每行一个域名。"""
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            text = f.read()
+    except OSError:
+        return ""
+    domains = []
+    for line in text.splitlines():
+        match = re.match(r"^\s*-\s*(.+?)\s*$", line)
+        if not match:
+            continue
+        item = match.group(1).strip("'\"")
+        if item.startswith("+."):
+            item = item[2:]
+        domains.append(item)
+    return rule_content_text(normalize_rule_domains("\n".join(domains)))
+
+def read_rule_provider_files():
+    return {rule_id: read_rule_provider_file(path) for rule_id, path in RULE_PROVIDER_FILES.items()}
+
+def render_rule_provider_file(content):
+    domains = normalize_rule_domains(content)
+    if not domains:
+        return "payload: []\n"
+    # 单引号包起来：域名可能以 * 开头，裸写会被 YAML 当成别名
+    return "payload:\n" + "".join(f"  - '+.{domain}'\n" for domain in domains)
+
+def write_text_atomic(path, text, mode=0o644):
+    directory = os.path.dirname(path)
+    os.makedirs(directory, exist_ok=True)
+    with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=directory, prefix=os.path.basename(path) + ".", suffix=".tmp", delete=False) as f:
+        f.write(text)
+        tmp_path = f.name
+    try:
+        os.chmod(tmp_path, mode)
+        os.replace(tmp_path, path)
+    except Exception:
+        remove_quietly(tmp_path)
+        raise
+
+def write_rule_provider_files(rule_contents):
+    for rule_id, path in RULE_PROVIDER_FILES.items():
+        write_text_atomic(path, render_rule_provider_file(rule_contents.get(rule_id, "")))
+
+def snapshot_rule_provider_files():
+    """写规则文件前的原样内容（None 表示文件原本不存在），校验失败时用来还原。"""
+    snapshot = {}
+    for path in RULE_PROVIDER_FILES.values():
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                snapshot[path] = f.read()
+        except OSError:
+            snapshot[path] = None
+    return snapshot
+
+def restore_rule_provider_files(snapshot):
+    for path, text in snapshot.items():
+        try:
+            if text is None:
+                remove_quietly(path)
+            else:
+                write_text_atomic(path, text)
+        except OSError:
+            pass
+
+def read_mihomo_sync_rules(text=None):
+    """当前生效的同步规则：规则集格式读规则文件，旧格式读 config.yaml 里的内联块。"""
+    if text is None:
+        text = read_config_text()
+    if sync_blocks_mode(text) == "provider":
+        return read_rule_provider_files()
+    return read_legacy_inline_sync_rules(text)
+
+def rule_domain_set(content):
+    return set(normalize_rule_domains(content))
+
+def sync_rules_unchanged(current, new_contents):
+    return all(rule_domain_set(current.get(rule_id, "")) == rule_domain_set(new_contents.get(rule_id, "")) for rule_id in SYNCABLE_RULE_IDS)
+
+def build_mihomo_sync_rule_lines(proxy_policy, item_indent=""):
+    return [
+        f"{item_indent}{RULE_SYNC_BEGIN}\n",
+        f"{item_indent}- RULE-SET,{RULE_PROVIDER_NAMES['force-cn']},DIRECT\n",
+        f"{item_indent}- RULE-SET,{RULE_PROVIDER_NAMES['force-nocn']},{proxy_policy}\n",
+        f"{item_indent}{RULE_SYNC_END}\n",
+    ]
+
+def build_fake_ip_filter_lines(item_indent):
+    # 只有强制直连需要拿真实 IP，强制代理继续走 fake-ip
+    return [
+        f"{item_indent}{FAKE_IP_FILTER_BEGIN}\n",
+        f"{item_indent}- rule-set:{RULE_PROVIDER_NAMES['force-cn']}\n",
+        f"{item_indent}{FAKE_IP_FILTER_END}\n",
+    ]
+
+def build_rule_provider_lines(child_indent):
+    block = [f"{child_indent}{RULE_PROVIDERS_BEGIN}\n"]
+    for rule_id, name in RULE_PROVIDER_NAMES.items():
+        relative = "./rules/" + os.path.basename(RULE_PROVIDER_FILES[rule_id])
+        block.append(f"{child_indent}{name}: {{type: file, behavior: domain, format: yaml, path: {relative}}}\n")
+    block.append(f"{child_indent}{RULE_PROVIDERS_END}\n")
     return block
 
-def build_fake_ip_filter_lines(rule_contents, item_indent):
-    block = [f"{item_indent}{FAKE_IP_FILTER_BEGIN}\n"]
-    for domain in normalize_rule_domains(rule_contents.get("force-cn", "")):
-        block.append(f"{item_indent}- +.{domain}\n")
-    block.append(f"{item_indent}{FAKE_IP_FILTER_END}\n")
-    return block
-
-def remove_fake_ip_filter_block(lines):
-    start = next((idx for idx, line in enumerate(lines) if line.strip() == FAKE_IP_FILTER_BEGIN), -1)
+def remove_marker_block(lines, begin, end_marker):
+    start = next((idx for idx, line in enumerate(lines) if line.strip() == begin), -1)
     if start < 0:
         return lines
-    end = next((idx for idx in range(start + 1, len(lines)) if lines[idx].strip() == FAKE_IP_FILTER_END), start)
+    end = next((idx for idx in range(start + 1, len(lines)) if lines[idx].strip() == end_marker), start)
     return lines[:start] + lines[end + 1:]
+
+def remove_fake_ip_filter_block(lines):
+    return remove_marker_block(lines, FAKE_IP_FILTER_BEGIN, FAKE_IP_FILTER_END)
 
 def find_nested_key(lines, section_index, key):
     parent_indent = len(line_indent(lines[section_index]))
@@ -640,7 +752,20 @@ def list_item_indent_after_key(lines, key_index):
             return line_indent(line)
     return key_indent + "  "
 
-def update_fake_ip_filter_block(lines, rule_contents):
+def mapping_child_indent_after_key(lines, key_index):
+    """映射（如 rule-providers:）下子键的缩进：沿用第一个子项的缩进，没有子项时用两格。"""
+    key_indent = line_indent(lines[key_index])
+    for line in lines[key_index + 1:]:
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        indent = line_indent(line)
+        if len(indent) > len(key_indent):
+            return indent
+        break
+    return key_indent + "  "
+
+def update_fake_ip_filter_block(lines):
     lines = remove_fake_ip_filter_block(lines)
     dns_index = find_yaml_top_level_key(lines, "dns")
     if dns_index < 0:
@@ -648,7 +773,7 @@ def update_fake_ip_filter_block(lines, rule_contents):
             lines[-1] += "\n"
         lines.append("dns:\n")
         lines.append("  fake-ip-filter:\n")
-        lines.extend(build_fake_ip_filter_lines(rule_contents, "    "))
+        lines.extend(build_fake_ip_filter_lines("    "))
         return lines
 
     fake_filter_index = find_nested_key(lines, dns_index, "fake-ip-filter")
@@ -657,14 +782,34 @@ def update_fake_ip_filter_block(lines, rule_contents):
         child_indent = dns_indent + "  "
         item_indent = child_indent + "  "
         insert_at = section_end_index(lines, dns_index)
-        lines[insert_at:insert_at] = [f"{child_indent}fake-ip-filter:\n"] + build_fake_ip_filter_lines(rule_contents, item_indent)
+        lines[insert_at:insert_at] = [f"{child_indent}fake-ip-filter:\n"] + build_fake_ip_filter_lines(item_indent)
         return lines
 
     item_indent = list_item_indent_after_key(lines, fake_filter_index)
-    lines[fake_filter_index + 1:fake_filter_index + 1] = build_fake_ip_filter_lines(rule_contents, item_indent)
+    lines[fake_filter_index + 1:fake_filter_index + 1] = build_fake_ip_filter_lines(item_indent)
     return lines
 
-def render_sync_blocks(text, rule_contents):
+def update_rule_providers_block(lines):
+    lines = remove_marker_block(lines, RULE_PROVIDERS_BEGIN, RULE_PROVIDERS_END)
+    # rule-providers: {} / null 这种空值写法改成块映射，才能往下插子项
+    lines = [
+        "rule-providers:\n" if re.match(r"^rule-providers\s*:\s*(?:\{\s*\}|null|~)\s*(?:#.*)?$", line.rstrip("\n")) else line
+        for line in lines
+    ]
+    providers_index = find_yaml_top_level_key(lines, "rule-providers")
+    if providers_index < 0:
+        if lines and not lines[-1].endswith("\n"):
+            lines[-1] += "\n"
+        lines.append("rule-providers:\n")
+        lines.extend(build_rule_provider_lines("  "))
+        return lines
+    child_indent = mapping_child_indent_after_key(lines, providers_index)
+    lines[providers_index + 1:providers_index + 1] = build_rule_provider_lines(child_indent)
+    return lines
+
+def render_sync_blocks(text):
+    """写入规则集格式的三个标记块（rule-providers / rules / fake-ip-filter）。
+    这些块只引用规则集名字，不含域名，写好后内容固定；旧格式的内联域名会被替换掉。"""
     lines = text.splitlines(True)
     if not lines:
         lines = ["rules:\n"]
@@ -674,7 +819,7 @@ def render_sync_blocks(text, rule_contents):
     if start >= 0:
         end = next((idx for idx in range(start + 1, len(lines)) if lines[idx].strip() == RULE_SYNC_END), start)
         # 沿用已有标记行的缩进
-        block = build_mihomo_sync_rule_lines(rule_contents, proxy_policy, line_indent(lines[start]))
+        block = build_mihomo_sync_rule_lines(proxy_policy, line_indent(lines[start]))
         lines[start:end + 1] = block
     else:
         rules_index = find_yaml_top_level_key(lines, "rules")
@@ -685,53 +830,103 @@ def render_sync_blocks(text, rule_contents):
             rules_index = len(lines) - 1
         # rules: 下的列表项可能是 0 格或 2 格缩进，必须和现有项保持一致，否则 YAML 无效
         item_indent = list_item_indent_after_key(lines, rules_index)
-        block = build_mihomo_sync_rule_lines(rule_contents, proxy_policy, item_indent)
+        block = build_mihomo_sync_rule_lines(proxy_policy, item_indent)
         lines[rules_index + 1:rules_index + 1] = block
-    lines = update_fake_ip_filter_block(lines, rule_contents)
+    lines = update_fake_ip_filter_block(lines)
+    lines = update_rule_providers_block(lines)
     return "".join(lines)
 
 
 def reapply_sync_blocks(source_path, target_path):
-    """把 source 配置里的同步规则块写到 target 配置里。订阅更新会重新生成 config.yaml，
-    不做这一步，面板里保存的强制直连/强制代理规则每次更新都会丢。"""
+    """把同步规则带到重新生成的 target 配置里。订阅更新会重新生成 config.yaml，
+    不做这一步，面板里保存的强制直连/强制代理规则每次更新都会丢。
+    域名在规则文件里，这里只注入引用规则集的标记块；source 还是旧的内联格式时顺便把域名迁到规则文件。"""
     with open(source_path, "r", encoding="utf-8") as f:
-        rule_contents = read_mihomo_sync_rules(f.read())
-    if not any(rule_contents.values()):
+        source_text = f.read()
+    mode = sync_blocks_mode(source_text)
+    if mode == "none":
         return False
+    if mode == "legacy":
+        write_rule_provider_files(read_legacy_inline_sync_rules(source_text))
     with open(target_path, "r", encoding="utf-8") as f:
         target_text = f.read()
     with open(target_path, "w", encoding="utf-8") as f:
-        f.write(render_sync_blocks(target_text, rule_contents))
+        f.write(render_sync_blocks(target_text))
     return True
 
 
+def refresh_rule_providers():
+    """通知运行中的 mihomo 重新读规则文件（PUT /providers/rules/<name>），规则和 fake-ip-filter 都会生效，不用重启。"""
+    settings = mihomo_controller_settings()
+    headers = {"User-Agent": "mihomo-web-manager"}
+    if settings.get("secret"):
+        headers["Authorization"] = "Bearer " + settings["secret"]
+    for name in RULE_PROVIDER_NAMES.values():
+        url = settings["base_url"] + "/providers/rules/" + quote(name)
+        try:
+            req = urlrequest.Request(url, data=b"", headers=headers, method="PUT")
+            with urlrequest.urlopen(req, timeout=5) as resp:
+                status = getattr(resp, "status", None) or resp.getcode()
+        except Exception as e:
+            return False, f"{name}: {e}"
+        if status not in (200, 204):
+            return False, f"{name}: HTTP {status}"
+    return True, "ok"
+
+def sync_load_mode_label(text=None):
+    if text is None:
+        text = read_config_text()
+    if sync_blocks_mode(text) == "provider":
+        return "规则集热加载（无需重启）"
+    return "旧格式（下次保存时自动升级，需重启一次）"
+
 def update_mihomo_sync_block(rule_contents):
+    """让新的同步规则生效。返回 (ok, 说明, 后续动作)，动作是 reloaded（已热加载）或 restart（调用方要重启 mihomo）。
+
+    config.yaml 已是规则集格式：只写规则文件再热刷新；刷新失败退回重启。
+    还是旧格式/没有标记块：一次性改写 config.yaml（校验通过才落盘），需要重启一次。"""
     if not CONFIG_LOCK.acquire(blocking=False):
-        return False, BUSY_MESSAGE
+        return False, BUSY_MESSAGE, None
     try:
-        new_text = render_sync_blocks(read_config_text(), rule_contents)
+        text = read_config_text()
+        new_text = render_sync_blocks(text)
+        if new_text == text:
+            write_rule_provider_files(rule_contents)
+            ok, detail = refresh_rule_providers()
+            if ok:
+                return True, "规则已热加载，无需重启 mihomo", "reloaded"
+            return True, f"规则集热加载失败（{detail}），改为重启 mihomo", "restart"
+
+        upgrading = sync_blocks_mode(text) == "legacy"
+        snapshot = snapshot_rule_provider_files()
+        write_rule_provider_files(rule_contents)
         tmp_file = write_tmp_config(new_text, ".rulesync")
         try:
             ok, message = validate_config(tmp_file)
         finally:
             remove_quietly(tmp_file)
         if not ok:
-            return False, "规则写入后配置校验失败，已取消保存：\n" + message
+            restore_rule_provider_files(snapshot)
+            return False, "规则写入后配置校验失败，已取消保存：\n" + message, None
         write_config_text(new_text)
-        return True, "规则已写入 mihomo 配置"
+        if upgrading:
+            return True, "同步规则已一次性升级为规则集格式（本次需重启 mihomo，之后保存无需重启）", "restart"
+        return True, "已写入规则集配置（本次需重启 mihomo）", "restart"
     finally:
         CONFIG_LOCK.release()
 
 def save_rule_content(rule_id, content):
+    """返回 (ok, 说明, 动作)；动作为 unchanged / reloaded / restart，见 update_mihomo_sync_block。"""
     if rule_id not in SYNCABLE_RULE_IDS:
-        return False, "未知规则文件"
+        return False, "未知规则文件", None
     if not is_safe_text(content):
-        return False, "规则内容不合法或过大"
+        return False, "规则内容不合法或过大", None
     current = read_mihomo_sync_rules()
-    current[rule_id] = "\n".join(normalize_rule_domains(content))
-    if current[rule_id]:
-        current[rule_id] += "\n"
-    return update_mihomo_sync_block(current)
+    new_contents = dict(current)
+    new_contents[rule_id] = rule_content_text(normalize_rule_domains(content))
+    if sync_rules_unchanged(current, new_contents):
+        return True, RULES_UNCHANGED_MESSAGE, "unchanged"
+    return update_mihomo_sync_block(new_contents)
 
 def restart_mihomo():
     return run_args(["systemctl", "restart", "mihomo"], timeout=60)
@@ -904,23 +1099,28 @@ def apply_synced_rules(rules):
         return False, BUSY_MESSAGE
     try:
         current = read_mihomo_sync_rules()
+        new_contents = dict(current)
         applied = []
         for rule_id, content in rules.items():
             if rule_id not in SYNCABLE_RULE_IDS:
                 continue
             if not is_safe_text(content):
                 return False, "规则内容不合法或过大"
-            current[rule_id] = "\n".join(normalize_rule_domains(content))
-            if current[rule_id]:
-                current[rule_id] += "\n"
+            new_contents[rule_id] = rule_content_text(normalize_rule_domains(content))
             applied.append(rule_id)
         if not applied:
             return False, "没有可同步的规则"
-        ok, message = update_mihomo_sync_block(current)
+        if sync_rules_unchanged(current, new_contents):
+            return True, RULES_UNCHANGED_MESSAGE
+        ok, message, action = update_mihomo_sync_block(new_contents)
         if not ok:
             return False, message
-        schedule_mihomo_restart()
-        return True, "已同步规则：" + ", ".join(applied) + "，mihomo 将在后台重启"
+        prefix = "已同步规则：" + ", ".join(applied) + "，"
+        if action == "restart":
+            # 先回 HTTP 响应再重启：对端可能正经由这台 mihomo 访问本接口
+            schedule_mihomo_restart()
+            return True, prefix + message + "，mihomo 将在后台重启"
+        return True, prefix + message
     finally:
         CONFIG_LOCK.release()
 
@@ -2748,6 +2948,13 @@ def control_service():
     finally:
         CONFIG_LOCK.release()
 
+CONFIG_UNCHANGED_MESSAGE = "配置内容没有变化，未重启"
+
+def config_text_key(text):
+    """比较配置是否变化用：只统一换行符和末尾换行，不重排 YAML。"""
+    text = str(text or "").replace("\r\n", "\n")
+    return text[:-1] if text.endswith("\n") else text
+
 @app.route('/api/config', methods=['GET', 'POST'])
 @login_required
 def handle_config():
@@ -2768,6 +2975,9 @@ def handle_config():
             return jsonify({"success": False, "message": BUSY_MESSAGE})
         tmp_file = None
         try:
+            # 内容和当前 config.yaml 一样（只忽略换行符差异和末尾换行）就什么都不做，前端也不重启
+            if os.path.exists(CONFIG_FILE) and config_text_key(content) == config_text_key(read_config_text()):
+                return jsonify({"success": True, "unchanged": True, "message": CONFIG_UNCHANGED_MESSAGE})
             tmp_file = write_tmp_config(content, ".webcheck")
             ok, message = validate_config(tmp_file)
             if not ok:
@@ -2831,9 +3041,9 @@ def update_account_credentials():
 @login_required
 def api_rule_sync_settings():
     if request.method == "GET":
-        return jsonify(read_sync_settings())
+        return jsonify({**read_sync_settings(), "load_mode": sync_load_mode_label()})
     ok, message = write_sync_settings(json_body())
-    return jsonify({"success": ok, "message": message, **read_sync_settings()})
+    return jsonify({"success": ok, "message": message, **read_sync_settings(), "load_mode": sync_load_mode_label()})
 
 @app.route("/api/rule-sync-test", methods=["POST"])
 @login_required
@@ -2887,27 +3097,34 @@ def api_rules(rule_id):
     if not CONFIG_LOCK.acquire(blocking=False):
         return jsonify({"success": False, "message": BUSY_MESSAGE})
     try:
-        saved, save_message = save_rule_content(rule_id, content)
+        saved, save_message, action = save_rule_content(rule_id, content)
         if not saved:
             return jsonify({"success": False, "message": save_message})
-        ok, message = restart_mihomo()
+        if action == "restart":
+            ok, message = restart_mihomo()
+            if ok:
+                message = "规则已保存并重启 mihomo"
+                if save_message != "已写入规则集配置（本次需重启 mihomo）":
+                    message += "（" + save_message + "）"
+            else:
+                message = "规则已保存，但 mihomo 重启失败：\n" + message
+        elif action == "unchanged":
+            ok, message = True, save_message
+        else:
+            ok, message = True, "规则已保存，" + save_message
     finally:
         CONFIG_LOCK.release()
     sync_job = None
     if ok:
+        # 内容没变也照样推送：其他节点可能还是旧规则，已一致的节点会自己跳过。
         # 同步在后台线程里进行，不持有 CONFIG_LOCK；前端拿 sync_job 轮询结果
         sync_job, sync_message = start_broadcast(rule_id, content)
         if sync_job:
-            message = "规则已保存并重启 mihomo；" + sync_message
+            message = message + "；" + sync_message
         elif sync_message:
-            message = "规则已保存并重启 mihomo\n\n" + sync_message
-    return jsonify(
-        {
-            "success": ok,
-            "message": message if ok else "规则已保存，但 mihomo 重启失败：\n" + message,
-            "sync_job": sync_job,
-        }
-    )
+            message = message + "\n\n" + sync_message
+    return jsonify({"success": ok, "message": message, "sync_job": sync_job})
+
 
 @app.route("/api/rule-sync-jobs/<job_id>")
 @login_required

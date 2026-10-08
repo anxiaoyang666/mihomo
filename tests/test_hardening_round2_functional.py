@@ -131,7 +131,7 @@ class HardeningFunctionalTest(unittest.TestCase):
         thread.start()
         held.wait(5)
         try:
-            ok, message = self.app.update_mihomo_sync_block({"force-cn": "a.cn\n", "force-nocn": ""})
+            ok, message, _action = self.app.update_mihomo_sync_block({"force-cn": "a.cn\n", "force-nocn": ""})
             self.assertFalse(ok)
             self.assertEqual(message, self.app.BUSY_MESSAGE)
             self.assertFalse(self.app.apply_synced_rules({"force-cn": "a.cn\n"})[0])
@@ -139,9 +139,11 @@ class HardeningFunctionalTest(unittest.TestCase):
             release.set()
             thread.join(5)
 
-        ok, message = self.app.update_mihomo_sync_block({"force-cn": "a.cn\n", "force-nocn": ""})
+        ok, message, action = self.app.update_mihomo_sync_block({"force-cn": "a.cn\n", "force-nocn": ""})
         self.assertTrue(ok, message)
-        self.assertIn("a.cn", (self.dir / "config.yaml").read_text(encoding="utf-8"))
+        self.assertEqual(action, "restart")
+        self.assertIn(self.app.RULE_PROVIDERS_BEGIN, (self.dir / "config.yaml").read_text(encoding="utf-8"))
+        self.assertIn("+.a.cn", (self.dir / "rules" / "mosctl-force-cn.yaml").read_text(encoding="utf-8"))
         self.assertEqual([p.name for p in self.dir.glob("config.yaml.*")], [], "校验用的临时文件必须清掉")
 
     # --- 备份裁剪 ---

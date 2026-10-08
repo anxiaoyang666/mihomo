@@ -1300,6 +1300,7 @@
                                     <button class="action-button primary" onclick="saveSyncSettings(this)"><i class="bi bi-save"></i> 保存同步</button>
                                     <button class="soft-button" onclick="testSyncPeers(this)"><i class="bi bi-wifi"></i> 测试连通性</button>
                                 </div>
+                                <div class="small text-muted mt-3" id="syncLoadMode"></div>
                                 <div class="small text-muted mt-3" id="syncJobSummary" style="white-space: pre-wrap;"></div>
                                 <div class="sync-test-list mt-3" id="syncTestResults"></div>
                             </div>
@@ -2505,7 +2506,8 @@
         try {
             const res = await api('/config', {content: content});
             showToast(res.message, res.success ? 'success' : 'error');
-            if (res.success) await control('restart');
+            // 内容没变时后端返回 unchanged，不重启
+            if (res.success && !res.unchanged) await control('restart');
             return res;
         } finally {
             setActionBusy(trigger, false);
@@ -2723,6 +2725,8 @@
         if (enabled) enabled.checked = Boolean(res.enabled);
         if (token) token.value = res.token || '';
         if (peers) peers.value = res.peers_text || '';
+        const loadMode = document.getElementById('syncLoadMode');
+        if (loadMode) loadMode.textContent = res.load_mode ? '同步规则加载方式：' + res.load_mode : '';
         renderSyncTestResults([]);
         return res;
     }

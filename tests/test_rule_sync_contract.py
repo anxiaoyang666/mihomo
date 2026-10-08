@@ -37,23 +37,32 @@ class MihomoRuleSyncContractTest(unittest.TestCase):
         text = app_source()
 
         self.assertIn("def build_mihomo_sync_rule_lines", text)
-        self.assertIn("DOMAIN-SUFFIX,{domain},DIRECT", text)
-        self.assertIn("DOMAIN-SUFFIX,{domain},{proxy_policy}", text)
+        self.assertIn("- RULE-SET,{RULE_PROVIDER_NAMES['force-cn']},DIRECT", text)
+        self.assertIn("- RULE-SET,{RULE_PROVIDER_NAMES['force-nocn']},{proxy_policy}", text)
         self.assertIn("def update_mihomo_sync_block", text)
         self.assertIn("rules_index = find_yaml_top_level_key", text)
         self.assertIn("lines[rules_index + 1:rules_index + 1] = block", text)
         self.assertIn("rules_index + 1", text)
 
-    def test_force_direct_domains_are_added_to_fake_ip_filter(self):
+    def test_force_direct_rule_set_is_added_to_fake_ip_filter(self):
         text = app_source()
 
         self.assertIn("FAKE_IP_FILTER_BEGIN", text)
         self.assertIn("FAKE_IP_FILTER_END", text)
         self.assertIn("def build_fake_ip_filter_lines", text)
-        self.assertIn('block.append(f"{item_indent}- +.{domain}\\n")', text)
-        self.assertIn('rule_contents.get("force-cn", "")', text)
-        self.assertNotIn('rule_contents.get("force-nocn", "")', text[text.find("def build_fake_ip_filter_lines"): text.find("def update_mihomo_sync_block")])
-        self.assertIn("update_fake_ip_filter_block(lines, rule_contents)", text)
+        section = text[text.find("def build_fake_ip_filter_lines"): text.find("def build_rule_provider_lines")]
+        self.assertIn("- rule-set:{RULE_PROVIDER_NAMES['force-cn']}", section)
+        self.assertNotIn("force-nocn", section)
+        self.assertIn("update_fake_ip_filter_block(lines)", text)
+
+    def test_rule_providers_are_file_based_and_hot_refreshed(self):
+        text = app_source()
+
+        self.assertIn('RULE_PROVIDER_NAMES = {"force-cn": "mosctl_force_cn", "force-nocn": "mosctl_force_nocn"}', text)
+        self.assertIn('"force-cn": f"{RULES_DIR}/mosctl-force-cn.yaml"', text)
+        self.assertIn("type: file, behavior: domain, format: yaml", text)
+        self.assertIn('"/providers/rules/" + quote(name)', text)
+        self.assertIn('method="PUT"', text)
 
     def test_sync_does_not_rebroadcast_received_rules(self):
         text = app_source()
@@ -80,6 +89,17 @@ class MihomoRuleSyncContractTest(unittest.TestCase):
         self.assertIn("loadSyncSettings", text)
         self.assertIn("saveSyncSettings", text)
         self.assertIn("testSyncPeers", text)
+        self.assertIn('id="syncLoadMode"', text)
+        self.assertIn("'同步规则加载方式：' + res.load_mode", text)
+
+    def test_config_editor_only_restarts_when_content_changed(self):
+        html = index_source()
+        save_fn = html[html.find("async function saveConfig"): html.find("async function saveAndUpdateSub")]
+        self.assertIn("if (res.success && !res.unchanged) await control('restart');", save_fn)
+        self.assertNotIn("if (res.success) await control('restart');", save_fn)
+        app_text = app_source()
+        self.assertIn('CONFIG_UNCHANGED_MESSAGE = "配置内容没有变化，未重启"', app_text)
+        self.assertIn('"unchanged": True', app_text)
 
     def test_panel_version_rolls_forward_for_upgrade_detection(self):
         match = re.search(r'(?m)^PANEL_VERSION = "(\d+)\.(\d+)\.(\d+)"$', app_source())

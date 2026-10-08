@@ -173,7 +173,7 @@ class RuleSyncJobTest(unittest.TestCase):
 
     def test_rule_save_returns_before_broadcast_finishes(self):
         app = self.app
-        app.save_rule_content = lambda rule_id, content: (True, "规则已写入 mihomo 配置")
+        app.save_rule_content = lambda rule_id, content: (True, "已写入规则集配置（本次需重启 mihomo）", "restart")
         app.restart_mihomo = lambda: (True, "mihomo 已重启")
         self.gate = threading.Event()
         result = app.api_rules("force-cn")
@@ -192,7 +192,7 @@ class RuleSyncJobTest(unittest.TestCase):
 
     def test_rule_save_without_sync_returns_null_job(self):
         app = self.app
-        app.save_rule_content = lambda rule_id, content: (True, "规则已写入 mihomo 配置")
+        app.save_rule_content = lambda rule_id, content: (True, "已写入规则集配置（本次需重启 mihomo）", "restart")
         app.restart_mihomo = lambda: (True, "mihomo 已重启")
         app.write_env({"RULE_SYNC_ENABLED": "false"})
         result = app.api_rules("force-cn")
