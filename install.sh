@@ -10,9 +10,10 @@ INSTALL_DIR="/etc/mihomo"
 MANAGER_DIR="$INSTALL_DIR/manager"
 TMP_DIR=""
 
-red() { printf '\033[0;31m%s\033[0m\n' "$*"; }
-green() { printf '\033[0;32m%s\033[0m\n' "$*"; }
-yellow() { printf '\033[1;33m%s\033[0m\n' "$*"; }
+# 状态信息走 stderr，避免被 $(...) 捕获进变量
+red() { printf '\033[0;31m%s\033[0m\n' "$*" >&2; }
+green() { printf '\033[0;32m%s\033[0m\n' "$*" >&2; }
+yellow() { printf '\033[1;33m%s\033[0m\n' "$*" >&2; }
 die() { red "ERROR: $*"; exit 1; }
 
 cleanup() {
@@ -68,18 +69,22 @@ git_clone_project() {
   git clone --depth 1 --branch "$BRANCH" "$proxy_url" "$target"
 }
 
+# 结果写入 SOURCE_ROOT 而不是 echo，这样 TMP_DIR 能留在当前 shell 供 cleanup 使用
+SOURCE_ROOT=""
 source_root() {
-  local script_dir
-  script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-  if [ -d "$script_dir/remote-root" ]; then
-    printf '%s' "$script_dir"
+  local script_dir=""
+  if [ -n "${BASH_SOURCE[0]:-}" ] && [ -f "${BASH_SOURCE[0]}" ]; then
+    script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  fi
+  if [ -n "$script_dir" ] && [ -d "$script_dir/remote-root" ]; then
+    SOURCE_ROOT="$script_dir"
     return
   fi
 
   TMP_DIR="$(mktemp -d)"
   git_clone_project "$TMP_DIR/mihomo"
   [ -d "$TMP_DIR/mihomo/remote-root" ] || die "仓库中没有 remote-root 目录。"
-  printf '%s' "$TMP_DIR/mihomo"
+  SOURCE_ROOT="$TMP_DIR/mihomo"
 }
 
 rand_secret() {
@@ -202,8 +207,8 @@ main() {
   require_root
   yellow "安装依赖..."
   install_packages
-  local root
-  root="$(source_root)"
+  source_root
+  local root="$SOURCE_ROOT"
   yellow "安装 Mihomo 面板和脚本..."
   copy_payload "$root"
   write_env_file

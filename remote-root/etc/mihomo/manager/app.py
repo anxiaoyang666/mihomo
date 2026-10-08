@@ -24,7 +24,7 @@ CONFIG_FILE = f"{MIHOMO_DIR}/config.yaml"
 LOG_FILE = "/var/log/mihomo.log"
 BACKUP_DIR = f"{MIHOMO_DIR}/backup"
 MANAGER_DIR = f"{MIHOMO_DIR}/manager"
-PANEL_VERSION = "0.1.22"
+PANEL_VERSION = "0.1.23"
 DEFAULT_PANEL_REPO_URL = "https://github.com/anxiaoyang666/mihomo.git"
 DEFAULT_PANEL_BRANCH = "main"
 PANEL_BACKUP_KEEP_COUNT = 3
@@ -309,8 +309,9 @@ def proxy_policy_name(text):
     match = re.search(r"(?m)^\s*-\s*name:\s*['\"]?([^'\"\n]+)['\"]?\s*$", text)
     return match.group(1).strip() if match else "PROXY"
 
-def read_mihomo_sync_rules():
-    text = read_config_text()
+def read_mihomo_sync_rules(text=None):
+    if text is None:
+        text = read_config_text()
     rules = {"force-cn": [], "force-nocn": []}
     in_block = False
     for line in text.splitlines():
@@ -330,13 +331,13 @@ def read_mihomo_sync_rules():
                 rules[target].append(parts[1])
     return {key: "\n".join(value) + ("\n" if value else "") for key, value in rules.items()}
 
-def build_mihomo_sync_rule_lines(rule_contents, proxy_policy):
-    block = [f"{RULE_SYNC_BEGIN}\n"]
+def build_mihomo_sync_rule_lines(rule_contents, proxy_policy, item_indent=""):
+    block = [f"{item_indent}{RULE_SYNC_BEGIN}\n"]
     for domain in normalize_rule_domains(rule_contents.get("force-cn", "")):
-        block.append(f"- DOMAIN-SUFFIX,{domain},DIRECT\n")
+        block.append(f"{item_indent}- DOMAIN-SUFFIX,{domain},DIRECT\n")
     for domain in normalize_rule_domains(rule_contents.get("force-nocn", "")):
-        block.append(f"- DOMAIN-SUFFIX,{domain},{proxy_policy}\n")
-    block.append(f"{RULE_SYNC_END}\n")
+        block.append(f"{item_indent}- DOMAIN-SUFFIX,{domain},{proxy_policy}\n")
+    block.append(f"{item_indent}{RULE_SYNC_END}\n")
     return block
 
 def build_fake_ip_filter_lines(rule_contents, item_indent):
@@ -408,17 +409,17 @@ def update_fake_ip_filter_block(lines, rule_contents):
     lines[fake_filter_index + 1:fake_filter_index + 1] = build_fake_ip_filter_lines(rule_contents, item_indent)
     return lines
 
-def update_mihomo_sync_block(rule_contents):
-    text = read_config_text()
+def render_sync_blocks(text, rule_contents):
     lines = text.splitlines(True)
     if not lines:
         lines = ["rules:\n"]
     proxy_policy = proxy_policy_name(text)
-    block = build_mihomo_sync_rule_lines(rule_contents, proxy_policy)
 
     start = next((idx for idx, line in enumerate(lines) if line.strip() == RULE_SYNC_BEGIN), -1)
     if start >= 0:
         end = next((idx for idx in range(start + 1, len(lines)) if lines[idx].strip() == RULE_SYNC_END), start)
+        # 沿用已有标记行的缩进
+        block = build_mihomo_sync_rule_lines(rule_contents, proxy_policy, line_indent(lines[start]))
         lines[start:end + 1] = block
     else:
         rules_index = find_yaml_top_level_key(lines, "rules")
@@ -427,9 +428,30 @@ def update_mihomo_sync_block(rule_contents):
                 lines[-1] += "\n"
             lines.append("rules:\n")
             rules_index = len(lines) - 1
+        # rules: 下的列表项可能是 0 格或 2 格缩进，必须和现有项保持一致，否则 YAML 无效
+        item_indent = list_item_indent_after_key(lines, rules_index)
+        block = build_mihomo_sync_rule_lines(rule_contents, proxy_policy, item_indent)
         lines[rules_index + 1:rules_index + 1] = block
     lines = update_fake_ip_filter_block(lines, rule_contents)
-    new_text = "".join(lines)
+    return "".join(lines)
+
+
+def reapply_sync_blocks(source_path, target_path):
+    """把 source 配置里的同步规则块写到 target 配置里。订阅更新会重新生成 config.yaml，
+    不做这一步，面板里保存的强制直连/强制代理规则每次更新都会丢。"""
+    with open(source_path, "r", encoding="utf-8") as f:
+        rule_contents = read_mihomo_sync_rules(f.read())
+    if not any(rule_contents.values()):
+        return False
+    with open(target_path, "r", encoding="utf-8") as f:
+        target_text = f.read()
+    with open(target_path, "w", encoding="utf-8") as f:
+        f.write(render_sync_blocks(target_text, rule_contents))
+    return True
+
+
+def update_mihomo_sync_block(rule_contents):
+    new_text = render_sync_blocks(read_config_text(), rule_contents)
     tmp_file = f"{CONFIG_FILE}.rulesync"
     with open(tmp_file, "w", encoding="utf-8") as f:
         f.write(new_text)

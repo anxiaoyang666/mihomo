@@ -152,13 +152,43 @@ except Exception as e:
 fi
 
 # ==========================================
-# 第三阶段：校验、应用与通知
+# 第三阶段：保留面板里的同步规则
+# ==========================================
+
+# 新配置是从模板/订阅重新生成的，面板保存的强制直连/强制代理规则块只存在于旧 config.yaml 里，
+# 不带过来就会在每次订阅更新时丢失。
+if [ -f "$CONFIG_FILE" ] && [ -f "${MIHOMO_DIR}/manager/app.py" ]; then
+    python3 - "$CONFIG_FILE" "$TEMP_NEW" <<'PY'
+import sys
+sys.path.insert(0, "/etc/mihomo/manager")
+try:
+    import app
+    if app.reapply_sync_blocks(sys.argv[1], sys.argv[2]):
+        print("✅ 已保留面板同步规则。")
+except Exception as e:
+    print(f"⚠️ 同步规则保留失败: {e}")
+PY
+fi
+
+# ==========================================
+# 第四阶段：校验、应用与通知
 # ==========================================
 
 if [ ! -s "$TEMP_NEW" ]; then
     rm -f "$TEMP_NEW"
     bash "$NOTIFY_SCRIPT" "❌ 订阅更新失败" "生成的新配置为空，已保留当前配置。"
     exit 1
+fi
+
+# 应用前先用内核校验，坏配置（比如订阅过期返回的 HTML 页面）不能覆盖正在用的配置
+CORE_BIN="/usr/bin/mihomo-core"
+if [ -x "$CORE_BIN" ]; then
+    if ! CHECK_OUT="$("$CORE_BIN" -t -d "$MIHOMO_DIR" -f "$TEMP_NEW" 2>&1)"; then
+        echo "❌ 新配置校验失败，已保留当前配置。"
+        echo "$CHECK_OUT" | tail -n 5
+        bash "$NOTIFY_SCRIPT" "❌ 订阅更新失败" "新配置校验失败，已保留当前配置。"
+        exit 1
+    fi
 fi
 
 FILE_CHANGED=0
@@ -175,9 +205,21 @@ else
 fi
 
 if [ "$FILE_CHANGED" -eq 1 ]; then
-    cp "$CONFIG_FILE" "${BACKUP_DIR}/config_$(date +%Y%m%d%H%M).yaml" 2>/dev/null
+    BACKUP_FILE="${BACKUP_DIR}/config_$(date +%Y%m%d%H%M%S).yaml"
+    [ -f "$CONFIG_FILE" ] && cp "$CONFIG_FILE" "$BACKUP_FILE"
     mv "$TEMP_NEW" "$CONFIG_FILE"
     systemctl restart mihomo
+    sleep 3
+    # 重启后没起来就回滚，不然 Restart=always 会让网关一直崩溃循环
+    if ! systemctl is-active --quiet mihomo; then
+        echo "❌ mihomo 重启失败，正在回滚到更新前的配置..."
+        if [ -f "$BACKUP_FILE" ]; then
+            cp "$BACKUP_FILE" "$CONFIG_FILE"
+            systemctl restart mihomo
+        fi
+        bash "$NOTIFY_SCRIPT" "❌ 订阅更新失败" "新配置启动失败，已回滚到更新前的配置。"
+        exit 1
+    fi
     echo "🎉 更新完成并重启。"
     
     # --- 文案转换逻辑 ---
