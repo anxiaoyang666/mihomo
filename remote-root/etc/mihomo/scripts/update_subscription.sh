@@ -313,13 +313,14 @@ else
 fi
 
 # ==========================================
-# 第五阶段：机场模式下让内核立刻重新拉取节点
+# 第五阶段：让内核立刻重新拉取节点
 # ==========================================
 
-# 机场模式的 config.yaml 只写了订阅 URL，节点列表由内核按 proxy-providers 的 interval 自己拉取，
-# 所以上面经常是"配置无变更"。要让"每天更新订阅"真的更新节点，得通过控制器 API 让内核立刻刷新：
+# 不管是机场模式还是托管模式，只要 config.yaml 里有 proxy-providers，节点列表就是内核按 interval
+# 自己去拉的，上面经常是"配置无变更"。要让"每天更新订阅"真的更新节点，得通过控制器 API 让内核立刻刷新：
 #   PUT /providers/proxies/<name>
 # 重启也不会触发刷新（内核会直接用缓存的 providers/*.yaml），所以无论配置有没有变都执行。
+# 刷新失败（典型：机场订阅地址 404）会把原因写进 .last_subscription，概览页能直接看到。
 refresh_proxy_providers() {
     [ -f "$CONFIG_FILE" ] || return 0
     systemctl is-active --quiet mihomo || { echo "ℹ️  内核未运行，跳过节点刷新。"; return 0; }
@@ -341,7 +342,7 @@ refresh_proxy_providers() {
     local curl_opts=(-sS -m 120 -o /dev/null -w '%{http_code}' -X PUT)
     [ -n "$secret" ] && curl_opts+=(-H "Authorization: Bearer ${secret}")
 
-    local ok=0 bad=0 name encoded code
+    local ok=0 bad=0 name encoded code first_error=""
     # 不依赖 PyYAML：只扫顶层 proxy-providers: 下第一层缩进的键名
     while IFS=$'\t' read -r name encoded; do
         [ -n "$name" ] || continue
@@ -350,7 +351,9 @@ refresh_proxy_providers() {
             ok=$((ok + 1))
         else
             bad=$((bad + 1))
+            # 内核把上游的错误原样转成状态码（机场 404 → 这里也是 404），把它带到结果里
             echo "⚠️  订阅 ${name} 刷新失败 (HTTP ${code:-000})"
+            [ -n "$first_error" ] || first_error="${name} HTTP ${code:-000}"
         fi
     done < <(python3 - "$CONFIG_FILE" <<'PY'
 import re, sys
@@ -384,12 +387,10 @@ PY
     fi
     echo "🔄 节点订阅刷新完成：成功 ${ok}，失败 ${bad}"
     if [ "$bad" -gt 0 ]; then
-        RESULT_MSG="${RESULT_MSG}；节点刷新 ${bad} 个失败"
+        RESULT_MSG="${RESULT_MSG}；节点刷新失败 ${bad} 个（${first_error}），请检查机场订阅地址"
         return 1
     fi
     RESULT_MSG="${RESULT_MSG}；已刷新 ${ok} 个订阅的节点"
 }
 
-if [ "$CONFIG_MODE" != "raw" ]; then
-    refresh_proxy_providers || exit 1
-fi
+refresh_proxy_providers || exit 1

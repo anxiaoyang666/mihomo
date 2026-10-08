@@ -30,7 +30,7 @@ SUBSCRIPTION_STATE_FILE = f"{MIHOMO_DIR}/.last_subscription"
 SUBSCRIPTION_LOG = "/var/log/mihomo-subscription.log"
 GEO_LOG = "/var/log/mihomo-geo.log"
 MANAGER_DIR = f"{MIHOMO_DIR}/manager"
-PANEL_VERSION = "0.1.26"
+PANEL_VERSION = "0.1.27"
 DEFAULT_PANEL_REPO_URL = "https://github.com/anxiaoyang666/mihomo.git"
 DEFAULT_PANEL_BRANCH = "main"
 PANEL_BACKUP_KEEP_COUNT = 3
@@ -256,6 +256,30 @@ def ensure_session_secret():
     app.secret_key = secret
 
 ensure_session_secret()
+
+def migrate_cron_commands():
+    """老面板写的定时任务把输出丢到 /dev/null，升级后改成写日志；只有需要改时才动 crontab。"""
+    rewrites = {
+        f"update_subscription.sh >/dev/null 2>&1 # JOB_SUB": f"update_subscription.sh >> {SUBSCRIPTION_LOG} 2>&1 # JOB_SUB",
+        f"update_geo.sh >/dev/null 2>&1 # JOB_GEO": f"update_geo.sh >> {GEO_LOG} 2>&1 # JOB_GEO",
+    }
+    try:
+        res = subprocess.run(["crontab", "-l"], capture_output=True, text=True, timeout=15)
+        if res.returncode != 0 or not res.stdout:
+            return False
+        updated = res.stdout
+        for old, new in rewrites.items():
+            updated = updated.replace(old, new)
+        if updated == res.stdout:
+            return False
+        subprocess.run(["crontab", "-"], input=updated, capture_output=True, text=True, timeout=15)
+        log.info("已把订阅/Geo 定时任务的输出改为写入日志")
+        return True
+    except Exception as e:
+        log.warning("迁移定时任务失败：%s", e)
+        return False
+
+migrate_cron_commands()
 
 def web_credentials():
     env = read_env()

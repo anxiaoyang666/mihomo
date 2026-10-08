@@ -58,7 +58,8 @@ class SubscriptionScheduleContractTest(unittest.TestCase):
         text = APP.read_text(encoding="utf-8")
         self.assertIn("update_subscription.sh >> {SUBSCRIPTION_LOG} 2>&1", text)
         self.assertIn("update_geo.sh >> {GEO_LOG} 2>&1", text)
-        self.assertNotIn("update_subscription.sh >/dev/null 2>&1", text)
+        # 面板写 cron 的那一行不能再是 /dev/null（migrate_cron_commands 里保留旧字符串是为了识别并改写）
+        self.assertNotIn("{SCRIPT_DIR}/update_subscription.sh >/dev/null", text)
         self.assertIn('"last_subscription": last_subscription_state()', text)
 
     def test_script_records_state_sends_clash_ua_and_refreshes_providers(self):
@@ -67,7 +68,14 @@ class SubscriptionScheduleContractTest(unittest.TestCase):
         self.assertIn("trap on_exit EXIT", text)
         self.assertIn('--user-agent="$SUB_USER_AGENT"', text)
         self.assertIn("/providers/proxies/${encoded}", text)
-        self.assertIn('if [ "$CONFIG_MODE" != "raw" ]; then\n    refresh_proxy_providers || exit 1', text)
+        # 托管模式的配置里一样有 proxy-providers，刷新不能只限机场模式
+        self.assertIn("\nrefresh_proxy_providers || exit 1\n", text)
+        self.assertNotIn('if [ "$CONFIG_MODE" != "raw" ]', text)
+
+    def test_panel_migrates_devnull_cron_entries_on_startup(self):
+        text = APP.read_text(encoding="utf-8")
+        self.assertIn("def migrate_cron_commands", text)
+        self.assertIn("\nmigrate_cron_commands()\n", text)
 
     def test_ui_and_logrotate_cover_the_new_state_and_logs(self):
         self.assertIn("formatLastSubscription(settings.last_subscription)", INDEX.read_text(encoding="utf-8"))
@@ -91,6 +99,29 @@ class LastSubscriptionStateTest(unittest.TestCase):
         path.write_text("1760000001\tfailed\t托管配置下载失败\n", encoding="utf-8")
         self.assertFalse(self.app.last_subscription_state(str(path))["ok"])
 
+    def test_migrate_cron_rewrites_only_devnull_entries(self):
+        calls = []
+        real_run = self.app.subprocess.run
+
+        def fake_run(args, **kwargs):
+            calls.append((args, kwargs.get("input")))
+            if args == ["crontab", "-l"]:
+                return types.SimpleNamespace(returncode=0, stdout="0 5 * * * bash /etc/mihomo/scripts/update_subscription.sh >/dev/null 2>&1 # JOB_SUB\n* * * * * other\n")
+            return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+
+        self.app.subprocess.run = fake_run
+        try:
+            self.assertTrue(self.app.migrate_cron_commands())
+            written = calls[-1][1]
+            self.assertIn("update_subscription.sh >> /var/log/mihomo-subscription.log 2>&1 # JOB_SUB", written)
+            self.assertIn("* * * * * other", written)
+            calls.clear()
+            # 已经是日志形式：不再写 crontab
+            self.app.subprocess.run = lambda args, **k: types.SimpleNamespace(returncode=0, stdout=written, stderr="")
+            self.assertFalse(self.app.migrate_cron_commands())
+        finally:
+            self.app.subprocess.run = real_run
+
     def test_missing_or_garbage_file_returns_none(self):
         self.assertIsNone(self.app.last_subscription_state(str(Path(self.tmp.name) / "nope")))
         path = Path(self.tmp.name) / ".last_subscription"
@@ -113,6 +144,20 @@ class UpdateSubscriptionScriptTest(unittest.TestCase):
         fake_bin = root / "bin"
         fake_bin.mkdir()
         (fake_bin / "systemctl").write_text("#!/bin/bash\nexit 0\n", encoding="utf-8")
+        # Mac 没有 wget：用 urllib 模拟 `wget [opts] -O <file> <url>`，失败时像 wget 一样退出非零
+        (fake_bin / "wget").write_text(
+            "#!/usr/bin/env python3\n"
+            "import sys, urllib.request\n"
+            "args = sys.argv[1:]\n"
+            "out = args[args.index('-O') + 1]\n"
+            "url = args[-1]\n"
+            "try:\n"
+            "    with urllib.request.urlopen(url, timeout=5) as r, open(out, 'wb') as f:\n"
+            "        f.write(r.read())\n"
+            "except Exception as e:\n"
+            "    sys.stderr.write(str(e) + '\\n'); sys.exit(1)\n",
+            encoding="utf-8",
+        )
         (fake_bin / "curl").write_text(
             "#!/bin/bash\n"
             f"printf '%s\\n' \"$*\" >> '{root}/curl.log'\n"
@@ -120,7 +165,7 @@ class UpdateSubscriptionScriptTest(unittest.TestCase):
             encoding="utf-8",
         )
         # 机场模式下模板生成需要 PyYAML；没有就让脚本走 raw 模式之外的分支前提前失败，测试据此跳过
-        for name in ("systemctl", "curl", "notify.sh"):
+        for name in ("systemctl", "curl", "wget", "notify.sh"):
             path = fake_bin / name if name != "notify.sh" else root / "scripts" / name
             path.chmod(path.stat().st_mode | stat.S_IEXEC)
         script = SCRIPT.read_text(encoding="utf-8").replace('MIHOMO_DIR="/etc/mihomo"', f'MIHOMO_DIR="{root}"')
@@ -144,6 +189,27 @@ class UpdateSubscriptionScriptTest(unittest.TestCase):
         state = (root / ".last_subscription").read_text(encoding="utf-8").rstrip("\n").split("\t")
         self.assertEqual(state[1], "failed")
         self.assertIn("下载失败", state[2])
+
+    def test_raw_mode_refreshes_providers_and_reports_404(self):
+        # 托管模式 + 下载成功：用本地 http 服务当"托管源"，内核刷新返回 404 要写进结果
+        import http.server, threading, functools
+        src = tempfile.mkdtemp()
+        config = "proxy-providers:\n  我的机场:\n    type: http\n    url: x\n    path: ./providers/ap1.yaml\nexternal-controller: 127.0.0.1:9090\nrules:\n  - MATCH,DIRECT\n"
+        Path(src, "sub.yaml").write_text(config, encoding="utf-8")
+        handler = functools.partial(http.server.SimpleHTTPRequestHandler, directory=src)
+        server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        try:
+            port = server.server_address[1]
+            root, result = self.run_script(['CONFIG_MODE="raw"', f'SUB_URL_RAW="http://127.0.0.1:{port}/sub.yaml"'], config, curl_code="404")
+        finally:
+            server.shutdown()
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        calls = (root / "curl.log").read_text(encoding="utf-8")
+        self.assertIn("/providers/proxies/%E6%88%91%E7%9A%84%E6%9C%BA%E5%9C%BA", calls)
+        state = (root / ".last_subscription").read_text(encoding="utf-8")
+        self.assertIn("\tfailed\t", state)
+        self.assertIn("我的机场 HTTP 404", state)
 
     def test_provider_refresh_calls_controller_for_each_provider(self):
         try:
