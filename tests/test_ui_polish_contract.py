@@ -83,7 +83,7 @@ class MihomoUiPolishContractTest(unittest.TestCase):
     def test_release_version_is_0122(self):
         app = text(APP)
 
-        self.assertIn('PANEL_VERSION = "0.1.28"', app)
+        self.assertIn('PANEL_VERSION = "0.1.29"', app)
         match = re.search(r'(?m)^PANEL_VERSION = "(\d+)\.(\d+)\.(\d+)"$', app)
         self.assertIsNotNone(match)
         self.assertGreaterEqual(tuple(int(part) for part in match.groups()), (0, 1, 22))

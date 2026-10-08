@@ -149,11 +149,12 @@ class DeviceAggregatorTest(unittest.TestCase):
         self.assertEqual(by_ip["10.0.0.6"]["rate_down"], 0)
         # 在线的排在前面
         self.assertEqual(snapshot["devices"][0]["ip"], "10.0.0.5")
-        self.assertEqual(snapshot["totals"], {
-            "devices": 2, "online": 1, "upload": 3, "download": 3,
+        expected_totals = {
+            "devices": 2, "online": 1, "lan_total": 2, "lan_online": 1, "neighbour_only": 0, "upload": 3, "download": 3,
             "rate_up": by_ip["10.0.0.5"]["rate_up"], "rate_down": by_ip["10.0.0.5"]["rate_down"],
-        })
-        self.assertEqual(app.devices_summary(now=1000 + app.DEVICE_ONLINE_SECONDS + 1), {"online": 1, "total": 2})
+        }
+        self.assertEqual({key: snapshot["totals"][key] for key in expected_totals}, expected_totals)
+        self.assertEqual(app.devices_summary(now=1000 + app.DEVICE_ONLINE_SECONDS + 1), {"online": 1, "total": 2, "lan_online": 1, "lan_total": 2})
         self.assertEqual(snapshot["sample_interval"], app.DEVICE_SAMPLE_INTERVAL)
         self.assertTrue(snapshot["controller"]["reachable"])
 
@@ -290,13 +291,197 @@ class DeviceAggregatorTest(unittest.TestCase):
 
     def test_neighbour_parsing(self):
         app = self.app
-        app.run_args = lambda args, timeout=30: (True, "10.0.0.5 dev eth0 lladdr aa:BB:cc:dd:ee:ff REACHABLE\n10.0.0.7 dev eth0 FAILED\nfe80::1 dev eth0 lladdr 11:22:33:44:55:66 router STALE\n")
+        neigh = "10.0.0.5 dev eth0 lladdr aa:BB:cc:dd:ee:ff REACHABLE\n10.0.0.7 dev eth0 FAILED\n10.0.0.8 dev eth0 INCOMPLETE\nfe80::1 dev eth0 lladdr 11:22:33:44:55:66 router STALE\n"
+        self.assertEqual(app.parse_neighbours(neigh), {
+            "10.0.0.5": {"mac": "aa:bb:cc:dd:ee:ff", "state": "REACHABLE"},
+            "10.0.0.7": {"mac": "", "state": "FAILED"},
+            "10.0.0.8": {"mac": "", "state": "INCOMPLETE"},
+            "fe80::1": {"mac": "11:22:33:44:55:66", "state": "STALE"},
+        })
+        app.run_args = lambda args, timeout=30: (True, neigh)
         self.assertEqual(app.detect_neighbour_macs(), {"10.0.0.5": "aa:bb:cc:dd:ee:ff", "fe80::1": "11:22:33:44:55:66"})
+        app.run_args = lambda args, timeout=30: (True, "default via 10.10.10.253 dev eth0 proto dhcp metric 100\n10.10.10.0/24 dev eth0 proto kernel scope link src 10.10.10.2\n")
+        self.assertEqual(app.detect_upstream_router(), "10.10.10.253")
+        app.run_args = lambda args, timeout=30: (True, "10.10.10.0/24 dev eth0 proto kernel scope link src 10.10.10.2\n")
+        self.assertEqual(app.detect_upstream_router(), "")
         app.run_args = lambda args, timeout=30: (True, "1: lo    inet 127.0.0.1/8 scope host lo\n2: eth0    inet 10.0.0.1/24 brd 10.0.0.255 scope global eth0\n")
         self.assertEqual(app.detect_local_ips(), {"127.0.0.1", "::1", "10.0.0.1"})
         app.run_args = lambda args, timeout=30: (False, "not found")
         self.assertEqual(app.detect_local_ips(), {"127.0.0.1", "::1"})
         self.assertEqual(app.detect_neighbour_macs(), {})
+        self.assertEqual(app.detect_upstream_router(), "")
+
+    def test_source_kind_classification(self):
+        app = self.app
+        local = {"127.0.0.1", "::1", "10.10.10.2"}
+        self.assertEqual(app.source_kind("10.10.10.2", local), "gateway")
+        self.assertEqual(app.source_kind("127.0.0.1", set()), "gateway")
+        self.assertEqual(app.source_kind("10.10.10.3", local), "lan")
+        self.assertEqual(app.source_kind("192.168.1.9", local), "lan")
+        self.assertEqual(app.source_kind("172.16.5.5", local), "lan")
+        self.assertEqual(app.source_kind("169.254.1.1", local), "lan")
+        self.assertEqual(app.source_kind("100.64.0.9", local), "lan")
+        self.assertEqual(app.source_kind("fd00::9", local), "lan")
+        self.assertEqual(app.source_kind("122.6.190.2", local), "remote")
+        self.assertEqual(app.source_kind("2606:4700::1111", local), "remote")
+        self.assertEqual(app.source_kind("not-an-ip", local), "lan")
+
+    def test_public_sources_grouped_into_remote_pseudo_device(self):
+        app = self.app
+        local = {"127.0.0.1", "::1", "10.10.10.2"}
+        app.apply_connections_sample([
+            conn("r1", "122.6.190.2", 100, 200, host="10.10.10.3", dest="10.10.10.3", chains=["DIRECT"]) | {"metadata": {"sourceIP": "122.6.190.2", "host": "", "destinationIP": "10.10.10.3", "type": "ShadowSocks", "inboundName": "ss-inbound"}},
+            conn("r2", "::ffff:8.8.4.4", 1, 2),
+            conn("l1", "10.10.10.3", 5, 5),
+        ], now=1000, local_ips=local)
+        devices = self.devices()
+        self.assertNotIn("122.6.190.2", devices)
+        self.assertNotIn("8.8.4.4", devices)
+        remote = devices[app.REMOTE_DEVICE_KEY]
+        self.assertEqual(remote["kind"], "remote")
+        self.assertFalse(remote["is_gateway"])
+        self.assertEqual(remote["upload_total"], 101)
+        self.assertEqual(remote["download_total"], 202)
+        self.assertEqual(set(remote["remote_ips"]), {"122.6.190.2", "8.8.4.4"})
+        self.assertEqual(remote["inbounds"], {"ShadowSocks": 1, "TUN": 1})
+        self.assertEqual(devices["10.10.10.3"]["kind"], "lan")
+        # 再来 12 个新来源：接口只展示最近 10 个，计数是全部
+        # 注意 203.0.113.0/24 这类文档网段在 ipaddress 里算 is_private，这里要用真正的公网地址
+        sample = [conn(f"x{i}", f"122.6.191.{i}", 1, 1) for i in range(12)]
+        app.apply_connections_sample(sample, now=2000, local_ips=local)
+        item = next(item for item in app.devices_snapshot(now=2000)["devices"] if item["kind"] == "remote")
+        self.assertEqual(item["ip"], app.REMOTE_DEVICE_KEY)
+        self.assertEqual(item["remote_ip_count"], 14)
+        self.assertEqual(len(item["remote_ips"]), 10)
+        self.assertTrue(all(ip.startswith("122.6.191.") for ip in item["remote_ips"]))
+        self.assertEqual(item["seen_via"], "traffic")
+        self.assertIn("ShadowSocks", item["inbound_types"])
+        # 远程伪设备不会被设备上限淘汰，也能落盘读回
+        app.save_device_state()
+        fresh = load_app(self.tmp.name)
+        fresh.load_device_state()
+        reloaded = fresh.DEVICE_STATE["devices"][app.REMOTE_DEVICE_KEY]
+        self.assertEqual(reloaded["kind"], "remote")
+        self.assertEqual(len(reloaded["remote_ips"]), 14)
+        self.assertEqual(reloaded["inbounds"]["ShadowSocks"], 1)
+        # 旧版 devices.json 没有 kind 字段：按 is_gateway / key 推断
+        legacy = fresh.coerce_device_record("10.0.0.9", {"is_gateway": False, "upload_total": 1})
+        self.assertEqual(legacy["kind"], "lan")
+        self.assertEqual(fresh.coerce_device_record(fresh.GATEWAY_DEVICE_KEY, {"is_gateway": True})["kind"], "gateway")
+        self.assertEqual(fresh.coerce_device_record(fresh.REMOTE_DEVICE_KEY, {})["kind"], "remote")
+
+    def test_inbound_types_counted_per_connection(self):
+        app = self.app
+        def tun(cid, up=1, down=1):
+            item = conn(cid, "10.10.10.253", up, down)
+            item["metadata"]["type"] = "Tun"
+            item["metadata"]["inboundName"] = "DEFAULT-TUN"
+            return item
+        def ss(cid):
+            item = conn(cid, "10.10.10.253", 1, 1)
+            item["metadata"]["type"] = "ShadowSocks"
+            return item
+        app.apply_connections_sample([tun("a"), tun("b"), ss("c")], now=1000, local_ips=set())
+        # 同一条连接再出现不重复计数，新连接才加
+        app.apply_connections_sample([tun("a", 5, 5), tun("d"), ss("c")], now=1005, local_ips=set())
+        dev = self.devices()["10.10.10.253"]
+        self.assertEqual(dev["inbounds"], {"Tun": 3, "ShadowSocks": 1})
+        item = app.devices_snapshot(now=1005)["devices"][0]
+        self.assertEqual(item["inbounds"], {"Tun": 3, "ShadowSocks": 1})
+        self.assertEqual(item["inbound_types"], ["Tun", "ShadowSocks"])
+
+    def fake_ip_commands(self, neigh="", route="", addr=""):
+        def run(args, timeout=30):
+            if args[:3] == ["ip", "-4", "neigh"]:
+                return True, neigh
+            if args[:2] == ["ip", "route"]:
+                return True, route
+            if args[:2] == ["ip", "-4"]:
+                return True, addr
+            return False, "unexpected " + " ".join(args)
+        self.app.run_args = run
+
+    def test_upstream_router_flagged(self):
+        app = self.app
+        self.fake_ip_commands(
+            neigh="10.10.10.253 dev eth0 lladdr 00:11:22:33:44:55 REACHABLE\n",
+            route="default via 10.10.10.253 dev eth0 proto dhcp src 10.10.10.2 metric 100\n10.10.10.0/24 dev eth0 proto kernel scope link src 10.10.10.2\n",
+            addr="2: eth0    inet 10.10.10.2/24 brd 10.10.10.255 scope global eth0\n",
+        )
+        app.refresh_device_neighbours()
+        self.assertEqual(app.DEVICE_STATE["upstream_router"], "10.10.10.253")
+        self.assertEqual(app.DEVICE_STATE["local_ips"], {"127.0.0.1", "::1", "10.10.10.2"})
+        app.apply_connections_sample([conn("a", "10.10.10.253", 1, 1), conn("b", "10.10.10.3", 1, 1)], now=1000)
+        snapshot = app.devices_snapshot(now=1000)
+        by_ip = {item["ip"]: item for item in snapshot["devices"]}
+        self.assertTrue(by_ip["10.10.10.253"]["is_upstream_router"])
+        self.assertEqual(by_ip["10.10.10.253"]["mac"], "00:11:22:33:44:55")
+        self.assertEqual(by_ip["10.10.10.253"]["neighbour_state"], "REACHABLE")
+        self.assertEqual(by_ip["10.10.10.253"]["kind"], "lan")
+        self.assertFalse(by_ip["10.10.10.3"]["is_upstream_router"])
+        self.assertEqual(snapshot["upstream_router"], "10.10.10.253")
+
+    def test_neighbours_without_traffic_are_listed_but_not_persisted(self):
+        app = self.app
+        self.fake_ip_commands(
+            neigh=(
+                "10.10.10.3 dev eth0 lladdr aa:aa:aa:aa:aa:01 REACHABLE\n"      # 有流量的设备
+                "10.10.10.20 dev eth0 lladdr aa:aa:aa:aa:aa:20 STALE\n"         # 只在 ARP 里
+                "10.10.10.21 dev eth0 lladdr aa:aa:aa:aa:aa:21 REACHABLE\n"     # 只在 ARP 里
+                "10.10.10.22 dev eth0 lladdr aa:aa:aa:aa:aa:22 DELAY\n"
+                "10.10.10.30 dev eth0 FAILED\n"                                 # 跳过
+                "10.10.10.31 dev eth0 INCOMPLETE\n"                             # 跳过
+                "10.10.10.2 dev eth0 lladdr aa:aa:aa:aa:aa:02 PERMANENT\n"      # 网关自己，跳过
+                "169.254.7.7 dev eth0 lladdr aa:aa:aa:aa:aa:77 REACHABLE\n"     # 链路本地，跳过
+            ),
+            route="default via 10.10.10.253 dev eth0\n",
+            addr="2: eth0    inet 10.10.10.2/24 brd 10.10.10.255 scope global eth0\n",
+        )
+        app.refresh_device_neighbours()
+        app.apply_connections_sample([conn("a", "10.10.10.3", 1, 1), conn("g", "10.10.10.2", 1, 1), conn("r", "122.6.190.2", 1, 1)], now=1000)
+        app.set_device_note("10.10.10.21", "打印机")
+        snapshot = app.devices_snapshot(now=1000)
+        ips = [item["ip"] for item in snapshot["devices"]]
+        # 有流量的在前（含伪设备），只在 ARP 里的按 IP 排在最后
+        self.assertEqual(ips[-3:], ["10.10.10.20", "10.10.10.21", "10.10.10.22"])
+        self.assertNotIn("10.10.10.30", ips)
+        self.assertNotIn("10.10.10.31", ips)
+        self.assertNotIn("10.10.10.2", ips)
+        self.assertNotIn("169.254.7.7", ips)
+        self.assertEqual(ips.count("10.10.10.3"), 1)
+        by_ip = {item["ip"]: item for item in snapshot["devices"]}
+        self.assertEqual(by_ip["10.10.10.3"]["seen_via"], "traffic")
+        self.assertEqual(by_ip["10.10.10.3"]["neighbour_state"], "REACHABLE")
+        row = by_ip["10.10.10.21"]
+        self.assertEqual(row["seen_via"], "neighbour")
+        self.assertEqual(row["kind"], "lan")
+        self.assertFalse(row["online"])
+        self.assertEqual(row["mac"], "aa:aa:aa:aa:aa:21")
+        self.assertEqual(row["neighbour_state"], "REACHABLE")
+        self.assertEqual(row["note"], "打印机")
+        self.assertEqual((row["upload_total"], row["download_total"], row["active_connections"], row["rate_down"], row["last_seen"]), (0, 0, 0, 0, 0))
+        self.assertEqual(row["top_domains"], [])
+        self.assertEqual(by_ip["10.10.10.20"]["neighbour_state"], "STALE")
+        # 口径：devices/online 只算有流量的；lan_* 算局域网（有流量 1 + ARP 3），伪设备不算
+        totals = snapshot["totals"]
+        self.assertEqual((totals["devices"], totals["online"]), (3, 3))
+        self.assertEqual((totals["lan_total"], totals["lan_online"], totals["neighbour_only"]), (4, 1, 3))
+        self.assertEqual(app.devices_summary(now=1000), {"online": 3, "total": 3, "lan_online": 1, "lan_total": 4})
+        # 只在 ARP 里的设备不落盘
+        app.save_device_state()
+        with open(os.path.join(self.tmp.name, "devices.json"), encoding="utf-8") as f:
+            data = json.load(f)
+        self.assertNotIn("10.10.10.21", data["devices"])
+        self.assertIn("10.10.10.3", data["devices"])
+        self.assertEqual(data["notes"]["10.10.10.21"], "打印机")
+        # ARP 里的设备一旦有流量就变成普通设备行，不再重复
+        app.apply_connections_sample([conn("b", "10.10.10.21", 7, 7)], now=1005)
+        snapshot = app.devices_snapshot(now=1005)
+        rows = [item for item in snapshot["devices"] if item["ip"] == "10.10.10.21"]
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["seen_via"], "traffic")
+        self.assertEqual(rows[0]["mac"], "aa:aa:aa:aa:aa:21")
+        self.assertEqual(snapshot["totals"]["neighbour_only"], 2)
 
 
 class DevicesContractTest(unittest.TestCase):
@@ -351,8 +536,29 @@ class DevicesContractTest(unittest.TestCase):
         self.assertIn("api('/devices/reset'", text)
         self.assertIn("/devices/${encodeURIComponent(ip)}/note", text)
         self.assertIn('id="devicesPill"', text)
-        self.assertIn("设备 在线 ${data.devices.online ?? 0} / 共 ${data.devices.total ?? 0}", text)
+        self.assertIn("设备 在线 ${data.devices.lan_online ?? data.devices.online ?? 0} / 共 ${data.devices.lan_total ?? data.devices.total ?? 0}", text)
         self.assertIn("清零统计", text)
+        # 分类说明和角标
+        self.assertIn("这里只统计经过本网关的连接。设备直连国内站点、或路由器做了 NAT 再转发的流量，分别不会出现或会合并显示在上级路由名下。同网段通过 ARP 看到但没有流量经过网关的设备以灰色列出。", text)
+        self.assertIn("上级路由（可能汇总多台设备）", text)
+        self.assertIn("远程客户端 · ${device.remote_ip_count || 0} 个来源", text)
+        self.assertIn("局域网可见 · 未经网关", text)
+        self.assertIn("REACHABLE: 'ARP 可达', STALE: 'ARP 过期'", text)
+        self.assertIn("state-dot neighbour", text)
+        self.assertIn("seen_via === 'neighbour'", text)
+        self.assertIn("totals.lan_online ?? totals.online", text)
+        for badge in ("'TUN'", "'SS'", "'HTTP'", "'SOCKS'", "'MIXED'"):
+            self.assertIn(badge, text)
+
+    def test_backend_classification_contract(self):
+        text = APP.read_text(encoding="utf-8")
+        self.assertIn('REMOTE_DEVICE_KEY = "远程客户端"', text)
+        self.assertIn('run_args(["ip", "-4", "neigh"]', text)
+        self.assertIn('run_args(["ip", "route"]', text)
+        self.assertIn('NEIGHBOUR_VISIBLE_STATES = frozenset({"REACHABLE", "STALE", "DELAY", "PROBE", "PERMANENT"})', text)
+        self.assertIn('"seen_via": "neighbour"', text)
+        self.assertIn('"lan_online"', text)
+        self.assertIn('"lan_total"', text)
 
 
 if __name__ == "__main__":

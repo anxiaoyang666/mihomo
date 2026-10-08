@@ -34,7 +34,7 @@ SUBSCRIPTION_STATE_FILE = f"{MIHOMO_DIR}/.last_subscription"
 SUBSCRIPTION_LOG = "/var/log/mihomo-subscription.log"
 GEO_LOG = "/var/log/mihomo-geo.log"
 MANAGER_DIR = f"{MIHOMO_DIR}/manager"
-PANEL_VERSION = "0.1.28"
+PANEL_VERSION = "0.1.29"
 DEFAULT_PANEL_REPO_URL = "https://github.com/anxiaoyang666/mihomo.git"
 DEFAULT_PANEL_BRANCH = "main"
 PANEL_BACKUP_KEEP_COUNT = 3
@@ -953,7 +953,15 @@ DEVICE_MAX_DEVICES = 500
 DEVICE_NOTE_MAX_LEN = 80
 # 网关自己（127.0.0.1、本机地址）发出的连接归到一个伪设备下，mosdns 转发过来的 DNS 流量才有地方看
 GATEWAY_DEVICE_KEY = "本机/网关"
+# 公网来源（比如通过 ss 入站连进来的远程客户端）统一归到一个伪设备下，不然每个漫游 IP 都成一台"设备"
+REMOTE_DEVICE_KEY = "远程客户端"
+DEVICE_REMOTE_IPS_KEEP = 100      # 状态里保留的远程来源 IP 数
+DEVICE_REMOTE_IPS_SHOW = 10       # 接口里展示的最近来源 IP 数
 LOOPBACK_IPS = frozenset({"127.0.0.1", "::1"})
+# RFC 6598 运营商级 NAT 段（Tailscale 等也用它），按内网算
+CGNAT_NETWORK = ipaddress.ip_network("100.64.0.0/10")
+# ip neigh 里这些状态的邻居才算"局域网可见"；FAILED / INCOMPLETE 是解析失败的残留
+NEIGHBOUR_VISIBLE_STATES = frozenset({"REACHABLE", "STALE", "DELAY", "PROBE", "PERMANENT"})
 
 DEVICE_LOCK = threading.Lock()
 DEVICE_STATE = {
@@ -965,6 +973,8 @@ DEVICE_STATE = {
     "controller_error_at": 0,
     "local_ips": set(LOOPBACK_IPS),
     "macs": {},
+    "neighbours": {},         # ip -> {"mac", "state"}，来自 ip -4 neigh（不持久化）
+    "upstream_router": "",    # ip route 里 default via 的下一跳
     "dirty": False,           # 有未落盘的改动
 }
 DEVICE_SAMPLER_STARTED = False
@@ -986,23 +996,63 @@ def detect_local_ips():
         ips.update(re.findall(r"\binet\s+(\d+\.\d+\.\d+\.\d+)/", output))
     return ips
 
-def detect_neighbour_macs():
-    """ip neigh 里直连邻居的 MAC；只用来显示，绝不拿它判断在线。"""
-    ok, output = run_args(["ip", "neigh"], timeout=5)
-    if not ok:
-        return {}
-    macs = {}
-    for line in output.splitlines():
-        match = re.match(r"^(\S+)\s+.*\blladdr\s+([0-9a-fA-F]{2}(?::[0-9a-fA-F]{2}){5})\b", line)
-        if match:
-            macs[match.group(1)] = match.group(2).lower()
-    return macs
+NEIGH_LINE_RE = re.compile(r"^(\S+)\s+dev\s+\S+(?:\s+lladdr\s+([0-9a-fA-F]{2}(?::[0-9a-fA-F]{2}){5}))?.*?\s([A-Z]+)\s*$")
 
-def new_device_record(key, now, is_gateway=False):
+def parse_neighbours(output):
+    """ip neigh 的每一行：<ip> dev <if> [lladdr <mac>] [flags] <STATE>。"""
+    neighbours = {}
+    for line in str(output or "").splitlines():
+        match = NEIGH_LINE_RE.match(line.strip())
+        if match:
+            ip, mac, state = match.groups()
+            neighbours[ip] = {"mac": (mac or "").lower(), "state": state}
+    return neighbours
+
+def detect_neighbours():
+    """ip -4 neigh 里的直连邻居。MAC 只用来显示，状态只用来把"同网段可见但没流量"的设备列出来，绝不拿它判断在线。"""
+    ok, output = run_args(["ip", "-4", "neigh"], timeout=5)
+    return parse_neighbours(output) if ok else {}
+
+def detect_neighbour_macs():
+    return {ip: info["mac"] for ip, info in detect_neighbours().items() if info["mac"]}
+
+def detect_upstream_router():
+    """默认路由的下一跳。它做了 NAT 再转发的流量都顶着它自己的 IP，面板里要标出来"可能是多台设备"。"""
+    ok, output = run_args(["ip", "route"], timeout=5)
+    if not ok:
+        return ""
+    match = re.search(r"^default\s+via\s+(\S+)", output, re.M)
+    return match.group(1) if match else ""
+
+def source_kind(ip, local_ips):
+    """gateway：网关自己；lan：内网 / 链路本地 / CGNAT 来源；remote：公网来源。解析不了的地址按 lan 处理。"""
+    if ip in local_ips:
+        return "gateway"
+    try:
+        addr = ipaddress.ip_address(ip)
+    except ValueError:
+        return "lan"
+    if addr.is_loopback:
+        return "gateway"
+    if addr.is_private or addr.is_link_local or (addr.version == 4 and addr in CGNAT_NETWORK):
+        return "lan"
+    return "remote"
+
+def ip_sort_key(ip):
+    try:
+        addr = ipaddress.ip_address(ip)
+        return (addr.version, int(addr))
+    except ValueError:
+        return (9, 0)
+
+def new_device_record(key, now, kind="lan"):
     return {
         "ip": key,
-        "is_gateway": bool(is_gateway),
+        "kind": kind,                 # lan / remote / gateway
+        "is_gateway": kind == "gateway",
         "mac": "",
+        "inbounds": {},               # 入站类型（Tun / ShadowSocks / ...）-> 见过的连接数
+        "remote_ips": {},             # 仅远程伪设备：来源 IP -> 最近出现时间
         "first_seen": int(now),
         "last_seen": int(now),
         "upload_total": 0,
@@ -1034,13 +1084,17 @@ def trim_device_record(device):
     if len(chains) > DEVICE_MAX_CHAINS:
         for label, _ in sorted(chains.items(), key=lambda item: item[1])[: len(chains) - DEVICE_MAX_CHAINS]:
             chains.pop(label, None)
+    remote_ips = device.get("remote_ips") or {}
+    if len(remote_ips) > DEVICE_REMOTE_IPS_KEEP:
+        for ip, _ in sorted(remote_ips.items(), key=lambda item: item[1])[: len(remote_ips) - DEVICE_REMOTE_IPS_KEEP]:
+            remote_ips.pop(ip, None)
 
 def trim_device_table(devices):
-    """设备超过 DEVICE_MAX_DEVICES 台时淘汰最久没活动的，网关伪设备不淘汰。"""
+    """设备超过 DEVICE_MAX_DEVICES 台时淘汰最久没活动的，网关 / 远程客户端伪设备不淘汰。"""
     if len(devices) <= DEVICE_MAX_DEVICES:
         return
     candidates = sorted(
-        (key for key, device in devices.items() if not device.get("is_gateway")),
+        (key for key, device in devices.items() if device.get("kind", "lan") == "lan"),
         key=lambda key: devices[key].get("last_seen", 0),
     )
     for key in candidates[: len(devices) - DEVICE_MAX_DEVICES]:
@@ -1081,11 +1135,17 @@ def apply_connections_sample(connections, now=None, local_ips=None):
                     du, dd, is_new = up, down, True
             if cid:
                 seen[cid] = (up, down)
-            is_gateway = src in local_ips
-            key = GATEWAY_DEVICE_KEY if is_gateway else src
+            kind = source_kind(src, local_ips)
+            key = {"gateway": GATEWAY_DEVICE_KEY, "remote": REMOTE_DEVICE_KEY}.get(kind, src)
             device = devices.get(key)
             if device is None:
-                device = devices[key] = new_device_record(key, now, is_gateway)
+                device = devices[key] = new_device_record(key, now, kind)
+            if kind == "remote":
+                device["remote_ips"][src] = now
+            # metadata.type 是入站类型：Tun 是局域网走网关的流量，ShadowSocks / HTTPS / Socks5 / Mixed 是代理端口
+            inbound = str(meta.get("type") or "").strip() or "Unknown"
+            if is_new:
+                device["inbounds"][inbound] = device["inbounds"].get(inbound, 0) + 1
             device["upload_total"] += du
             device["download_total"] += dd
             device["last_seen"] = now
@@ -1125,7 +1185,19 @@ def coerce_device_record(key, raw):
     """devices.json 里的一条设备记录，字段逐个校验类型，坏文件不能把面板搞挂。"""
     if not isinstance(raw, dict):
         return None
-    record = new_device_record(key, first_number(raw.get("first_seen")), raw.get("is_gateway"))
+    kind = str(raw.get("kind") or "")
+    if kind not in ("lan", "remote", "gateway"):
+        # 0.1.28 之前的 devices.json 没有 kind：公网来源的旧记录要按 remote 处理，不能当局域网设备
+        if raw.get("is_gateway"):
+            kind = "gateway"
+        elif key == REMOTE_DEVICE_KEY:
+            kind = "remote"
+        else:
+            try:
+                kind = source_kind(key)
+            except Exception:
+                kind = "lan"
+    record = new_device_record(key, first_number(raw.get("first_seen")), kind)
     record["last_seen"] = first_number(raw.get("last_seen"))
     record["upload_total"] = max(0, first_number(raw.get("upload_total")))
     record["download_total"] = max(0, first_number(raw.get("download_total")))
@@ -1144,6 +1216,14 @@ def coerce_device_record(key, raw):
     for label, total in chains.items():
         if isinstance(label, str) and label:
             record["chains"][label[:200]] = max(0, first_number(total))
+    inbounds = raw.get("inbounds") if isinstance(raw.get("inbounds"), dict) else {}
+    for name, count in inbounds.items():
+        if isinstance(name, str) and name:
+            record["inbounds"][name[:40]] = max(0, first_number(count))
+    remote_ips = raw.get("remote_ips") if isinstance(raw.get("remote_ips"), dict) else {}
+    for ip, last in remote_ips.items():
+        if isinstance(ip, str) and ip:
+            record["remote_ips"][ip[:64]] = first_number(last)
     trim_device_record(record)
     return record
 
@@ -1201,9 +1281,13 @@ def save_device_state(path=None):
 
 def refresh_device_neighbours():
     local_ips = detect_local_ips()
-    macs = detect_neighbour_macs()
+    neighbours = detect_neighbours()
+    upstream = detect_upstream_router()
+    macs = {ip: info["mac"] for ip, info in neighbours.items() if info["mac"]}
     with DEVICE_LOCK:
         DEVICE_STATE["local_ips"] = local_ips
+        DEVICE_STATE["neighbours"] = neighbours
+        DEVICE_STATE["upstream_router"] = upstream
         DEVICE_STATE["macs"] = macs
         for key, device in DEVICE_STATE["devices"].items():
             if key in macs:
@@ -1265,17 +1349,32 @@ def start_device_sampler():
     atexit.register(stop_device_sampler)
     return True
 
-def device_payload(key, device, notes, now):
+def device_kind(device):
+    return device.get("kind") or ("gateway" if device.get("is_gateway") else "lan")
+
+def device_payload(key, device, notes, now, neighbours=None, upstream=""):
     domains = device.get("domains") or {}
     top_domains = sorted(domains.items(), key=lambda item: item[1].get("bytes", 0), reverse=True)[:12]
     chains = sorted((device.get("chains") or {}).items(), key=lambda item: item[1], reverse=True)[:5]
+    inbounds = {name: first_number(count) for name, count in (device.get("inbounds") or {}).items()}
+    remote_ips = sorted((device.get("remote_ips") or {}).items(), key=lambda item: item[1], reverse=True)
     last_seen = first_number(device.get("last_seen"))
+    kind = device_kind(device)
+    neighbour = (neighbours or {}).get(key) or {}
     return {
         "ip": key,
-        "mac": device.get("mac", ""),
+        "kind": kind,
+        "mac": device.get("mac") or neighbour.get("mac", ""),
         "note": notes.get(key, ""),
         "online": now - last_seen <= DEVICE_ONLINE_SECONDS,
-        "is_gateway": bool(device.get("is_gateway")),
+        "is_gateway": kind == "gateway",
+        "is_upstream_router": bool(upstream) and key == upstream,
+        "seen_via": "traffic",
+        "neighbour_state": neighbour.get("state", ""),
+        "inbounds": inbounds,
+        "inbound_types": [name for name, _ in sorted(inbounds.items(), key=lambda item: item[1], reverse=True)],
+        "remote_ips": [ip for ip, _ in remote_ips[:DEVICE_REMOTE_IPS_SHOW]],
+        "remote_ip_count": len(remote_ips),
         "last_seen": last_seen,
         "first_seen": first_number(device.get("first_seen")),
         "active_connections": first_number(device.get("active_connections")),
@@ -1288,18 +1387,70 @@ def device_payload(key, device, notes, now):
         "last_host": device.get("last_host", ""),
     }
 
+def neighbour_payload(ip, info, notes, upstream=""):
+    """只在 ARP 表里、没有流量经过网关的同网段设备：灰色列出，计数全 0，不写入 devices.json。"""
+    return {
+        "ip": ip,
+        "kind": "lan",
+        "mac": info.get("mac", ""),
+        "note": notes.get(ip, ""),
+        "online": False,
+        "is_gateway": False,
+        "is_upstream_router": bool(upstream) and ip == upstream,
+        "seen_via": "neighbour",
+        "neighbour_state": info.get("state", ""),
+        "inbounds": {},
+        "inbound_types": [],
+        "remote_ips": [],
+        "remote_ip_count": 0,
+        "last_seen": 0,
+        "first_seen": 0,
+        "active_connections": 0,
+        "rate_up": 0,
+        "rate_down": 0,
+        "upload_total": 0,
+        "download_total": 0,
+        "top_domains": [],
+        "chains": [],
+        "last_host": "",
+    }
+
+def neighbour_only_ips(devices, neighbours, local_ips):
+    """ARP 表里可见、但还没有流量记录的内网 IP：跳过 FAILED/INCOMPLETE、网关自己的地址和链路本地地址。
+    只覆盖网关直连的网段，别的网段的设备 ARP 看不到。"""
+    out = []
+    for ip, info in neighbours.items():
+        if ip in devices or info.get("state") not in NEIGHBOUR_VISIBLE_STATES:
+            continue
+        if source_kind(ip, local_ips) != "lan":
+            continue
+        try:
+            if ipaddress.ip_address(ip).is_link_local:
+                continue
+        except ValueError:
+            continue
+        out.append(ip)
+    return sorted(out, key=ip_sort_key)
+
 def devices_snapshot(now=None):
     """/api/devices 的响应。时间全是 epoch 秒，容器跑在 UTC，由浏览器按本地时区格式化。"""
     now = int(now if now is not None else time.time())
     controller = mihomo_controller_settings()
     with DEVICE_LOCK:
         notes = DEVICE_STATE["notes"]
-        items = [device_payload(key, device, notes, now) for key, device in DEVICE_STATE["devices"].items()]
+        neighbours = DEVICE_STATE["neighbours"]
+        upstream = DEVICE_STATE["upstream_router"]
+        local_ips = DEVICE_STATE["local_ips"]
+        devices = DEVICE_STATE["devices"]
+        traffic = [device_payload(key, device, notes, now, neighbours, upstream) for key, device in devices.items()]
+        neighbour_rows = [neighbour_payload(ip, neighbours[ip], notes, upstream) for ip in neighbour_only_ips(devices, neighbours, local_ips)]
         sampled_at = DEVICE_STATE["sampled_at"]
         error = DEVICE_STATE["controller_error"]
         error_at = DEVICE_STATE["controller_error_at"]
-    # 默认排序：在线优先，再按实时速率降序，再按最近活动
-    items.sort(key=lambda item: (not item["online"], -(item["rate_up"] + item["rate_down"]), -item["last_seen"]))
+    # 默认排序：在线优先，再按实时速率降序，再按最近活动；只在 ARP 里的设备永远排最后
+    traffic.sort(key=lambda item: (not item["online"], -(item["rate_up"] + item["rate_down"]), -item["last_seen"]))
+    items = traffic + neighbour_rows
+    lan_rows = [item for item in items if item["kind"] == "lan"]
     return {
         "devices": items,
         "controller": {
@@ -1312,23 +1463,37 @@ def devices_snapshot(now=None):
         "sample_interval": DEVICE_SAMPLE_INTERVAL,
         "online_seconds": DEVICE_ONLINE_SECONDS,
         "sampler_running": DEVICE_SAMPLER_STARTED,
+        "upstream_router": upstream,
         "totals": {
-            "devices": len(items),
-            "online": sum(1 for item in items if item["online"]),
-            "upload": sum(item["upload_total"] for item in items),
-            "download": sum(item["download_total"] for item in items),
-            "rate_up": sum(item["rate_up"] for item in items),
-            "rate_down": sum(item["rate_down"] for item in items),
+            # devices / online 只算有流量的设备（兼容旧前端）；lan_* 把 ARP 可见的也算进去
+            "devices": len(traffic),
+            "online": sum(1 for item in traffic if item["online"]),
+            "lan_total": len(lan_rows),
+            "lan_online": sum(1 for item in lan_rows if item["online"]),
+            "neighbour_only": len(neighbour_rows),
+            "upload": sum(item["upload_total"] for item in traffic),
+            "download": sum(item["download_total"] for item in traffic),
+            "rate_up": sum(item["rate_up"] for item in traffic),
+            "rate_down": sum(item["rate_down"] for item in traffic),
         },
     }
 
 def devices_summary(now=None):
-    """概览页的"设备 在线 N / 共 M"。"""
+    """概览页的"设备 在线 N / 共 M"：lan_* 口径和设备页一致（含只在 ARP 里的设备）。"""
     now = int(now if now is not None else time.time())
     with DEVICE_LOCK:
-        devices = list(DEVICE_STATE["devices"].values())
-    online = sum(1 for device in devices if now - first_number(device.get("last_seen")) <= DEVICE_ONLINE_SECONDS)
-    return {"online": online, "total": len(devices)}
+        devices = DEVICE_STATE["devices"]
+        records = list(devices.values())
+        neighbour_count = len(neighbour_only_ips(devices, DEVICE_STATE["neighbours"], DEVICE_STATE["local_ips"]))
+    def is_online(device):
+        return now - first_number(device.get("last_seen")) <= DEVICE_ONLINE_SECONDS
+    lan = [device for device in records if device_kind(device) == "lan"]
+    return {
+        "online": sum(1 for device in records if is_online(device)),
+        "total": len(records),
+        "lan_online": sum(1 for device in lan if is_online(device)),
+        "lan_total": len(lan) + neighbour_count,
+    }
 
 def reset_device_totals():
     """累计流量、域名、链路全部清零；设备本身、首次/最近时间、MAC 和备注保留。"""
