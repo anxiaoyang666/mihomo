@@ -106,10 +106,11 @@ uninstall_toolbox() {
     systemctl daemon-reload
     local tmp_cron
     tmp_cron="$(mktemp)"
-    crontab -l 2>/dev/null | grep -F -v -- "gateway_init.sh" | grep -F -v -- "MIHOMO_AUTOMATION" | grep -F -v -- "# JOB_SUB" | grep -F -v -- "# JOB_GEO" | grep -F -v -- "/etc/mihomo/scripts/" > "$tmp_cron" || true
+    crontab -l 2>/dev/null | grep -F -v -- "gateway_init.sh" | grep -F -v -- "MIHOMO_AUTOMATION" | grep -F -v -- "# JOB_SUB" | grep -F -v -- "# JOB_GEO" | grep -F -v -- "MIHOMO_AUTO_UPDATE" | grep -F -v -- "/etc/mihomo/manager/auto_update.py" | grep -F -v -- "/etc/mihomo/scripts/" > "$tmp_cron" || true
     if [ -s "$tmp_cron" ]; then crontab "$tmp_cron"; else crontab -r 2>/dev/null || true; fi
     rm -f "$tmp_cron"
     rm -f /etc/sysctl.d/99-mihomo-gateway.conf /etc/logrotate.d/mihomo /usr/bin/mihomo /usr/bin/mihomo-core /usr/bin/mihomo-core.new
+    rm -f /var/log/mihomo-auto-update.log /run/mihomo-auto-update.lock
     [ "$data_flag" == "--purge" ] && rm -rf /etc/mihomo
     echo "已卸载"
     exit 0
@@ -160,7 +161,7 @@ while true; do
             sleep 1 ;;
         3) manage_sub; read -n 1 -s -r -p "按键返回..." ;;
         4) view_log ;;
-        5) crontab -l 2>/dev/null | grep -E "mihomo|JOB_SUB|JOB_GEO|MIHOMO_AUTOMATION"; read -n 1 -s -r -p "按键返回..." ;;
+        5) crontab -l 2>/dev/null | grep -E "mihomo|JOB_SUB|JOB_GEO|MIHOMO_AUTOMATION|MIHOMO_AUTO_UPDATE"; read -n 1 -s -r -p "按键返回..." ;;
         6) bash "${SCRIPT_DIR}/update_geo.sh"; read -n 1 -s -r -p "按键返回..." ;;
         7) bash "${SCRIPT_DIR}/notify.sh" "测试" "CLI消息"; read -n 1 -s -r -p "按键返回..." ;;
         8) bash "${SCRIPT_DIR}/gateway_init.sh"; read -n 1 -s -r -p "按键返回..." ;;

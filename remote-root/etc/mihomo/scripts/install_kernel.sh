@@ -25,7 +25,7 @@ fail() {
     exit 1
 }
 
-# 架构检测
+# 架构检测（manager/auto_update.py 的 CORE_PLATFORMS / core_asset 用同一套平台名和下载地址，改这里要同步改那边）
 ARCH=$(uname -m)
 if [[ "$ARCH" == "x86_64" ]]; then
     PLATFORM="linux-amd64-compatible"

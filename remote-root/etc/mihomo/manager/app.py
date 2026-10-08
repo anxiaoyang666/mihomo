@@ -5,6 +5,7 @@ from collections import deque
 import subprocess
 import atexit
 import base64
+import fcntl
 import logging
 import os
 import re
@@ -15,6 +16,7 @@ import ipaddress
 import json
 import shutil
 import signal
+import socket
 import ssl
 import sys
 import tempfile
@@ -41,7 +43,7 @@ SUBSCRIPTION_STATE_FILE = f"{MIHOMO_DIR}/.last_subscription"
 SUBSCRIPTION_LOG = "/var/log/mihomo-subscription.log"
 GEO_LOG = "/var/log/mihomo-geo.log"
 MANAGER_DIR = f"{MIHOMO_DIR}/manager"
-PANEL_VERSION = "0.1.35"
+PANEL_VERSION = "0.1.36"
 DEFAULT_PANEL_REPO_URL = "https://github.com/anxiaoyang666/mihomo.git"
 DEFAULT_PANEL_BRANCH = "main"
 PANEL_BACKUP_KEEP_COUNT = 3
@@ -2892,6 +2894,290 @@ def upgrade_panel():
         f"备份位置：{backup_root}"
     ), True
 
+# ==========================================
+# 自动更新（面板侧）：设置校验、定时任务、状态文件、锁、后台启动。
+# 真正干活的是同目录的 auto_update.py（cron 调用，import 本文件的函数，不启动 Flask）。
+# ==========================================
+AUTO_UPDATE_JOB_ID = "# MIHOMO_AUTO_UPDATE"
+AUTO_UPDATE_SCRIPT = f"{MANAGER_DIR}/auto_update.py"
+AUTO_UPDATE_STATE_FILE = f"{MIHOMO_DIR}/auto_update_state.json"
+AUTO_UPDATE_LOG = "/var/log/mihomo-auto-update.log"
+AUTO_UPDATE_LOCK_NAME = "mihomo-auto-update.lock"
+AUTO_UPDATE_ITEMS = ("ui", "core", "panel")
+AUTO_UPDATE_ITEM_LABELS = {"ui": "面板 UI (zashboard)", "core": "mihomo 内核", "panel": "管理面板"}
+AUTO_UPDATE_RESULT_LABELS = {
+    "updated": "已更新", "up_to_date": "已是最新", "skipped": "已跳过", "failed": "失败",
+    "rolled_back": "已回滚", "started": "升级已开始", "available": "有可用更新", "not_due": "未到间隔",
+}
+AUTO_UPDATE_DEFAULTS = {"enabled": True, "time": "04:00", "core_min_age_days": 3, "panel_min_age_days": 0, "ui_interval_days": 7}
+AUTO_UPDATE_ENV_KEYS = {
+    "enabled": "AUTO_UPDATE_ENABLED",
+    "time": "AUTO_UPDATE_TIME",
+    "core_min_age_days": "AUTO_UPDATE_CORE_MIN_AGE_DAYS",
+    "panel_min_age_days": "AUTO_UPDATE_PANEL_MIN_AGE_DAYS",
+    "ui_interval_days": "AUTO_UPDATE_UI_INTERVAL_DAYS",
+}
+AUTO_UPDATE_RANGES = {"core_min_age_days": (0, 90), "panel_min_age_days": (0, 90), "ui_interval_days": (1, 365)}
+AUTO_UPDATE_NUMBER_LABELS = {"core_min_age_days": "内核最小发布天数", "panel_min_age_days": "面板最小提交天数", "ui_interval_days": "面板 UI 更新间隔天数"}
+# 面板升级写下 started 后，新进程启动时把它标成 updated；超过这个时间还没到新版本就算失败
+AUTO_UPDATE_PANEL_PENDING_SECONDS = 600
+AUTO_UPDATE_DRY_RUN_TIMEOUT = 180
+
+def auto_update_time_valid(value):
+    match = re.fullmatch(r"(\d{2}):(\d{2})", str(value or ""))
+    return bool(match) and int(match.group(1)) <= 23 and int(match.group(2)) <= 59
+
+def auto_update_int(value):
+    """只认非负整数（数字或纯数字字符串），其他一律 None。"""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    text = str(value if value is not None else "").strip()
+    return int(text) if re.fullmatch(r"\d{1,6}", text) else None
+
+def auto_update_settings(env=None):
+    """从 .env 读设置；缺失或非法的值回落到默认值（面板保存时会做严格校验）。"""
+    env = read_env() if env is None else env
+    settings = dict(AUTO_UPDATE_DEFAULTS)
+    enabled = str(env.get(AUTO_UPDATE_ENV_KEYS["enabled"], "") or "").strip().lower()
+    if enabled in ("true", "false"):
+        settings["enabled"] = enabled == "true"
+    time_value = str(env.get(AUTO_UPDATE_ENV_KEYS["time"], "") or "").strip()
+    if auto_update_time_valid(time_value):
+        settings["time"] = time_value
+    for key, (low, high) in AUTO_UPDATE_RANGES.items():
+        number = auto_update_int(env.get(AUTO_UPDATE_ENV_KEYS[key]))
+        if number is not None and low <= number <= high:
+            settings[key] = number
+    return settings
+
+def validate_auto_update_settings(data):
+    """面板提交的设置严格校验。返回 (ok, 错误说明, 规范化后的设置)。"""
+    data = data if isinstance(data, dict) else {}
+    errors = []
+    enabled = data.get("enabled", AUTO_UPDATE_DEFAULTS["enabled"])
+    if isinstance(enabled, str) and enabled.strip().lower() in ("true", "false"):
+        enabled = enabled.strip().lower() == "true"
+    if not isinstance(enabled, bool):
+        errors.append("开关只能是 true 或 false")
+    time_value = str(data.get("time", "") or "").strip()
+    if not auto_update_time_valid(time_value):
+        errors.append("更新时间格式应为 HH:MM（00:00–23:59）")
+    normalized = {"enabled": enabled, "time": time_value}
+    for key, (low, high) in AUTO_UPDATE_RANGES.items():
+        number = auto_update_int(data.get(key, AUTO_UPDATE_DEFAULTS[key]))
+        if number is None or not low <= number <= high:
+            errors.append(f"{AUTO_UPDATE_NUMBER_LABELS[key]}应为 {low}–{high} 的整数")
+        normalized[key] = number
+    if errors:
+        return False, "；".join(errors), None
+    return True, "", normalized
+
+def auto_update_env_updates(settings):
+    return {
+        AUTO_UPDATE_ENV_KEYS["enabled"]: "true" if settings["enabled"] else "false",
+        AUTO_UPDATE_ENV_KEYS["time"]: settings["time"],
+        **{AUTO_UPDATE_ENV_KEYS[key]: str(settings[key]) for key in AUTO_UPDATE_RANGES},
+    }
+
+def auto_update_cron_schedule(time_value):
+    hour, minute = parse_daily_time(time_value, 4)
+    return f"{minute} {hour} * * *"
+
+def auto_update_cron_command():
+    # 脚本自己把可读日志追加到 AUTO_UPDATE_LOG；这里只把异常栈（stderr）也收进去，stdout 丢掉避免重复
+    return f"python3 {AUTO_UPDATE_SCRIPT} >/dev/null 2>>{AUTO_UPDATE_LOG}"
+
+def auto_update_cron_line(settings):
+    return f"{auto_update_cron_schedule(settings['time'])} {auto_update_cron_command()} {AUTO_UPDATE_JOB_ID}"
+
+def apply_auto_update_cron(settings=None):
+    settings = settings or auto_update_settings()
+    return update_cron(AUTO_UPDATE_JOB_ID, auto_update_cron_schedule(settings["time"]), auto_update_cron_command(), bool(settings["enabled"]))
+
+def ensure_auto_update_cron(settings=None):
+    """面板启动、保存设置时调用：crontab 里的自动更新行和 .env 不一致才重写，关闭时删掉。"""
+    settings = settings or auto_update_settings()
+    try:
+        res = subprocess.run(["crontab", "-l"], capture_output=True, text=True, timeout=15)
+        current = [line for line in (res.stdout or "").splitlines() if AUTO_UPDATE_JOB_ID in line]
+    except Exception:
+        current = None
+    desired = [auto_update_cron_line(settings)] if settings["enabled"] else []
+    if current == desired:
+        return True, ""
+    return apply_auto_update_cron(settings)
+
+def read_auto_update_state(path=None):
+    path = path or AUTO_UPDATE_STATE_FILE
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        data = {}
+    if not isinstance(data, dict):
+        data = {}
+    items = data.get("items") if isinstance(data.get("items"), dict) else {}
+    data["items"] = {key: (items.get(key) if isinstance(items.get(key), dict) else {}) for key in AUTO_UPDATE_ITEMS}
+    return data
+
+def write_auto_update_state(state, path=None):
+    write_text_atomic(path or AUTO_UPDATE_STATE_FILE, json.dumps(state, ensure_ascii=False, indent=2) + "\n")
+
+def auto_update_lock_path():
+    directory = "/run" if os.path.isdir("/run") and os.access("/run", os.W_OK) else tempfile.gettempdir()
+    return os.path.join(directory, AUTO_UPDATE_LOCK_NAME)
+
+def acquire_auto_update_lock(path=None):
+    """单实例锁：拿到返回文件描述符（进程退出自动释放），已被占用返回 None。"""
+    path = path or auto_update_lock_path()
+    fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o644)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        os.close(fd)
+        return None
+    try:
+        os.ftruncate(fd, 0)
+        os.write(fd, str(os.getpid()).encode())
+    except OSError:
+        pass
+    return fd
+
+def release_auto_update_lock(fd):
+    if fd is None:
+        return
+    try:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+    finally:
+        os.close(fd)
+
+def auto_update_lock_busy(path=None):
+    try:
+        fd = acquire_auto_update_lock(path)
+    except OSError:
+        return False
+    if fd is None:
+        return True
+    release_auto_update_lock(fd)
+    return False
+
+def run_notify(title, content):
+    """后台发通知，不等结果（notify.sh 自己会写 /var/log/mihomo-notify.log）。"""
+    try:
+        subprocess.Popen(["bash", f"{SCRIPT_DIR}/notify.sh", title, content],
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, close_fds=True, start_new_session=True)
+        return True
+    except Exception as e:
+        log.warning("发送通知失败：%s", e)
+        return False
+
+def finalize_panel_auto_update(path=None, now=None, notify=run_notify):
+    """自动更新升级面板后旧进程会被替换；新面板启动时在这里把 started 记成最终结果。"""
+    now = int(now if now is not None else time.time())
+    state = read_auto_update_state(path)
+    item = state["items"].get("panel") or {}
+    if item.get("last_result") != "started":
+        return None
+    target = panel_version_tuple(item.get("to"))
+    current = panel_version_tuple(PANEL_VERSION)
+    if target and current and current >= target:
+        result, message = "updated", f"面板已升级到 v{PANEL_VERSION}"
+    elif now - int(item.get("started_at") or item.get("last_check") or 0) > AUTO_UPDATE_PANEL_PENDING_SECONDS:
+        result, message = "failed", f"升级到 v{str(item.get('to') or '').lstrip('v')} 后面板仍是 v{PANEL_VERSION}，可能已回滚"
+    else:
+        return None
+    item.update({"last_result": result, "message": message, "finished_at": now})
+    state["items"]["panel"] = item
+    write_auto_update_state(state, path)
+    try:
+        with open(AUTO_UPDATE_LOG, "a", encoding="utf-8") as f:
+            f.write(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] [panel] {message}\n")
+    except OSError:
+        pass
+    if notify:
+        notify(f"Mihomo 自动更新（{socket.gethostname()}）", f"管理面板：{AUTO_UPDATE_RESULT_LABELS[result]}\n{message}")
+    return result
+
+def startup_auto_update_hooks():
+    for hook in (finalize_panel_auto_update, ensure_auto_update_cron):
+        try:
+            hook()
+        except Exception as e:
+            log.warning("自动更新启动检查失败 (%s)：%s", hook.__name__, e)
+
+def server_timezone_info(now=None):
+    local = time.localtime(now if now is not None else time.time())
+    offset_minutes = int(local.tm_gmtoff // 60)
+    name = ""
+    try:
+        real = os.path.realpath("/etc/localtime")
+        if "zoneinfo/" in real:
+            name = real.split("zoneinfo/", 1)[1]
+    except OSError:
+        pass
+    sign = "+" if offset_minutes >= 0 else "-"
+    return {
+        "name": name or local.tm_zone or "UTC",
+        "abbr": local.tm_zone or "",
+        "offset_minutes": offset_minutes,
+        "offset_text": f"UTC{sign}{abs(offset_minutes) // 60:02d}:{abs(offset_minutes) % 60:02d}",
+        "now": time.strftime("%Y-%m-%d %H:%M", local),
+    }
+
+def auto_update_status_payload():
+    version_ok, version = mihomo_api_get("/version", timeout=2)
+    return {
+        "settings": auto_update_settings(),
+        "state": read_auto_update_state(),
+        "running": auto_update_lock_busy(),
+        "timezone": server_timezone_info(),
+        "panel_version": PANEL_VERSION,
+        "core_version": version.get("version", "") if version_ok and isinstance(version, dict) else "",
+        "labels": {"items": AUTO_UPDATE_ITEM_LABELS, "results": AUTO_UPDATE_RESULT_LABELS},
+    }
+
+def run_auto_update_dry_run():
+    """同步跑 auto_update.py --dry-run --json，只检查不安装。返回 (ok, 报告字典或错误说明)。"""
+    if not os.path.exists(AUTO_UPDATE_SCRIPT):
+        return False, f"缺少 {AUTO_UPDATE_SCRIPT}"
+    try:
+        result = subprocess.run([sys.executable or "python3", AUTO_UPDATE_SCRIPT, "--dry-run", "--json", "--manual"],
+                                capture_output=True, text=True, timeout=AUTO_UPDATE_DRY_RUN_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        return False, f"检查超时（{AUTO_UPDATE_DRY_RUN_TIMEOUT} 秒）"
+    except Exception as e:
+        return False, f"检查无法执行：{e}"
+    lines = [line for line in (result.stdout or "").splitlines() if line.strip()]
+    try:
+        report = json.loads(lines[-1]) if lines else None
+    except ValueError:
+        report = None
+    if not isinstance(report, dict):
+        return False, ((result.stdout or "") + (result.stderr or "")).strip()[-2000:] or f"检查失败（退出码 {result.returncode}）"
+    return bool(report.get("success", result.returncode == 0)), report
+
+def spawn_auto_update():
+    """后台启动真实更新。优先 systemd-run 放进独立的临时服务：面板升级会重启 mihomo-manager，
+    systemd 默认会把本服务 cgroup 里的子进程一起杀掉。"""
+    if not os.path.exists(AUTO_UPDATE_SCRIPT):
+        return False, f"缺少 {AUTO_UPDATE_SCRIPT}"
+    command = [sys.executable or "python3", AUTO_UPDATE_SCRIPT, "--manual"]
+    if shutil.which("systemd-run"):
+        unit = f"mihomo-auto-update-{int(time.time())}"
+        ok, output = run_args(["systemd-run", "--quiet", "--collect", f"--unit={unit}"] + command, timeout=20)
+        if ok:
+            return True, "已在后台开始更新"
+        log.warning("systemd-run 启动自动更新失败，改用普通后台进程：%s", output)
+    try:
+        with open(AUTO_UPDATE_LOG, "a", encoding="utf-8") as err:
+            subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=err,
+                             close_fds=True, start_new_session=True)
+    except Exception as e:
+        return False, f"无法启动后台更新：{e}"
+    return True, "已在后台开始更新"
+
 def json_body():
     """只接受 JSON 对象；数组/字符串/解析失败一律当空字典，调用方不用再逐个 isinstance。"""
     data = request.get_json(silent=True)
@@ -3009,6 +3295,55 @@ def api_ikuai_test():
 @login_required
 def api_panel_upgrade_source():
     return jsonify(panel_upgrade_state())
+
+@app.route('/api/auto-update')
+@login_required
+def api_auto_update():
+    return jsonify(auto_update_status_payload())
+
+@app.route('/api/auto-update/settings', methods=['POST'])
+@login_required
+def api_auto_update_settings():
+    ok, message, settings = validate_auto_update_settings(json_body())
+    if not ok:
+        return jsonify({"success": False, "message": message})
+    if not CONFIG_LOCK.acquire(blocking=False):
+        return jsonify({"success": False, "message": BUSY_MESSAGE})
+    try:
+        write_env(auto_update_env_updates(settings))
+        cron_ok, cron_message = apply_auto_update_cron(settings)
+    finally:
+        CONFIG_LOCK.release()
+    if not cron_ok:
+        return jsonify({"success": False, "message": "设置已写入 .env，但定时任务更新失败：\n" + cron_message})
+    state = f"每天 {settings['time']}（服务器时间）自动检查" if settings["enabled"] else "已关闭自动更新"
+    return jsonify({"success": True, "message": f"自动更新设置已保存：{state}", "settings": settings})
+
+@app.route('/api/auto-update/check', methods=['POST'])
+@login_required
+def api_auto_update_check():
+    if auto_update_lock_busy():
+        return jsonify({"success": False, "message": "自动更新正在运行中，请稍后再检查。"})
+    ok, report = run_auto_update_dry_run()
+    if not isinstance(report, dict):
+        return jsonify({"success": False, "message": report})
+    return jsonify({"success": ok, "message": "检查完成（未安装任何东西）" if ok else "检查未全部成功", "report": report})
+
+@app.route('/api/auto-update/run', methods=['POST'])
+@login_required
+def api_auto_update_run():
+    # 和配置写入/重启互斥：正在改配置时不启动更新
+    if not CONFIG_LOCK.acquire(blocking=False):
+        return jsonify({"success": False, "message": BUSY_MESSAGE})
+    try:
+        if auto_update_lock_busy():
+            return jsonify({"success": False, "message": "自动更新已经在运行中。"})
+        started_at = int(time.time())
+        ok, message = spawn_auto_update()
+    finally:
+        CONFIG_LOCK.release()
+    # started_at 用服务器时钟，前端拿它判断“这次运行结束了没有”，不受浏览器时钟偏差影响
+    return jsonify({"success": ok, "message": message, "started_at": started_at})
 
 @app.route('/api/control', methods=['POST'])
 @login_required
@@ -3314,6 +3649,10 @@ def handle_settings():
         ):
             if not ok:
                 cron_errors.append(message)
+        # 顺带确认自动更新的定时任务和 .env 一致（升级上来的老面板也能补上）
+        auto_ok, auto_message = ensure_auto_update_cron()
+        if not auto_ok:
+            cron_errors.append(auto_message)
         if cron_errors:
             return jsonify({"success": False, "message": "设置已写入 .env，但定时任务更新失败：\n" + "\n".join(cron_errors)})
 
@@ -3327,5 +3666,7 @@ if __name__ == '__main__':
         port = 7838
     # systemd 停服务发 SIGTERM，默认处理是直接退出不跑 atexit；转成 SystemExit 让采样线程把统计落盘
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
+    # 自动更新：补齐/修正 cron 行；上一次自动升级面板后在这里记录最终结果
+    startup_auto_update_hooks()
     start_device_sampler()
     app.run(host='0.0.0.0', port=port)

@@ -1,6 +1,6 @@
 # Mihomo 日志轮转。mihomo.service 用 shell 重定向写日志，进程不会重新打开文件，
 # 所以必须 copytruncate（先拷贝再清空原文件），否则轮转后日志会继续写进已改名的旧文件。
-/var/log/mihomo.log /var/log/mihomo-notify.log /var/log/mihomo-subscription.log /var/log/mihomo-geo.log {
+/var/log/mihomo.log /var/log/mihomo-notify.log /var/log/mihomo-subscription.log /var/log/mihomo-geo.log /var/log/mihomo-auto-update.log {
     daily
     rotate 7
     compress

@@ -68,12 +68,15 @@ echo -e "${YELLOW}[2/5] 清理自动化任务...${NC}"
 #   gateway_init.sh check   -> gateway_init.sh 的保活任务
 #   # MIHOMO_AUTOMATION     -> 旧版 cron_manager.sh（已删除）添加的任务，老安装可能还留着
 #   # JOB_SUB / # JOB_GEO   -> 面板 app.py update_cron 添加的任务
+#   # MIHOMO_AUTO_UPDATE    -> 面板写入的自动更新任务（调用 manager/auto_update.py，不在 scripts/ 下）
 #   /etc/mihomo/scripts/    -> 兜底，凡是调用本项目脚本的行都清掉
 crontab -l 2>/dev/null \
     | grep -F -v -- "gateway_init.sh" \
     | grep -F -v -- "MIHOMO_AUTOMATION" \
     | grep -F -v -- "# JOB_SUB" \
     | grep -F -v -- "# JOB_GEO" \
+    | grep -F -v -- "MIHOMO_AUTO_UPDATE" \
+    | grep -F -v -- "/etc/mihomo/manager/auto_update.py" \
     | grep -F -v -- "/etc/mihomo/scripts/" > "$TMP_CRON" || true
 if [ -s "$TMP_CRON" ]; then
     crontab "$TMP_CRON"
@@ -86,7 +89,8 @@ echo "✅ Crontab 任务已清理。"
 echo -e "${YELLOW}[3/5] 清理网关系统配置...${NC}"
 rm -f /etc/sysctl.d/99-mihomo-gateway.conf
 rm -f /etc/logrotate.d/mihomo
-rm -f /var/log/mihomo-subscription.log /var/log/mihomo-geo.log
+rm -f /var/log/mihomo-subscription.log /var/log/mihomo-geo.log /var/log/mihomo-auto-update.log
+rm -f /run/mihomo-auto-update.lock
 echo "✅ sysctl / logrotate 配置已删除。"
 
 # 4. 删除程序文件

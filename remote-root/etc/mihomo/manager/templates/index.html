@@ -1249,6 +1249,53 @@
                                 <button class="action-button primary w-100 mt-4" onclick="saveSettings(false, this)"><i class="bi bi-save"></i> 仅保存设置</button>
                             </div>
                         </div>
+
+                        <div class="card" id="autoUpdateCard">
+                            <div class="card-header d-flex justify-content-between align-items-center">
+                                <span><i class="bi bi-arrow-repeat"></i> 自动更新</span>
+                                <span class="small text-muted" id="auto_update_running"></span>
+                            </div>
+                            <div class="card-body">
+                                <div class="form-check form-switch mb-2">
+                                    <input class="form-check-input" type="checkbox" id="auto_update_enabled">
+                                    <label class="form-check-label fw-bold" for="auto_update_enabled">每天自动检查并更新</label>
+                                </div>
+                                <label class="form-label fw-bold" for="auto_update_time">更新时间（服务器时间）</label>
+                                <input type="time" class="form-control" id="auto_update_time" value="04:00">
+                                <div class="form-text mb-3" id="auto_update_tz_hint">服务器时区加载中…</div>
+
+                                <div class="row g-2">
+                                    <div class="col-4">
+                                        <label class="form-label small fw-bold" for="auto_update_core_min_age">内核发布满（天）</label>
+                                        <input type="number" class="form-control" id="auto_update_core_min_age" min="0" max="90" step="1" value="3">
+                                    </div>
+                                    <div class="col-4">
+                                        <label class="form-label small fw-bold" for="auto_update_panel_min_age">面板提交满（天）</label>
+                                        <input type="number" class="form-control" id="auto_update_panel_min_age" min="0" max="90" step="1" value="0">
+                                    </div>
+                                    <div class="col-4">
+                                        <label class="form-label small fw-bold" for="auto_update_ui_interval">UI 间隔（天）</label>
+                                        <input type="number" class="form-control" id="auto_update_ui_interval" min="1" max="365" step="1" value="7">
+                                    </div>
+                                </div>
+                                <div class="form-text">内核只装发布已满指定天数的稳定版，绝不降级；更新后 30 秒内检查服务、控制器、DNS 和所有入站端口，不通过自动回滚旧内核。顺序：面板 UI → 内核 → 管理面板。</div>
+
+                                <div class="table-responsive mt-3">
+                                    <table class="table table-sm align-middle mb-0 small">
+                                        <thead><tr><th>项目</th><th>当前</th><th>最新可用</th><th>上次结果</th></tr></thead>
+                                        <tbody id="auto_update_items"></tbody>
+                                    </table>
+                                </div>
+                                <div class="small text-muted mt-2" id="auto_update_last_run"></div>
+
+                                <div class="d-flex flex-wrap gap-2 mt-3">
+                                    <button class="action-button primary" onclick="saveAutoUpdate(this)"><i class="bi bi-save"></i> 保存</button>
+                                    <button class="soft-button" onclick="checkAutoUpdate(this)"><i class="bi bi-search"></i> 立即检查（不安装）</button>
+                                    <button class="soft-button" onclick="runAutoUpdate(this)"><i class="bi bi-cloud-arrow-down"></i> 立即更新</button>
+                                </div>
+                                <pre class="small mt-3 mb-0 d-none" id="auto_update_report" style="white-space: pre-wrap;"></pre>
+                            </div>
+                        </div>
                     </div>
                 </div>
             </section>
@@ -2496,6 +2543,7 @@
     function loadConfig() {
         api('/config').then(res => document.getElementById('config-editor').value = res.content || '');
         loadSettings();
+        loadAutoUpdate();
     }
 
     async function saveConfig(trigger = null) {
@@ -2846,6 +2894,163 @@
             setActionBusy(trigger, false);
         }
     }
+
+    // ===== 自动更新 =====
+    let autoUpdatePollTimer = null;
+    let autoUpdateLabels = { items: {}, results: {} };
+    let autoUpdateTz = null;
+
+    function serverTimeToBrowserLocal(hhmm, offsetMinutes) {
+        const match = /^(\d{2}):(\d{2})$/.exec(hhmm || '');
+        if (!match) return '';
+        const utcMinutes = (((Number(match[1]) * 60 + Number(match[2]) - Number(offsetMinutes || 0)) % 1440) + 1440) % 1440;
+        const date = new Date();
+        date.setUTCHours(Math.floor(utcMinutes / 60), utcMinutes % 60, 0, 0);
+        return `${pad2(date.getHours())}:${pad2(date.getMinutes())}`;
+    }
+
+    function formatEpoch(epoch) {
+        if (!epoch) return '';
+        const date = new Date(Number(epoch) * 1000);
+        return `${date.getFullYear()}-${pad2(date.getMonth() + 1)}-${pad2(date.getDate())} ${pad2(date.getHours())}:${pad2(date.getMinutes())}`;
+    }
+
+    function updateAutoUpdateTzHint(tz) {
+        const hint = document.getElementById('auto_update_tz_hint');
+        if (!hint || !tz) return;
+        autoUpdateTz = tz;
+        const value = document.getElementById('auto_update_time').value;
+        const local = serverTimeToBrowserLocal(value, tz.offset_minutes);
+        const browserOffset = -new Date().getTimezoneOffset();
+        const same = browserOffset === Number(tz.offset_minutes);
+        hint.textContent = `服务器时区 ${tz.name}（${tz.offset_text}），服务器现在 ${tz.now}` +
+            (local ? (same ? '；与你的浏览器时区相同' : `；相当于你浏览器本地时间 ${local}`) : '');
+    }
+
+    function renderAutoUpdate(res) {
+        if (!res || !res.settings) return;
+        autoUpdateLabels = res.labels || autoUpdateLabels;
+        const s = res.settings;
+        document.getElementById('auto_update_enabled').checked = Boolean(s.enabled);
+        document.getElementById('auto_update_time').value = s.time || '04:00';
+        document.getElementById('auto_update_core_min_age').value = s.core_min_age_days;
+        document.getElementById('auto_update_panel_min_age').value = s.panel_min_age_days;
+        document.getElementById('auto_update_ui_interval').value = s.ui_interval_days;
+        updateAutoUpdateTzHint(res.timezone);
+        const items = (res.state && res.state.items) || {};
+        const live = { core: res.core_version || '', panel: res.panel_version ? 'v' + res.panel_version : '', ui: '' };
+        const rows = ['ui', 'core', 'panel'].map(key => {
+            const item = items[key] || {};
+            const result = item.last_result ? (autoUpdateLabels.results[item.last_result] || item.last_result) : '尚未运行';
+            const when = formatEpoch(item.last_run || item.last_check);
+            const latest = item.latest ? (String(item.latest).startsWith('v') ? item.latest : 'v' + item.latest) : '—';
+            const title = escapeHtml(item.message || '');
+            return `<tr title="${title}"><td>${escapeHtml(autoUpdateLabels.items[key] || key)}</td>` +
+                `<td>${escapeHtml(live[key] || item.current || '—')}</td><td>${escapeHtml(latest)}</td>` +
+                `<td>${escapeHtml(result)}${when ? `<div class="text-muted">${escapeHtml(when)}</div>` : ''}` +
+                `${item.message ? `<div class="text-muted">${escapeHtml(item.message)}</div>` : ''}</td></tr>`;
+        });
+        document.getElementById('auto_update_items').innerHTML = rows.join('');
+        const lastRun = res.state && res.state.last_run;
+        document.getElementById('auto_update_last_run').textContent = lastRun
+            ? `上次运行：${formatEpoch(lastRun)}（${res.state.last_run_mode === 'dry-run' ? '只检查' : '更新'}）` : '';
+        document.getElementById('auto_update_running').textContent = res.running ? '正在运行…' : '';
+    }
+
+    async function loadAutoUpdate() {
+        const res = await api('/auto-update');
+        renderAutoUpdate(res);
+        return res;
+    }
+
+    async function saveAutoUpdate(trigger = null) {
+        if (trigger?.classList?.contains('is-busy')) return;
+        setActionBusy(trigger, true);
+        try {
+            const res = await api('/auto-update/settings', {
+                enabled: document.getElementById('auto_update_enabled').checked,
+                time: document.getElementById('auto_update_time').value,
+                core_min_age_days: document.getElementById('auto_update_core_min_age').value,
+                panel_min_age_days: document.getElementById('auto_update_panel_min_age').value,
+                ui_interval_days: document.getElementById('auto_update_ui_interval').value
+            });
+            showToast(res.message || (res.success ? '已保存' : '保存失败'), res.success ? 'success' : 'error');
+            if (res.success) loadAutoUpdate();
+        } finally {
+            setActionBusy(trigger, false);
+        }
+    }
+
+    function renderAutoUpdateReport(report, message) {
+        const pre = document.getElementById('auto_update_report');
+        if (!pre) return;
+        const lines = [];
+        if (message) lines.push(message);
+        ((report && report.items) || []).forEach(item => {
+            const label = autoUpdateLabels.items[item.item] || item.item;
+            const result = autoUpdateLabels.results[item.result] || item.result;
+            lines.push(`${label}：${result} — ${item.message}`);
+        });
+        pre.textContent = lines.join('\n');
+        pre.classList.toggle('d-none', lines.length === 0);
+    }
+
+    async function checkAutoUpdate(trigger = null) {
+        if (trigger?.classList?.contains('is-busy')) return;
+        setActionBusy(trigger, true);
+        try {
+            const res = await api('/auto-update/check', {});
+            renderAutoUpdateReport(res.report, res.message);
+            if (!res.success) showToast(res.message || '检查失败', 'error');
+            loadAutoUpdate();
+        } finally {
+            setActionBusy(trigger, false);
+        }
+    }
+
+    async function quietAutoUpdateStatus() {
+        // 轮询期间面板可能因升级重启，请求失败不弹提示，下一轮再试
+        try {
+            const resp = await fetch('/api/auto-update', { headers: { 'X-Requested-With': 'XMLHttpRequest' } });
+            if (!resp.ok) return null;
+            return await resp.json();
+        } catch (error) {
+            return null;
+        }
+    }
+
+    function pollAutoUpdate(startedAfter) {
+        if (autoUpdatePollTimer) clearInterval(autoUpdatePollTimer);
+        const deadline = Date.now() + 10 * 60 * 1000;
+        autoUpdatePollTimer = setInterval(async () => {
+            const res = await quietAutoUpdateStatus();
+            if (res) renderAutoUpdate(res);
+            const finished = res && !res.running && Number(res.state?.last_finished || 0) >= startedAfter;
+            if (finished || Date.now() > deadline) {
+                clearInterval(autoUpdatePollTimer);
+                autoUpdatePollTimer = null;
+                if (finished) showToast('自动更新已结束，结果见“自动更新”卡片', 'info');
+            }
+        }, 3000);
+    }
+
+    async function runAutoUpdate(trigger = null) {
+        if (trigger?.classList?.contains('is-busy')) return;
+        if (!await askConfirm('确定立即更新吗？如果有新内核，会重启 mihomo，所有连接会中断 1–2 秒；健康检查不通过会自动回滚。管理面板升级放在最后，完成后面板会自动重启。')) return;
+        setActionBusy(trigger, true);
+        try {
+            const res = await api('/auto-update/run', {});
+            showToast(res.message || (res.success ? '已开始' : '启动失败'), res.success ? 'success' : 'error');
+            if (res.success) {
+                document.getElementById('auto_update_running').textContent = '正在运行…';
+                pollAutoUpdate(Number(res.started_at || 0));
+            }
+        } finally {
+            setActionBusy(trigger, false);
+        }
+    }
+
+    document.getElementById('auto_update_time')?.addEventListener('input', () => updateAutoUpdateTzHint(autoUpdateTz));
 
     function setPanelText(id, value) {
         const el = document.getElementById(id);
