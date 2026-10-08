@@ -36,7 +36,7 @@ SUBSCRIPTION_STATE_FILE = f"{MIHOMO_DIR}/.last_subscription"
 SUBSCRIPTION_LOG = "/var/log/mihomo-subscription.log"
 GEO_LOG = "/var/log/mihomo-geo.log"
 MANAGER_DIR = f"{MIHOMO_DIR}/manager"
-PANEL_VERSION = "0.1.30"
+PANEL_VERSION = "0.1.31"
 DEFAULT_PANEL_REPO_URL = "https://github.com/anxiaoyang666/mihomo.git"
 DEFAULT_PANEL_BRANCH = "main"
 PANEL_BACKUP_KEEP_COUNT = 3
@@ -1444,6 +1444,12 @@ def neighbour_only_ips(devices, neighbours, local_ips):
         out.append(ip)
     return sorted(out, key=ip_sort_key)
 
+def pseudo_device_active(item):
+    """“本机/网关”“远程客户端”这两行只在当前有连接或有速率时显示，空着只是噪音。"""
+    if item.get("kind") not in ("gateway", "remote"):
+        return True
+    return bool(item.get("active_connections") or item.get("rate_up") or item.get("rate_down"))
+
 def devices_snapshot(now=None):
     """/api/devices 的响应。时间全是 epoch 秒，容器跑在 UTC，由浏览器按本地时区格式化。
     配置了爱快且至少成功拉取过一次时以爱快的终端为准，否则是纯 mihomo 连接视图。"""
@@ -1461,6 +1467,7 @@ def devices_snapshot(now=None):
         local_ips = DEVICE_STATE["local_ips"]
         devices = DEVICE_STATE["devices"]
         traffic = [device_payload(key, device, notes, now, neighbours, upstream) for key, device in devices.items()]
+        traffic = [item for item in traffic if pseudo_device_active(item)]
         neighbour_rows = [neighbour_payload(ip, neighbours[ip], notes, upstream) for ip in neighbour_only_ips(devices, neighbours, local_ips)]
         sampled_at = DEVICE_STATE["sampled_at"]
         error = DEVICE_STATE["controller_error"]
@@ -2046,6 +2053,7 @@ def ikuai_devices_snapshot(now, settings):
         error_at = DEVICE_STATE["controller_error_at"]
     # 默认排序：在线优先，再按当前总速率降序，再按今日流量降序
     rows.sort(key=lambda item: (not item["online"], -(item["rate_up"] + item["rate_down"]), -item["today_total"]))
+    extra = [item for item in extra if pseudo_device_active(item)]
     extra.sort(key=lambda item: (not item["online"], -(item["rate_up"] + item["rate_down"])))
     online_rows = [row for row in rows if row["online"]]
     return {

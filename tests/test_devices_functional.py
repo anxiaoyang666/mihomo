@@ -563,3 +563,18 @@ class DevicesContractTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PseudoDeviceVisibilityTest(unittest.TestCase):
+    def test_idle_pseudo_devices_are_hidden(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        app = load_app(tmp.name)
+        f = app.pseudo_device_active
+        self.assertFalse(f({"kind": "gateway", "active_connections": 0, "rate_up": 0, "rate_down": 0}))
+        self.assertFalse(f({"kind": "remote", "active_connections": 0, "rate_up": 0, "rate_down": 0}))
+        self.assertTrue(f({"kind": "remote", "active_connections": 2, "rate_up": 0, "rate_down": 0}))
+        self.assertTrue(f({"kind": "gateway", "active_connections": 0, "rate_up": 0, "rate_down": 10}))
+        # 普通局域网设备不受影响，离线也照常显示
+        self.assertTrue(f({"kind": "lan", "active_connections": 0, "rate_up": 0, "rate_down": 0}))
+
