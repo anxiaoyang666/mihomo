@@ -157,7 +157,7 @@ class TlsContractTest(unittest.TestCase):
     def test_subscription_update_verifies_tls_by_default(self):
         source = text(SCRIPTS / "update_subscription.sh")
 
-        self.assertIn("WGET_OPTS=(--timeout=30 --tries=2)", source)
+        self.assertIn('WGET_OPTS=(--timeout=30 --tries=2 --user-agent="$SUB_USER_AGENT")', source)
         self.assertIn('wget "${WGET_OPTS[@]}" -O "$TEMP_NEW" "$SUB_URL_RAW"', source)
         self.assertNotIn("wget --no-check-certificate", source)
 

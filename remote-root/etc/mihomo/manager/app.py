@@ -25,8 +25,12 @@ ENV_FILE = f"{MIHOMO_DIR}/.env"
 CONFIG_FILE = f"{MIHOMO_DIR}/config.yaml"
 LOG_FILE = "/var/log/mihomo.log"
 BACKUP_DIR = f"{MIHOMO_DIR}/backup"
+# update_subscription.sh 每次运行写一行：<unix 时间>\t<ok|failed>\t<说明>
+SUBSCRIPTION_STATE_FILE = f"{MIHOMO_DIR}/.last_subscription"
+SUBSCRIPTION_LOG = "/var/log/mihomo-subscription.log"
+GEO_LOG = "/var/log/mihomo-geo.log"
 MANAGER_DIR = f"{MIHOMO_DIR}/manager"
-PANEL_VERSION = "0.1.25"
+PANEL_VERSION = "0.1.26"
 DEFAULT_PANEL_REPO_URL = "https://github.com/anxiaoyang666/mihomo.git"
 DEFAULT_PANEL_BRANCH = "main"
 PANEL_BACKUP_KEEP_COUNT = 3
@@ -886,6 +890,23 @@ def subscription_count(env):
     airport = str(env.get("SUB_URL_AIRPORT", "")).replace("\\n", "\n").splitlines()
     return len([item for item in raw + airport if item.strip()])
 
+def last_subscription_state(path=None):
+    """读取订阅脚本上次运行的结果；没跑过返回 None。"""
+    path = path or SUBSCRIPTION_STATE_FILE
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
+            line = f.readline().rstrip("\n")
+    except OSError:
+        return None
+    parts = line.split("\t", 2)
+    if len(parts) < 2:
+        return None
+    try:
+        at = int(float(parts[0]))
+    except ValueError:
+        return None
+    return {"at": at, "ok": parts[1] == "ok", "message": parts[2] if len(parts) > 2 else ""}
+
 def collect_overview():
     env = read_env()
     running = is_service_active("mihomo")
@@ -914,9 +935,11 @@ def collect_overview():
             "config_mode": env.get("CONFIG_MODE", "airport"),
             "subscription_count": subscription_count(env),
             "cron_sub_enabled": env.get("CRON_SUB_ENABLED") == "true",
+            "cron_sub_sched": env.get("CRON_SUB_SCHED", ""),
             "cron_geo_enabled": env.get("CRON_GEO_ENABLED") == "true",
             "notify_api": env.get("NOTIFY_API") == "true",
             "local_cidr": env.get("LOCAL_CIDR", ""),
+            "last_subscription": last_subscription_state(),
         },
         "updated_at": int(time.time()),
     }
@@ -1558,8 +1581,9 @@ def handle_settings():
 
         cron_errors = []
         for ok, message in (
-            update_cron("# JOB_SUB", updates['CRON_SUB_SCHED'], f"bash {SCRIPT_DIR}/update_subscription.sh >/dev/null 2>&1", updates['CRON_SUB_ENABLED'] == 'true'),
-            update_cron("# JOB_GEO", updates['CRON_GEO_SCHED'], f"bash {SCRIPT_DIR}/update_geo.sh >/dev/null 2>&1", updates['CRON_GEO_ENABLED'] == 'true'),
+            # 输出进日志而不是 /dev/null，不然用户没法知道定时任务到底跑没跑
+            update_cron("# JOB_SUB", updates['CRON_SUB_SCHED'], f"bash {SCRIPT_DIR}/update_subscription.sh >> {SUBSCRIPTION_LOG} 2>&1", updates['CRON_SUB_ENABLED'] == 'true'),
+            update_cron("# JOB_GEO", updates['CRON_GEO_SCHED'], f"bash {SCRIPT_DIR}/update_geo.sh >> {GEO_LOG} 2>&1", updates['CRON_GEO_ENABLED'] == 'true'),
         ):
             if not ok:
                 cron_errors.append(message)

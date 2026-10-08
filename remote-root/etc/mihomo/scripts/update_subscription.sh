@@ -9,18 +9,28 @@ BACKUP_DIR="${MIHOMO_DIR}/backup"
 NOTIFY_SCRIPT="${MIHOMO_DIR}/scripts/notify.sh"
 TMP_DIR="$(mktemp -d)"
 TEMP_NEW="${TMP_DIR}/config_generated.yaml"
+# 每次运行的结果（时间 / 状态 / 一句话说明），面板概览页读取它显示"上次订阅更新"
+STATE_FILE="${MIHOMO_DIR}/.last_subscription"
+RESULT_MSG=""
 
-cleanup() {
+on_exit() {
+    local code=$?
     rm -rf "$TMP_DIR"
+    local status="ok"
+    [ "$code" -eq 0 ] || status="failed"
+    printf '%s\t%s\t%s\n' "$(date +%s)" "$status" "${RESULT_MSG:-退出码 $code}" > "$STATE_FILE" 2>/dev/null || true
 }
-trap cleanup EXIT
+trap on_exit EXIT
+echo "===== $(date '+%F %T') 开始订阅更新 ====="
 
 # 1. 加载环境变量
 if [ -f "$ENV_FILE" ]; then source "$ENV_FILE"; fi
 BACKUP_KEEP_COUNT="${BACKUP_KEEP_COUNT:-10}"
+# 很多机场按 User-Agent 决定返回什么格式：不是 Clash 系的 UA 会拿到 base64 节点列表而不是 YAML 配置
+SUB_USER_AGENT="${SUB_USER_AGENT:-clash.meta}"
 
 # TLS 默认严格校验；只有 .env 里显式写 ALLOW_INSECURE_TLS=true 才跳过证书检查
-WGET_OPTS=(--timeout=30 --tries=2)
+WGET_OPTS=(--timeout=30 --tries=2 --user-agent="$SUB_USER_AGENT")
 if [ "$ALLOW_INSECURE_TLS" == "true" ]; then
     WGET_OPTS+=(--no-check-certificate)
 fi
@@ -45,6 +55,7 @@ if [ "$CONFIG_MODE" == "raw" ]; then
     # --- Raw 模式 (配置托管) ---
     if [ -z "$SUB_URL_RAW" ]; then
         echo "❌ [配置托管] 未配置订阅链接，跳过。"
+        RESULT_MSG="未配置托管订阅链接，跳过"
         exit 0
     fi
     echo "⬇️  [配置托管] 正在下载完整配置..."
@@ -52,6 +63,7 @@ if [ "$CONFIG_MODE" == "raw" ]; then
 
     if [ $? -ne 0 ] || [ ! -s "$TEMP_NEW" ]; then
         echo "❌ 下载失败。"
+        RESULT_MSG="托管配置下载失败"
         bash "$NOTIFY_SCRIPT" "❌ 更新失败" "无法下载托管配置。"
         rm -f "$TEMP_NEW"
         exit 1
@@ -64,6 +76,7 @@ else
     fi
     if [ -z "$SUB_URL_AIRPORT" ]; then
         echo "❌ [节点订阅] 未配置机场链接。"
+        RESULT_MSG="未配置机场订阅链接，跳过"
         exit 0
     fi
     echo "🔨 [节点订阅] 正在构建配置文件..."
@@ -108,6 +121,7 @@ except Exception as e:
 PY
     if [ $? -ne 0 ]; then
         echo "❌ 生成配置失败。"
+        RESULT_MSG="按模板生成配置失败"
         bash "$NOTIFY_SCRIPT" "❌ 生成失败" "YAML 处理错误。"
         rm -f "$TEMP_NEW"
         exit 1
@@ -234,6 +248,7 @@ fi
 
 if [ ! -s "$TEMP_NEW" ]; then
     rm -f "$TEMP_NEW"
+    RESULT_MSG="生成的新配置为空"
     bash "$NOTIFY_SCRIPT" "❌ 订阅更新失败" "生成的新配置为空，已保留当前配置。"
     exit 1
 fi
@@ -244,6 +259,7 @@ if [ -x "$CORE_BIN" ]; then
     if ! CHECK_OUT="$("$CORE_BIN" -t -d "$MIHOMO_DIR" -f "$TEMP_NEW" 2>&1)"; then
         echo "❌ 新配置校验失败，已保留当前配置。"
         echo "$CHECK_OUT" | tail -n 5
+        RESULT_MSG="新配置校验失败，已保留当前配置"
         bash "$NOTIFY_SCRIPT" "❌ 订阅更新失败" "新配置校验失败，已保留当前配置。"
         exit 1
     fi
@@ -276,10 +292,12 @@ if [ "$FILE_CHANGED" -eq 1 ]; then
             cp "$BACKUP_FILE" "$CONFIG_FILE"
             systemctl restart mihomo
         fi
+        RESULT_MSG="新配置启动失败，已回滚"
         bash "$NOTIFY_SCRIPT" "❌ 订阅更新失败" "新配置启动失败，已回滚到更新前的配置。"
         exit 1
     fi
     echo "🎉 更新完成并重启。"
+    RESULT_MSG="配置已更新并重启"
     
     # --- 文案转换逻辑 ---
     if [ "$CONFIG_MODE" == "raw" ]; then
@@ -291,4 +309,87 @@ if [ "$FILE_CHANGED" -eq 1 ]; then
     bash "$NOTIFY_SCRIPT" "♻️ 订阅更新成功" "模式: ${MODE_NAME}"
 else
     rm -f "$TEMP_NEW"
+    RESULT_MSG="配置无变更"
+fi
+
+# ==========================================
+# 第五阶段：机场模式下让内核立刻重新拉取节点
+# ==========================================
+
+# 机场模式的 config.yaml 只写了订阅 URL，节点列表由内核按 proxy-providers 的 interval 自己拉取，
+# 所以上面经常是"配置无变更"。要让"每天更新订阅"真的更新节点，得通过控制器 API 让内核立刻刷新：
+#   PUT /providers/proxies/<name>
+# 重启也不会触发刷新（内核会直接用缓存的 providers/*.yaml），所以无论配置有没有变都执行。
+refresh_proxy_providers() {
+    [ -f "$CONFIG_FILE" ] || return 0
+    systemctl is-active --quiet mihomo || { echo "ℹ️  内核未运行，跳过节点刷新。"; return 0; }
+
+    local controller secret
+    controller="$(sed -n 's/^external-controller:[[:space:]]*//p' "$CONFIG_FILE" | head -n 1 | tr -d '"'"'"' \r' | sed 's/[[:space:]]*#.*$//')"
+    controller="${controller:-127.0.0.1:9090}"
+    controller="${controller/0.0.0.0/127.0.0.1}"
+    controller="${controller/\[::\]/127.0.0.1}"
+    case "$controller" in
+        :*) controller="127.0.0.1${controller}" ;;
+    esac
+    case "$controller" in
+        http://*|https://*) ;;
+        *) controller="http://${controller}" ;;
+    esac
+    secret="${MIHOMO_API_SECRET:-$(sed -n 's/^secret:[[:space:]]*//p' "$CONFIG_FILE" | head -n 1 | tr -d '"'"'"' \r')}"
+
+    local curl_opts=(-sS -m 120 -o /dev/null -w '%{http_code}' -X PUT)
+    [ -n "$secret" ] && curl_opts+=(-H "Authorization: Bearer ${secret}")
+
+    local ok=0 bad=0 name encoded code
+    # 不依赖 PyYAML：只扫顶层 proxy-providers: 下第一层缩进的键名
+    while IFS=$'\t' read -r name encoded; do
+        [ -n "$name" ] || continue
+        code="$(curl "${curl_opts[@]}" "${controller%/}/providers/proxies/${encoded}" 2>/dev/null)"
+        if [ "$code" = "204" ] || [ "$code" = "200" ]; then
+            ok=$((ok + 1))
+        else
+            bad=$((bad + 1))
+            echo "⚠️  订阅 ${name} 刷新失败 (HTTP ${code:-000})"
+        fi
+    done < <(python3 - "$CONFIG_FILE" <<'PY'
+import re, sys
+from urllib.parse import quote
+
+lines = open(sys.argv[1], encoding="utf-8").read().splitlines()
+start = next((i for i, l in enumerate(lines) if re.match(r"^proxy-providers\s*:\s*(#.*)?$", l)), -1)
+if start < 0:
+    sys.exit(0)
+child_indent = None
+for line in lines[start + 1:]:
+    if not line.strip() or line.lstrip().startswith("#"):
+        continue
+    indent = len(line) - len(line.lstrip(" "))
+    if indent == 0:
+        break
+    if child_indent is None:
+        child_indent = indent
+    if indent != child_indent:
+        continue
+    match = re.match(r"^\s*(?:\"([^\"]+)\"|'([^']+)'|([^\s:#][^:]*?))\s*:", line)
+    if not match:
+        continue
+    name = next(g for g in match.groups() if g is not None).strip()
+    print(f"{name}\t{quote(name, safe='')}")
+PY
+)
+    if [ $((ok + bad)) -eq 0 ]; then
+        echo "ℹ️  config.yaml 里没有 proxy-providers，跳过节点刷新。"
+        return 0
+    fi
+    echo "🔄 节点订阅刷新完成：成功 ${ok}，失败 ${bad}"
+    if [ "$bad" -gt 0 ]; then
+        RESULT_MSG="${RESULT_MSG}；节点刷新 ${bad} 个失败"
+        return 1
+    fi
+    RESULT_MSG="${RESULT_MSG}；已刷新 ${ok} 个订阅的节点"
+}
+
+if [ "$CONFIG_MODE" != "raw" ]; then
+    refresh_proxy_providers || exit 1
 fi

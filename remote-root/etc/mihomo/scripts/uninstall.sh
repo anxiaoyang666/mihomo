@@ -86,6 +86,7 @@ echo "✅ Crontab 任务已清理。"
 echo -e "${YELLOW}[3/5] 清理网关系统配置...${NC}"
 rm -f /etc/sysctl.d/99-mihomo-gateway.conf
 rm -f /etc/logrotate.d/mihomo
+rm -f /var/log/mihomo-subscription.log /var/log/mihomo-geo.log
 echo "✅ sysctl / logrotate 配置已删除。"
 
 # 4. 删除程序文件

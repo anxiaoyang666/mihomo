@@ -223,6 +223,10 @@ write_env_file() {
     write_env_line "SUB_URL_AIRPORT" ""
     write_env_line "LOCAL_CIDR" ""
     write_env_line "BACKUP_KEEP_COUNT" "20"
+    write_env_line "CRON_SUB_ENABLED" "true"
+    write_env_line "CRON_SUB_SCHED" "0 5 * * *"
+    write_env_line "CRON_SUB_MODE" "daily"
+    write_env_line "CRON_SUB_TIME" "05:00"
     write_env_line "RULE_SYNC_TOKEN" "$sync_token"
     write_env_line "RULE_SYNC_ENABLED" "false"
     write_env_line "RULE_SYNC_PEERS" ""
@@ -268,6 +272,35 @@ open(path, "w", encoding="utf-8").write(text)
 PY
     green "已为 external-controller 生成访问密钥 (MIHOMO_API_SECRET)"
   fi
+}
+
+# 订阅定时任务：以前只有在面板"设置"页点过保存才会写 crontab，装完就不管的话永远不会自动更新。
+# 这里装完直接按 .env 的 CRON_SUB_* 写好；旧 .env 没有这两个键时补上默认值（每天 05:00）。
+# 显式写了 CRON_SUB_ENABLED=false 的保持关闭。输出追加到日志，面板和 .last_subscription 都能看到结果。
+install_cron_jobs() {
+  local enabled sched tmp
+  enabled="$(env_get CRON_SUB_ENABLED)"
+  sched="$(env_get CRON_SUB_SCHED)"
+  if [ -z "$enabled" ]; then
+    env_upsert "CRON_SUB_ENABLED" "true"
+    enabled="true"
+  fi
+  if [ -z "$sched" ]; then
+    sched="0 5 * * *"
+    env_upsert "CRON_SUB_SCHED" "$sched"
+    env_upsert "CRON_SUB_MODE" "daily"
+    env_upsert "CRON_SUB_TIME" "05:00"
+  fi
+  systemctl enable --now cron >/dev/null 2>&1 || systemctl enable --now crond >/dev/null 2>&1 || true
+  tmp="$(mktemp)"
+  crontab -l 2>/dev/null | grep -F -v -- '# JOB_SUB' > "$tmp" || true
+  if [ "$enabled" = "true" ]; then
+    printf '%s bash %s/scripts/update_subscription.sh >> /var/log/mihomo-subscription.log 2>&1 # JOB_SUB\n' "$sched" "$INSTALL_DIR" >> "$tmp"
+  fi
+  if [ -s "$tmp" ]; then crontab "$tmp"; else crontab -r 2>/dev/null || true; fi
+  rm -f "$tmp"
+  [ "$enabled" = "true" ] && green "已设置订阅定时任务：$sched（日志 /var/log/mihomo-subscription.log）"
+  return 0
 }
 
 # 内核装不上（网络不通、GitHub 被墙）不应该让整个安装失败：面板装好以后可以在 Web 里/CLI 里再装内核
@@ -327,6 +360,7 @@ main() {
   copy_payload "$root"
   write_env_file
   sync_controller_secret
+  install_cron_jobs
   install_core_if_missing
   yellow "启动服务..."
   enable_services
