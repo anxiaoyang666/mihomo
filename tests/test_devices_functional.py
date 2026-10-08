@@ -578,3 +578,14 @@ class PseudoDeviceVisibilityTest(unittest.TestCase):
         # 普通局域网设备不受影响，离线也照常显示
         self.assertTrue(f({"kind": "lan", "active_connections": 0, "rate_up": 0, "rate_down": 0}))
 
+
+
+class SelfPeerTest(unittest.TestCase):
+    def test_self_peer_detected_by_ip_and_port(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        app = load_app(tmp.name)
+        app.local_ipv4_addresses = lambda: {"127.0.0.1", "localhost", "10.10.10.5"}
+        self.assertTrue(app.is_self_peer("http://10.10.10.5:7838", "7838"))
+        self.assertFalse(app.is_self_peer("http://10.10.10.5:7840", "7838"))
+        self.assertFalse(app.is_self_peer("http://10.10.20.5:7838", "7838"))

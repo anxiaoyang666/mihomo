@@ -36,7 +36,7 @@ SUBSCRIPTION_STATE_FILE = f"{MIHOMO_DIR}/.last_subscription"
 SUBSCRIPTION_LOG = "/var/log/mihomo-subscription.log"
 GEO_LOG = "/var/log/mihomo-geo.log"
 MANAGER_DIR = f"{MIHOMO_DIR}/manager"
-PANEL_VERSION = "0.1.31"
+PANEL_VERSION = "0.1.32"
 DEFAULT_PANEL_REPO_URL = "https://github.com/anxiaoyang666/mihomo.git"
 DEFAULT_PANEL_BRANCH = "main"
 PANEL_BACKUP_KEEP_COUNT = 3
@@ -744,6 +744,30 @@ def schedule_mihomo_restart():
         close_fds=True,
     )
 
+
+def local_ipv4_addresses():
+    """本机所有 IPv4 地址（含回环），用来识别同步节点里的“自己”。"""
+    addrs = {"127.0.0.1", "localhost"}
+    try:
+        out = subprocess.run(["ip", "-4", "-o", "addr"], capture_output=True, text=True, timeout=5).stdout
+        addrs.update(re.findall(r"inet (\d+\.\d+\.\d+\.\d+)/", out))
+    except Exception:
+        pass
+    return addrs
+
+def is_self_peer(peer, own_port):
+    """同步节点列表在各处是同一份，会包含本机。推送给自己会撞上本机正持有的锁（409），只会显示成失败。"""
+    try:
+        parts = urlsplit(peer)
+        host, port = parts.hostname or "", parts.port or (443 if parts.scheme == "https" else 80)
+    except ValueError:
+        return False
+    try:
+        own_port = int(own_port)
+    except (TypeError, ValueError):
+        return False
+    return port == own_port and host in local_ipv4_addresses()
+
 def broadcast_rule(rule_id, content):
     if rule_id not in SYNCABLE_RULE_IDS:
         return ""
@@ -764,7 +788,11 @@ def broadcast_rule(rule_id, content):
     ).encode("utf-8")
     headers = {"Content-Type": "application/json", "X-Mosdns-Sync-Token": settings["token"]}
     results = []
+    own_port = read_env().get("WEB_PORT", "7838")
     for peer in settings["peers"]:
+        if is_self_peer(peer, own_port):
+            results.append(f"{peer}: 本机（跳过）")
+            continue
         url = peer.rstrip("/") + "/api/rule-sync"
         try:
             req = urlrequest.Request(url, data=payload, headers=headers, method="POST")
@@ -815,7 +843,11 @@ def test_sync_peers(data):
     payload = json.dumps({"token": token, "rules": {}, "source": request.host_url.rstrip("/")}).encode("utf-8")
     headers = {"Content-Type": "application/json", "X-Mosdns-Sync-Token": token}
     results = []
+    own_port = read_env().get("WEB_PORT", "7838")
     for peer in peers:
+        if is_self_peer(peer, own_port):
+            results.append({"peer": peer, "success": True, "message": "本机（跳过）"})
+            continue
         url = peer.rstrip("/") + "/api/rule-sync"
         try:
             req = urlrequest.Request(url, data=payload, headers=headers, method="POST")
