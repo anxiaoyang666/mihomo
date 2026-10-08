@@ -1240,6 +1240,12 @@ def load_device_state(path=None):
     devices = {}
     raw_devices = data.get("devices") if isinstance(data.get("devices"), dict) else {}
     for key, raw in raw_devices.items():
+        # 旧版本把公网来源按单个 IP 存过；它们属于“远程客户端”汇总，丢掉旧记录，采样时会重新归并
+        try:
+            if str(key) != REMOTE_DEVICE_KEY and not raw.get("is_gateway") and source_kind(str(key)) == "remote":
+                continue
+        except Exception:
+            pass
         record = coerce_device_record(str(key), raw)
         if record:
             devices[str(key)] = record
