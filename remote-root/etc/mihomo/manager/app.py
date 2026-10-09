@@ -50,7 +50,7 @@ SUBSCRIPTION_STATE_FILE = f"{MIHOMO_DIR}/.last_subscription"
 SUBSCRIPTION_LOG = "/var/log/mihomo-subscription.log"
 GEO_LOG = "/var/log/mihomo-geo.log"
 MANAGER_DIR = f"{MIHOMO_DIR}/manager"
-PANEL_VERSION = "0.1.60"
+PANEL_VERSION = "0.1.61"
 DEFAULT_PANEL_REPO_URL = "https://github.com/anxiaoyang666/mihomo.git"
 DEFAULT_PANEL_BRANCH = "main"
 PANEL_BACKUP_KEEP_COUNT = 3
@@ -4039,7 +4039,7 @@ def update_account_credentials():
     new_password = str(data.get('web_secret') or '')
     confirm_password = str(data.get('web_secret_confirm') or '')
 
-    if current_password != valid_pass:
+    if not secrets.compare_digest(current_password.encode("utf-8"), valid_pass.encode("utf-8")):
         return jsonify({"success": False, "message": "当前密码不正确。"})
     if not is_valid_web_username(new_user):
         return jsonify({"success": False, "message": "用户名只能使用 3-32 位字母、数字、下划线、点或短横线。"})
@@ -4060,6 +4060,29 @@ def update_account_credentials():
     rotate_session_secret()
     session.clear()
     return jsonify({"success": True, "message": "账号已更新，请使用新凭据重新登录。", "reload_after": 1})
+
+def security_status():
+    """账户安全页的检查清单。只给结论（强 / 弱、是否对局域网开放），不返回任何密码或密钥本身。"""
+    user, password = web_credentials()
+    controller = str(config_value("external-controller") or "").strip().strip('"').strip("'")
+    secret = str(config_value("secret") or "")
+    host = controller.rsplit(":", 1)[0] if ":" in controller else controller
+    return {
+        "web_user": user,
+        "password_strong": len(password) >= 10 and not password.isdigit(),
+        "controller": controller,
+        "controller_exposed": bool(controller) and host not in ("127.0.0.1", "localhost", "[::1]"),
+        "controller_secret_set": bool(secret),
+        "controller_secret_strong": len(secret) >= 12,
+        "login_max_failures": LOGIN_MAX_FAILURES,
+        "login_lockout_seconds": LOGIN_LOCKOUT_SECONDS,
+        "session_days": app.permanent_session_lifetime.days if app.permanent_session_lifetime else 0,
+    }
+
+@app.route("/api/security-status")
+@login_required
+def api_security_status():
+    return jsonify(security_status())
 
 @app.route("/api/rule-sync-settings", methods=["GET", "POST"])
 @login_required

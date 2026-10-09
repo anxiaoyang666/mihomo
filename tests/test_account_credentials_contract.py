@@ -18,7 +18,7 @@ class MihomoAccountCredentialsContractTest(unittest.TestCase):
         self.assertIn("@app.route('/api/account', methods=['POST'])", source)
         self.assertIn("def update_account_credentials", source)
         self.assertIn("current_password = str(data.get('current_password') or '')", source)
-        self.assertIn("if current_password != valid_pass", source)
+        self.assertIn("if not secrets.compare_digest(current_password.encode(\"utf-8\"), valid_pass.encode(\"utf-8\")):", source)
         self.assertIn("is_valid_web_username", source)
         self.assertIn('"WEB_USER": new_user', source)
         self.assertIn('"WEB_SECRET": new_password', source)
