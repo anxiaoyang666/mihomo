@@ -2,103 +2,112 @@
 <html lang="zh-CN">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>Mihomo 登录</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>登录 · {{ site_name or "Mihomo" }}</title>
     <link rel="manifest" href="/static/manifest.json">
     <link rel="icon" type="image/png" href="/static/logo.png">
     <link rel="apple-touch-icon" href="/static/logo.png">
     <meta name="apple-mobile-web-app-capable" content="yes">
-    <meta name="theme-color" content="#ffffff">
-    
+    <meta name="theme-color" content="#0a0c0f">
+    <script>
+        (function () {
+            let pref = 'auto';
+            try { pref = localStorage.getItem('theme') || 'auto'; } catch (e) {}
+            const dark = pref === 'dark' || (pref === 'auto' && window.matchMedia('(prefers-color-scheme: dark)').matches);
+            document.documentElement.setAttribute('data-theme', dark ? 'dark' : 'light');
+        })();
+    </script>
     <style>
-        /* 零依赖 CSS，保证无网也能渲染 */
-        :root {
-            --bg: #f4f6f9;
-            --card-bg: #ffffff;
-            --text: #333;
-            --border: #ddd;
-            --input-bg: #fff;
-            --btn-bg: #0d6efd;
-            --btn-text: #fff;
+        /* 零依赖 CSS，保证无网也能渲染；配色与面板一致 */
+        :root, [data-theme="dark"] {
+            color-scheme: dark;
+            --bg: #0a0c0f; --surface: #12161b; --line: #222932; --line-2: #2d3540;
+            --text: #e8ebef; --muted: #8a94a1; --faint: #5f6875;
+            --accent: #3ecf8e; --accent-ink: #05140c; --accent-soft: rgba(62,207,142,.14);
+            --input-bg: #0e1216; --danger: #f06464; --shadow: 0 24px 60px rgba(0,0,0,.45);
         }
-        @media (prefers-color-scheme: dark) {
-            :root {
-                --bg: #121212;
-                --card-bg: #1e1e1e;
-                --text: #eee;
-                --border: #333;
-                --input-bg: #2b2b2b;
-                --btn-bg: #0d6efd;
-                --btn-text: #fff;
-            }
+        [data-theme="light"] {
+            color-scheme: light;
+            --bg: #f4f6f8; --surface: #ffffff; --line: #e6e9ee; --line-2: #d9dee5;
+            --text: #14181d; --muted: #636d79; --faint: #98a1ac;
+            --accent: #12a26a; --accent-ink: #ffffff; --accent-soft: rgba(18,162,106,.12);
+            --input-bg: #ffffff; --danger: #d64545; --shadow: 0 20px 50px rgba(16,24,40,.10);
         }
+        * { box-sizing: border-box; }
         body {
-            background-color: var(--bg);
-            color: var(--text);
-            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            height: 100vh;
+            min-height: 100vh;
             margin: 0;
             padding: 20px;
+            display: grid;
+            place-items: center;
+            background: radial-gradient(1200px 500px at 50% -10%, var(--accent-soft), transparent 70%), var(--bg);
+            color: var(--text);
+            font: 14px/1.5 -apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC", "Microsoft YaHei UI", "Microsoft YaHei", system-ui, sans-serif;
+            -webkit-font-smoothing: antialiased;
         }
         .login-card {
-            background: var(--card-bg);
-            padding: 2rem;
-            border-radius: 16px;
-            box-shadow: 0 4px 20px rgba(0,0,0,0.1);
             width: 100%;
             max-width: 360px;
-            text-align: center;
-            border: 1px solid var(--border);
+            padding: 28px 26px 24px;
+            border: 1px solid var(--line);
+            border-radius: 16px;
+            background: var(--surface);
+            box-shadow: var(--shadow);
         }
-        .logo { width: 64px; height: 64px; margin-bottom: 1rem; border-radius: 12px; }
-        h2 { margin: 0 0 1.5rem; font-size: 1.5rem; font-weight: 700; }
-        .form-group { margin-bottom: 1rem; text-align: left; }
-        label { display: block; margin-bottom: 0.5rem; font-size: 0.85rem; opacity: 0.7; }
+        .brand { display: flex; align-items: center; gap: 12px; margin-bottom: 22px; }
+        .logo { width: 40px; height: 40px; border-radius: 10px; }
+        .brand h1 { margin: 0; font-size: 17px; font-weight: 650; }
+        .brand p { margin: 1px 0 0; color: var(--muted); font-size: 12.5px; }
+        .form-group { margin-bottom: 14px; }
+        label { display: block; margin-bottom: 6px; font-size: 13px; font-weight: 550; }
         input {
             width: 100%;
-            padding: 12px;
+            height: 40px;
+            padding: 0 12px;
+            border: 1px solid var(--line-2);
             border-radius: 8px;
-            border: 1px solid var(--border);
             background: var(--input-bg);
             color: var(--text);
-            font-size: 1rem;
-            box-sizing: border-box; /* 关键 */
+            font: inherit;
             outline: none;
         }
-        input:focus { border-color: var(--btn-bg); }
+        input::placeholder { color: var(--faint); }
+        input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
         button {
             width: 100%;
-            padding: 12px;
-            background: var(--btn-bg);
-            color: var(--btn-text);
-            border: none;
+            height: 40px;
+            margin-top: 6px;
+            border: 0;
             border-radius: 8px;
-            font-size: 1rem;
-            font-weight: bold;
+            background: var(--accent);
+            color: var(--accent-ink);
+            font: inherit;
+            font-weight: 600;
             cursor: pointer;
-            margin-top: 1rem;
         }
-        button:active { opacity: 0.8; }
-        .error { color: #dc3545; font-size: 0.85rem; margin-top: 1rem; }
+        button:hover { filter: brightness(.95); }
+        .error { margin-top: 14px; padding: 8px 10px; border-radius: 8px; background: color-mix(in srgb, var(--danger) 12%, transparent); color: var(--danger); font-size: 13px; }
     </style>
 </head>
 <body>
     <div class="login-card">
-        <img src="/static/logo.png" alt="Logo" class="logo">
-        <h2>Mihomo Manager</h2>
+        <div class="brand">
+            <img src="/static/logo.png" alt="Logo" class="logo">
+            <div>
+                <h1>{{ site_name or "Mihomo" }}</h1>
+                <p>mihomo 网关管理面板</p>
+            </div>
+        </div>
         <form action="/login" method="POST">
             <div class="form-group">
-                <label>用户名</label>
-                <input type="text" name="username" placeholder="安装时设置的用户名" autocomplete="username" required>
+                <label for="username">用户名</label>
+                <input type="text" id="username" name="username" placeholder="安装时设置的用户名" autocomplete="username" required autofocus>
             </div>
             <div class="form-group">
-                <label>密码</label>
-                <input type="password" name="password" placeholder="安装时设置的密码" autocomplete="current-password" required>
+                <label for="password">密码</label>
+                <input type="password" id="password" name="password" placeholder="安装时设置的密码" autocomplete="current-password" required>
             </div>
-            <button type="submit">登 录</button>
+            <button type="submit">登录</button>
             {% if error %}
             <div class="error">{{ error }}</div>
             {% endif %}

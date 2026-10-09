@@ -60,9 +60,9 @@ class AutoUpdateCardMarkupTest(unittest.TestCase):
         self.assertNotIn('class="table ', card)  # Bootstrap .table 自带白底
         self.assertIn("<th>项目</th><th>版本</th><th>上次检查</th>", card)
         rules = "\n".join(line for line in index_text().splitlines() if ".update-table" in line)
-        self.assertIn("var(--bg-card-soft)", rules)
-        self.assertIn("var(--border-color)", rules)
-        self.assertIn("var(--text-muted)", rules)
+        self.assertIn("var(--surface-2)", rules)
+        self.assertIn("var(--line)", rules)
+        self.assertIn("var(--muted)", rules)
         for text in (card, rules):
             self.assertNotRegex(text.lower(), r"background[^;\"]*(#fff\b|#ffffff|white|#f[0-9a-f]{5}\b)")
             self.assertNotIn("table-light", text)
@@ -187,7 +187,7 @@ class StalePageBannerTest(unittest.TestCase):
         self.assertIn('<meta name="mihomo-panel-version" content="{{ panel_version }}">', html)
         app = APP.read_text(encoding="utf-8")
         index_route = app[app.index("@app.route('/')"):app.index("@app.route('/api/status')")]
-        self.assertIn("render_template('index.html', panel_version=PANEL_VERSION)", index_route)
+        self.assertIn("render_template('index.html', panel_version=PANEL_VERSION", index_route)
 
     def test_banner_markup_and_wiring(self):
         html = index_text()

@@ -50,7 +50,7 @@ SUBSCRIPTION_STATE_FILE = f"{MIHOMO_DIR}/.last_subscription"
 SUBSCRIPTION_LOG = "/var/log/mihomo-subscription.log"
 GEO_LOG = "/var/log/mihomo-geo.log"
 MANAGER_DIR = f"{MIHOMO_DIR}/manager"
-PANEL_VERSION = "0.1.48"
+PANEL_VERSION = "0.1.49"
 DEFAULT_PANEL_REPO_URL = "https://github.com/anxiaoyang666/mihomo.git"
 DEFAULT_PANEL_BRANCH = "main"
 PANEL_BACKUP_KEEP_COUNT = 3
@@ -2959,6 +2959,7 @@ def collect_overview():
             "error": "" if (connections_ok or version_ok or proxies_ok) else connections.get("error", "controller unreachable"),
         },
         "panel_version": PANEL_VERSION,
+        "site_name": env.get("SITE_NAME", ""),
         "core_version": version.get("version", "") if version_ok else "",
         "connections_count": len(connection_list),
         "download_total": first_number(connections.get("downloadTotal")),
@@ -3638,7 +3639,7 @@ def login():
         ip = client_ip()
         wait = login_locked(ip)
         if wait > 0:
-            return render_template('login.html', error=f"登录失败次数过多，请 {wait} 秒后再试"), 429
+            return render_template('login.html', error=f"登录失败次数过多，请 {wait} 秒后再试", site_name=read_env().get("SITE_NAME", "")), 429
         if check_creds(request.form.get('username'), request.form.get('password')):
             clear_login_failures(ip)
             session['logged_in'] = True
@@ -3646,11 +3647,11 @@ def login():
             return redirect('/')
         failures = record_login_failure(ip)
         log.warning("登录失败 ip=%s 连续失败 %d 次", ip, failures)
-        return render_template('login.html', error="用户名或密码错误"), 401
+        return render_template('login.html', error="用户名或密码错误", site_name=read_env().get("SITE_NAME", "")), 401
 
     if session.get('logged_in'):
         return redirect('/')
-    return render_template('login.html')
+    return render_template('login.html', site_name=read_env().get("SITE_NAME", ""))
 
 @app.route('/logout', methods=['POST'])
 def logout():
@@ -3661,8 +3662,15 @@ def logout():
 def index():
     if session.get('logged_in'):
         # 页面里写死自己的版本号，轮询发现服务端版本变了就提示刷新（旧标签页还跑着旧 JS）
-        return render_template('index.html', panel_version=PANEL_VERSION)
+        return render_template('index.html', panel_version=PANEL_VERSION, site_name=read_env().get("SITE_NAME", ""))
     return redirect('/login')
+
+@app.route('/api/site-info')
+def api_site_info():
+    """不需要登录：只给其他站点面板的“站点切换”菜单显示名字用，不含任何其他信息。"""
+    resp = jsonify({"site_name": read_env().get("SITE_NAME", "")})
+    resp.headers["Access-Control-Allow-Origin"] = "*"
+    return resp
 
 @app.route('/api/status')
 @login_required

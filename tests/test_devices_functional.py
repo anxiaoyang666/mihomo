@@ -536,7 +536,7 @@ class DevicesContractTest(unittest.TestCase):
         self.assertIn("api('/devices/reset'", text)
         self.assertIn("/devices/${encodeURIComponent(ip)}/note", text)
         self.assertIn('id="devicesPill"', text)
-        self.assertIn("设备 在线 ${data.devices.lan_online ?? data.devices.online ?? 0} / 共 ${data.devices.lan_total ?? data.devices.total ?? 0}", text)
+        self.assertIn("设备 ${data.devices.lan_online ?? data.devices.online ?? 0} / ${data.devices.lan_total ?? data.devices.total ?? 0} 在线", text)
         self.assertIn("清零统计", text)
         # 分类说明和角标
         self.assertIn("这里只统计经过本网关的连接。设备直连国内站点、或路由器做了 NAT 再转发的流量，分别不会出现或会合并显示在上级路由名下。同网段通过 ARP 看到但没有流量经过网关的设备以灰色列出。", text)

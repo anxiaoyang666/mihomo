@@ -48,9 +48,11 @@ class MihomoUiPolishContractTest(unittest.TestCase):
     def test_action_buttons_have_touch_and_busy_states(self):
         source = text(INDEX)
 
-        self.assertRegex(source, r"\.icon-button\s*\{[^}]*width:\s*44px")
-        self.assertRegex(source, r"\.icon-button\s*\{[^}]*height:\s*44px")
-        self.assertRegex(source, r"\.(?:soft-button,\s*\n\s*)?\.action-button\s*\{[^}]*min-height:\s*44px")
+        # 手机上（触屏）点按区域至少 44px；桌面端用更紧凑的尺寸
+        mobile = source[source.index("@media (max-width: 768px)"):]
+        self.assertRegex(mobile, r"\.icon-button\s*\{[^}]*width:\s*44px")
+        self.assertRegex(mobile, r"\.icon-button\s*\{[^}]*height:\s*44px")
+        self.assertRegex(mobile, r"\.soft-button,\s*\.action-button\s*\{[^}]*min-height:\s*44px")
         self.assertIn("function setActionBusy", source)
         self.assertIn("classList.toggle('is-busy'", source)
         self.assertIn("button-spinner", source)
@@ -85,7 +87,7 @@ class MihomoUiPolishContractTest(unittest.TestCase):
     def test_release_version_is_0122(self):
         app = text(APP)
 
-        self.assertIn('PANEL_VERSION = "0.1.48"', app)
+        self.assertIn('PANEL_VERSION = "0.1.49"', app)
         match = re.search(r'(?m)^PANEL_VERSION = "(\d+)\.(\d+)\.(\d+)"$', app)
         self.assertIsNotNone(match)
         self.assertGreaterEqual(tuple(int(part) for part in match.groups()), (0, 1, 22))
