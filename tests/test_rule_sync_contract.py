@@ -85,7 +85,7 @@ class MihomoRuleSyncContractTest(unittest.TestCase):
         self.assertIn("force-nocn", text)
         self.assertIn("强制直连", text)
         self.assertIn("强制代理", text)
-        self.assertIn("其他 mosctl / mihomo 面板地址", text)
+        self.assertIn("mosctl / mihomo 面板地址", text)
         self.assertIn("loadSyncSettings", text)
         self.assertIn("saveSyncSettings", text)
         self.assertIn("testSyncPeers", text)

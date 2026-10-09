@@ -744,6 +744,17 @@
         .notify-log-row .state { font-size: 12px; color: var(--accent); white-space: nowrap; }
         .notify-log-row.failed .state { color: var(--danger); }
         .sync-test-list { display: grid; gap: 6px; }
+        .card-header .small-pill { margin-left: 4px; font-weight: 600; }
+        .rule-editor { font-family: var(--mono); font-size: 13px; line-height: 1.7; }
+        .sync-peer-list { display: grid; border: 1px solid var(--line); border-radius: var(--radius-sm); overflow: hidden; }
+        .sync-peer { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 10px; align-items: center; padding: 9px 12px; border-top: 1px solid var(--line); font-size: 13px; }
+        .sync-peer:first-child { border-top: 0; }
+        .sync-peer strong { font-weight: 600; }
+        .sync-peer .kind { margin-left: 6px; color: var(--muted); font-size: 12px; }
+        .sync-peer small { display: block; color: var(--faint); font-size: 11.5px; font-family: var(--mono); }
+        .sync-peer .peer-msg { display: block; margin-top: 2px; color: var(--muted); font-size: 12px; }
+        .sync-peer-edit summary { color: var(--muted); font-size: 12.5px; }
+        .sync-peer-edit summary:hover { color: var(--text); }
         .update-table-wrap { overflow-x: auto; border: 1px solid var(--line); border-radius: var(--radius-sm); }
         .update-table { width: 100%; border-collapse: collapse; font-size: 13px; color: var(--text); background: transparent; }
         .update-table th, .update-table td { padding: 11px 14px; text-align: left; vertical-align: top; border-top: 1px solid var(--line); }
@@ -1280,18 +1291,18 @@
                 <div class="section-grid">
                     <div>
                         <div class="card">
-                            <div class="card-header"><i class="bi bi-check2-circle"></i> 强制直连</div>
+                            <div class="card-header"><i class="bi bi-check2-circle"></i> 强制直连 <span class="small-pill" id="ruleCount_force-cn">--</span><span class="small-pill warn" id="ruleDirty_force-cn" hidden>未保存</span></div>
                             <div class="card-body">
                                 <div class="form-text mb-2">每行一个域名（同时匹配它的所有子域名），可在行尾用 # 写注释。保存后写入 mihomo 顶部规则，动作为 DIRECT，并同步到 mosctl 的强制国内。</div>
-                                <textarea class="form-control" id="rule_force_cn" rows="8" placeholder="ippure.com"></textarea>
+                                <textarea class="form-control rule-editor" id="rule_force_cn" rows="8" placeholder="ippure.com" oninput="updateRuleMeta('force-cn')"></textarea>
                                 <button class="action-button primary mt-3" onclick="saveRule('force-cn', this)"><i class="bi bi-save"></i> 保存强制直连</button>
                             </div>
                         </div>
                         <div class="card">
-                            <div class="card-header"><i class="bi bi-send"></i> 强制代理</div>
+                            <div class="card-header"><i class="bi bi-send"></i> 强制代理 <span class="small-pill" id="ruleCount_force-nocn">--</span><span class="small-pill warn" id="ruleDirty_force-nocn" hidden>未保存</span></div>
                             <div class="card-body">
                                 <div class="form-text mb-2">每行一个域名（同时匹配它的所有子域名），可在行尾用 # 写注释。保存后写入 mihomo 顶部规则，默认走 ♻️ 自动选择，并同步到 mosctl 的强制国外。</div>
-                                <textarea class="form-control" id="rule_force_nocn" rows="8" placeholder="openai.com"></textarea>
+                                <textarea class="form-control rule-editor" id="rule_force_nocn" rows="8" placeholder="openai.com" oninput="updateRuleMeta('force-nocn')"></textarea>
                                 <button class="action-button primary mt-3" onclick="saveRule('force-nocn', this)"><i class="bi bi-save"></i> 保存强制代理</button>
                             </div>
                         </div>
@@ -1306,19 +1317,24 @@
                                 </div>
                                 <label class="form-label fw-bold">同步密钥</label>
                                 <div class="input-group mb-3">
-                                    <input type="text" class="form-control" id="syncToken" autocomplete="off">
+                                    <input type="password" class="form-control font-monospace" id="syncToken" autocomplete="off" spellcheck="false">
+                                    <button class="btn btn-outline-secondary" type="button" onclick="toggleSyncTokenVisible(this)" title="显示 / 隐藏" aria-label="显示或隐藏同步密钥"><i class="bi bi-eye"></i></button>
                                     <button class="btn btn-outline-secondary" type="button" onclick="generateSyncToken()">生成</button>
                                     <button class="btn btn-outline-secondary" type="button" onclick="copySyncToken()">复制</button>
                                 </div>
-                                <label class="form-label fw-bold">其他 mosctl / mihomo 面板地址，每行一个</label>
-                                <textarea class="form-control" id="syncPeers" rows="7" placeholder="http://10.10.10.3:7840&#10;http://10.10.30.2:7838"></textarea>
+                                <label class="form-label fw-bold">参与同步的面板</label>
+                                <div class="sync-peer-list" id="syncPeerList"></div>
+                                <details class="sync-peer-edit mt-2">
+                                    <summary>编辑地址（每行一个 mosctl / mihomo 面板地址）</summary>
+                                    <textarea class="form-control font-monospace mt-2" id="syncPeers" rows="9" placeholder="http://10.10.10.3:7840&#10;http://10.10.30.2:7838" oninput="renderSyncPeerList()"></textarea>
+                                </details>
                                 <div class="d-flex flex-wrap gap-2 mt-3">
                                     <button class="action-button primary" onclick="saveSyncSettings(this)"><i class="bi bi-save"></i> 保存同步</button>
                                     <button class="soft-button" onclick="testSyncPeers(this)"><i class="bi bi-wifi"></i> 测试连通性</button>
                                 </div>
                                 <div class="small text-muted mt-3" id="syncLoadMode"></div>
                                 <div class="small text-muted mt-3" id="syncJobSummary" style="white-space: pre-wrap;"></div>
-                                <div class="sync-test-list mt-3" id="syncTestResults"></div>
+                                <div class="sync-test-list mt-3" id="syncTestResults" hidden></div>
                             </div>
                         </div>
                     </div>
@@ -3027,8 +3043,24 @@
     async function loadRule(ruleId) {
         const res = await api('/rules/' + encodeURIComponent(ruleId));
         const editor = document.getElementById(ruleElementId(ruleId));
-        if (editor) editor.value = res.content || '';
+        if (editor) {
+            editor.value = res.content || '';
+            editor.dataset.saved = editor.value;
+            // 内容多时框跟着变高，少时保持 8 行
+            editor.rows = Math.min(24, Math.max(8, editor.value.split('\n').length + 1));
+        }
+        updateRuleMeta(ruleId);
         return res;
+    }
+
+    // 卡片标题旁：有几条规则（不算空行和注释），改了还没保存时提示
+    function updateRuleMeta(ruleId) {
+        const editor = document.getElementById(ruleElementId(ruleId));
+        if (!editor) return;
+        const count = editor.value.split('\n').map(line => line.split('#')[0].trim()).filter(Boolean).length;
+        setText('ruleCount_' + ruleId, count + ' 条');
+        const dirty = document.getElementById('ruleDirty_' + ruleId);
+        if (dirty) dirty.hidden = editor.value === (editor.dataset.saved ?? editor.value);
     }
 
     async function saveRule(ruleId, trigger = null) {
@@ -3037,6 +3069,10 @@
         setActionBusy(trigger, true);
         try {
             const res = await api('/rules/' + encodeURIComponent(ruleId), {content: editor ? editor.value : ''});
+            if (res.success && editor) {
+                editor.dataset.saved = editor.value;
+                updateRuleMeta(ruleId);
+            }
             if (res.success && res.sync_job) {
                 showToast('已保存，正在同步…\n' + (res.message || ''), 'success', 6000);
                 // 不 await：按钮马上恢复，同步结果到了再单独提示
@@ -3126,7 +3162,12 @@
         const peers = document.getElementById('syncPeers');
         if (enabled) enabled.checked = Boolean(res.enabled);
         if (token) token.value = res.token || '';
-        if (peers) peers.value = res.peers_text || '';
+        if (peers) {
+            peers.value = res.peers_text || '';
+            peers.rows = Math.max(6, (res.peers || []).length + 1);
+        }
+        syncPeerResults = new Map();
+        renderSyncPeerList();
         const loadMode = document.getElementById('syncLoadMode');
         if (loadMode) loadMode.textContent = res.load_mode ? '同步规则加载方式：' + res.load_mode : '';
         renderSyncTestResults([]);
@@ -3161,7 +3202,62 @@
         showToast('已复制同步密钥，可以粘贴到其他 mosctl / mihomo 面板。', 'success');
     }
 
+    let syncPeerResults = new Map();
+    const syncPeerNames = new Map();
+
+    // 参与同步的面板：名字从对方的 /api/site-info 取，端口 7838 是 mihomo、7840 是 mosctl；测试连通后显示结果
+    function renderSyncPeerList() {
+        const box = document.getElementById('syncPeerList');
+        if (!box) return;
+        const peers = (document.getElementById('syncPeers')?.value || '').split('\n').map(line => line.trim()).filter(Boolean);
+        if (!peers.length) {
+            box.innerHTML = '<div class="sync-peer"><span class="text-muted">还没有填写其他面板地址，点下面「编辑地址」添加</span></div>';
+            return;
+        }
+        box.innerHTML = peers.map(peer => {
+            let host = peer, port = '';
+            try { const url = new URL(peer); host = url.hostname; port = url.port; } catch (e) {}
+            const kind = port === '7838' ? 'mihomo' : (port === '7840' ? 'mosdns' : '');
+            const self = host === location.hostname && port === (location.port || '7838');
+            const result = syncPeerResults.get(peer);
+            const badge = self ? '<span class="small-pill">本机</span>'
+                : (result ? `<span class="small-pill ${result.success ? '' : 'warn'}">${result.success ? '正常' : '异常'}</span>` : '');
+            return `<div class="sync-peer" data-peer="${escapeHtml(peer)}">
+                <div><strong class="peer-name">${escapeHtml(syncPeerNames.get(peer) || host)}</strong><span class="kind">${kind}</span>
+                    <small>${escapeHtml(peer)}</small>${result && !self ? `<span class="peer-msg">${escapeHtml(result.message || '')}</span>` : ''}</div>
+                ${badge}
+            </div>`;
+        }).join('');
+        peers.forEach(async peer => {
+            if (syncPeerNames.has(peer)) return;
+            syncPeerNames.set(peer, '');
+            try {
+                const ctrl = new AbortController();
+                const timer = setTimeout(() => ctrl.abort(), 4000);
+                const resp = await fetch(peer.replace(/\/$/, '') + '/api/site-info', { signal: ctrl.signal });
+                clearTimeout(timer);
+                const info = await resp.json();
+                if (info?.site_name) {
+                    syncPeerNames.set(peer, info.site_name);
+                    box.querySelectorAll('.sync-peer').forEach(row => {
+                        if (row.dataset.peer === peer) row.querySelector('.peer-name').textContent = info.site_name;
+                    });
+                }
+            } catch (e) {}
+        });
+    }
+
+    function toggleSyncTokenVisible(button) {
+        const input = document.getElementById('syncToken');
+        if (!input) return;
+        const show = input.type === 'password';
+        input.type = show ? 'text' : 'password';
+        button.querySelector('i')?.classList.replace(show ? 'bi-eye' : 'bi-eye-slash', show ? 'bi-eye-slash' : 'bi-eye');
+    }
+
     function renderSyncTestResults(results) {
+        syncPeerResults = new Map((results || []).map(item => [item.peer, item]));
+        renderSyncPeerList();
         const list = document.getElementById('syncTestResults');
         if (!list) return;
         list.innerHTML = '';
