@@ -993,6 +993,7 @@
             <button class="nav-link" id="tab-rules-btn" data-bs-toggle="pill" data-bs-target="#tab-rules" onclick="loadRulesPage(); closeSidebar()"><i class="bi bi-signpost-split"></i> 分流同步</button>
             <button class="nav-link" id="tab-notify-btn" data-bs-toggle="pill" data-bs-target="#tab-notify" onclick="loadSettings(); loadNotifyLog(); closeSidebar()"><i class="bi bi-bell"></i> 通知中心</button>
             <button class="nav-link" id="tab-logs-btn" data-bs-toggle="pill" data-bs-target="#tab-logs" onclick="closeSidebar()"><i class="bi bi-terminal"></i> 运行日志</button>
+            <button class="nav-link" id="tab-account-btn" data-bs-toggle="pill" data-bs-target="#tab-account" onclick="loadSettings(); closeSidebar()"><i class="bi bi-shield-lock"></i> 账户安全</button>
         </div>
 
         <div class="sidebar-foot">
@@ -1458,8 +1459,53 @@
                     </div>
                 </div>
 
+            </section>
+
+            <section class="tab-pane fade" id="tab-logs">
+                <div class="topline">
+                    <div>
+                        <div class="eyebrow">Runtime</div>
+                        <h1 class="page-title">运行日志</h1>
+                    </div>
+                    <div class="top-actions">
+                        <div class="form-check form-switch">
+                            <input class="form-check-input" type="checkbox" id="logPauseSwitch">
+                            <label class="form-check-label small text-muted" for="logPauseSwitch">暂停刷新</label>
+                        </div>
+                    </div>
+                </div>
+                <div class="log-toolbar">
+                    <select class="form-select" id="logSource" onchange="onLogSourceChange()" aria-label="日志来源">
+                        <option value="core">mihomo 内核</option>
+                        <option value="subscription">订阅更新</option>
+                        <option value="geo">Geo 更新</option>
+                        <option value="auto_update">自动更新</option>
+                        <option value="notify">通知发送</option>
+                    </select>
+                    <select class="form-select" id="logLevelFilter" onchange="loadLogs(true)" aria-label="日志级别筛选">
+                        <option value="">全部级别</option>
+                        <option value="error">ERROR / FATAL</option>
+                        <option value="warn">WARN</option>
+                        <option value="info">INFO</option>
+                        <option value="debug">DEBUG</option>
+                    </select>
+                    <input class="form-control" id="logSearch" type="search" placeholder="搜索日志内容（在最近 4MB 日志里找）" oninput="scheduleLogSearch()" aria-label="搜索日志内容">
+                </div>
+                <div class="small text-muted mb-2" id="logNote">最新的在最上面；内核日志的时间已换成你电脑的本地时间</div>
+                <div id="log-display" class="log-box">
+                    <div class="text-muted text-center mt-5">等待加载...</div>
+                </div>
+            </section>
+
+            <section class="tab-pane fade" id="tab-account">
+                <div class="topline">
+                    <div>
+                        <div class="eyebrow">Account</div>
+                        <h1 class="page-title">账户安全</h1>
+                    </div>
+                </div>
                 <div class="card">
-                    <div class="card-header"><i class="bi bi-shield-lock"></i> 账户安全</div>
+                    <div class="card-header"><i class="bi bi-person-lock"></i> 面板登录账号</div>
                     <div class="card-body">
                         <label class="form-label fw-bold">登录用户名</label>
                         <input type="text" class="form-control mb-3" id="account_user" autocomplete="username" placeholder="admin">
@@ -1476,40 +1522,6 @@
 
                         <button class="action-button primary mt-3" onclick="saveAccount(this)"><i class="bi bi-person-check"></i> 更新账号密码</button>
                     </div>
-                </div>
-            </section>
-
-            <section class="tab-pane fade" id="tab-logs">
-                <div class="topline">
-                    <div>
-                        <div class="eyebrow">Runtime</div>
-                        <h1 class="page-title">运行日志</h1>
-                    </div>
-                    <div class="top-actions">
-                        <div class="form-check form-switch">
-                            <input class="form-check-input" type="checkbox" id="auto-scroll-switch" checked>
-                            <label class="form-check-label small text-muted">自动滚动</label>
-                        </div>
-                        <div class="form-check form-switch">
-                            <input class="form-check-input" type="checkbox" id="logPauseSwitch">
-                            <label class="form-check-label small text-muted">暂停刷新</label>
-                        </div>
-                        <button class="soft-button" onclick="control('fix_logs', this)"><i class="bi bi-tools"></i> 修复日志</button>
-                    </div>
-                </div>
-                <div class="log-toolbar">
-                    <select class="form-select" id="logLevelFilter" onchange="applyLogFilters()" aria-label="日志级别筛选">
-                        <option value="">全部级别</option>
-                        <option value="error">ERROR / FATAL</option>
-                        <option value="warn">WARN</option>
-                        <option value="info">INFO</option>
-                        <option value="debug">DEBUG</option>
-                    </select>
-                    <input class="form-control" id="logSearch" type="search" placeholder="搜索日志内容" oninput="applyLogFilters()" aria-label="搜索日志内容">
-                    <button class="soft-button" type="button" onclick="clearLogDisplay()"><i class="bi bi-eraser"></i> 清空显示</button>
-                </div>
-                <div id="log-display" class="log-box">
-                    <div class="text-muted text-center mt-5">等待加载...</div>
                 </div>
             </section>
         </div>
@@ -2459,15 +2471,46 @@
         }
     }
 
-    function loadLogs() {
-        api('/logs').then(res => {
+    let logSearchTimer = null;
+
+    function logQueryString() {
+        const source = document.getElementById('logSource')?.value || 'core';
+        const level = source === 'core' ? (document.getElementById('logLevelFilter')?.value || '') : '';
+        const q = (document.getElementById('logSearch')?.value || '').trim();
+        return new URLSearchParams({ source, level, q }).toString();
+    }
+
+    // force：筛选条件变了，即使日志内容相同也要重画
+    function loadLogs(force = false) {
+        const query = logQueryString();
+        api('/logs?' + query).then(res => {
             // api() 失败时返回 {success:false}，没有 logs 字段就保持当前显示
             if (!res || typeof res.logs !== 'string') return;
-            const rawLogs = res.logs;
-            if (rawLogs === latestRawLogs) return;
-            latestRawLogs = rawLogs;
-            renderLogs(rawLogs);
+            if (query !== logQueryString()) return;  // 请求期间筛选又变了，丢弃旧结果
+            setText('logNote', res.note || '最新的在最上面；内核日志的时间已换成你电脑的本地时间');
+            const key = query + '\n' + res.logs;
+            if (!force && key === latestRawLogs) return;
+            latestRawLogs = key;
+            renderLogs(res.logs);
         });
+    }
+
+    function scheduleLogSearch() {
+        clearTimeout(logSearchTimer);
+        logSearchTimer = setTimeout(() => loadLogs(true), 300);
+    }
+
+    function onLogSourceChange() {
+        const isCore = (document.getElementById('logSource')?.value || 'core') === 'core';
+        const level = document.getElementById('logLevelFilter');
+        if (level) level.disabled = !isCore;
+        loadLogs(true);
+    }
+
+    function formatCoreLogTime(stamp) {
+        const date = new Date(stamp);
+        if (Number.isNaN(date.getTime())) return stamp.replace('T', ' ').split('.')[0];
+        return `${pad2(date.getMonth() + 1)}-${pad2(date.getDate())} ${pad2(date.getHours())}:${pad2(date.getMinutes())}:${pad2(date.getSeconds())}`;
     }
 
     function logLevelOf(line) {
@@ -2479,70 +2522,49 @@
         return level;
     }
 
-    function applyLogFilters() {
-        renderLogs(latestRawLogs);
-    }
 
-    function clearLogDisplay() {
-        latestRawLogs = "";
-        const logContainer = document.getElementById('log-display');
-        if (logContainer) {
-            logContainer.dataset.rawLogs = "";
-            logContainer.innerHTML = '<div class="text-muted text-center mt-5">当前显示已清空，等待下一次刷新...</div>';
-        }
-    }
 
     function renderLogs(rawLogs) {
-            const logContainer = document.getElementById('log-display');
-            if (!logContainer) return;
-            const isAtBottom = (logContainer.scrollHeight - logContainer.scrollTop - logContainer.clientHeight) < 50;
-            const query = (document.getElementById('logSearch')?.value || '').trim().toLowerCase();
-            const levelFilter = document.getElementById('logLevelFilter')?.value || '';
-            const lines = rawLogs.split('\n').filter(line => {
-                const trimmed = line.trim();
-                if (!trimmed) return false;
-                if (query && !trimmed.toLowerCase().includes(query)) return false;
-                if (levelFilter && logLevelOf(trimmed) !== levelFilter) return false;
-                return true;
-            }).reverse();
-            const fragment = document.createDocumentFragment();
-            lines.forEach(line => {
-                const row = document.createElement('div');
-                row.className = 'log-entry';
-                const match = line.match(/time="([^"]+)" level=([^ ]+) msg="([^"]+)"/);
-                if (match) {
-                    const level = match[2].toUpperCase();
-                    const badgeClass = level === 'WARNING' || level === 'WARN' ? 'tag-warn' : (level === 'ERROR' || level === 'FATAL' ? 'tag-error' : (level === 'DEBUG' ? 'tag-debug' : 'tag-info'));
-                    const levelEl = document.createElement('span');
-                    levelEl.className = `log-tag ${badgeClass}`;
-                    levelEl.textContent = level;
-                    const timeEl = document.createElement('span');
-                    timeEl.className = 'log-time';
-                    timeEl.textContent = match[1].replace('T', ' ').split('.')[0];
-                    const msgEl = document.createElement('span');
-                    msgEl.className = 'log-msg';
-                    msgEl.textContent = match[3];
-                    row.append(levelEl, timeEl, msgEl);
-                } else {
-                    const msgEl = document.createElement('span');
-                    msgEl.className = 'log-msg text-muted';
-                    msgEl.textContent = line;
-                    row.appendChild(msgEl);
-                }
-                fragment.appendChild(row);
-            });
-            if (!lines.length) {
-                const empty = document.createElement('div');
-                empty.className = 'text-muted text-center mt-5';
-                empty.textContent = rawLogs ? '没有匹配的日志' : '暂无日志';
-                fragment.appendChild(empty);
+        const logContainer = document.getElementById('log-display');
+        if (!logContainer) return;
+        // 最新的在最上面；正停在顶部时保持在顶部，往下翻着看时不打断
+        const atTop = logContainer.scrollTop < 50;
+        const lines = rawLogs.split('\n').filter(line => line.trim()).reverse();
+        const fragment = document.createDocumentFragment();
+        lines.forEach(line => {
+            const row = document.createElement('div');
+            row.className = 'log-entry';
+            const match = line.match(/time="([^"]+)" level=([^ ]+) msg="(.*)"\s*$/);
+            if (match) {
+                const level = match[2].toUpperCase();
+                const badgeClass = level === 'WARNING' || level === 'WARN' ? 'tag-warn' : (level === 'ERROR' || level === 'FATAL' ? 'tag-error' : (level === 'DEBUG' ? 'tag-debug' : 'tag-info'));
+                const levelEl = document.createElement('span');
+                levelEl.className = `log-tag ${badgeClass}`;
+                levelEl.textContent = level;
+                const timeEl = document.createElement('span');
+                timeEl.className = 'log-time';
+                timeEl.textContent = formatCoreLogTime(match[1]);
+                const msgEl = document.createElement('span');
+                msgEl.className = 'log-msg';
+                msgEl.textContent = match[3].replace(/\\"/g, '"');
+                row.append(levelEl, timeEl, msgEl);
+            } else {
+                const msgEl = document.createElement('span');
+                msgEl.className = 'log-msg';
+                msgEl.textContent = line;
+                row.appendChild(msgEl);
             }
-            const renderKey = JSON.stringify([rawLogs, query, levelFilter]);
-            if (logContainer.dataset.rawLogs !== renderKey) {
-                logContainer.dataset.rawLogs = renderKey;
-                logContainer.replaceChildren(fragment);
-                if (document.getElementById('auto-scroll-switch')?.checked && isAtBottom) logContainer.scrollTop = logContainer.scrollHeight;
-            }
+            fragment.appendChild(row);
+        });
+        if (!lines.length) {
+            const empty = document.createElement('div');
+            empty.className = 'text-muted text-center mt-5';
+            const filtering = (document.getElementById('logSearch')?.value || '').trim() || document.getElementById('logLevelFilter')?.value;
+            empty.textContent = filtering ? '没有匹配的日志' : '暂无日志';
+            fragment.appendChild(empty);
+        }
+        logContainer.replaceChildren(fragment);
+        if (atTop) logContainer.scrollTop = 0;
     }
 
     function toggleTheme() {
@@ -2714,7 +2736,6 @@
             } else {
                 showToast(res.message || (res.success ? '操作成功' : '操作失败'), res.success ? 'success' : 'error', 4200);
             }
-            if (act === 'fix_logs') loadLogs();
             loadOverview();
             return res;
         } finally {
@@ -3681,6 +3702,7 @@
             if (activeTabId === 'tab-rules-btn') loadRulesPage();
             if (activeTabId === 'tab-notify-btn') { loadSettings(); loadNotifyLog(); }
             if (activeTabId === 'tab-logs-btn') startLogPolling();
+            if (activeTabId === 'tab-account-btn') loadSettings();
             if (activeTabId === 'tab-devices-btn') startDevicePolling();
         }
     }

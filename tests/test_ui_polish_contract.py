@@ -55,15 +55,17 @@ class MihomoUiPolishContractTest(unittest.TestCase):
         self.assertIn("classList.toggle('is-busy'", source)
         self.assertIn("button-spinner", source)
 
-    def test_logs_can_be_filtered_and_cleared_in_browser(self):
+    def test_logs_can_be_filtered_and_searched_on_server(self):
         source = text(INDEX)
 
         self.assertIn('id="logSearch"', source)
         self.assertIn('id="logLevelFilter"', source)
+        self.assertIn('id="logSource"', source)
         self.assertIn('id="logPauseSwitch"', source)
         self.assertIn("function renderLogs", source)
-        self.assertIn("function applyLogFilters", source)
-        self.assertIn("function clearLogDisplay", source)
+        self.assertIn("api('/logs?' + query)", source)
+        # 修复日志按钮实际是直接重启 mihomo，已去掉
+        self.assertNotIn("control('fix_logs'", source)
 
     def test_tasks_page_removes_duplicate_apply_button_and_aligns_save_button_style(self):
         source = text(INDEX)
@@ -83,7 +85,7 @@ class MihomoUiPolishContractTest(unittest.TestCase):
     def test_release_version_is_0122(self):
         app = text(APP)
 
-        self.assertIn('PANEL_VERSION = "0.1.47"', app)
+        self.assertIn('PANEL_VERSION = "0.1.48"', app)
         match = re.search(r'(?m)^PANEL_VERSION = "(\d+)\.(\d+)\.(\d+)"$', app)
         self.assertIsNotNone(match)
         self.assertGreaterEqual(tuple(int(part) for part in match.groups()), (0, 1, 22))

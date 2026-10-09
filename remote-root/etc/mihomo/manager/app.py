@@ -50,7 +50,7 @@ SUBSCRIPTION_STATE_FILE = f"{MIHOMO_DIR}/.last_subscription"
 SUBSCRIPTION_LOG = "/var/log/mihomo-subscription.log"
 GEO_LOG = "/var/log/mihomo-geo.log"
 MANAGER_DIR = f"{MIHOMO_DIR}/manager"
-PANEL_VERSION = "0.1.47"
+PANEL_VERSION = "0.1.48"
 DEFAULT_PANEL_REPO_URL = "https://github.com/anxiaoyang666/mihomo.git"
 DEFAULT_PANEL_BRANCH = "main"
 PANEL_BACKUP_KEEP_COUNT = 3
@@ -3888,12 +3888,51 @@ def handle_config():
                 remove_quietly(tmp_file)
             CONFIG_LOCK.release()
 
+# 运行日志页可以看的日志（只允许这几个文件）
+LOG_SOURCES = {
+    "core": LOG_FILE,
+    "subscription": "/var/log/mihomo-subscription.log",
+    "geo": "/var/log/mihomo-geo.log",
+    "auto_update": "/var/log/mihomo-auto-update.log",
+    "notify": "/var/log/mihomo-notify.log",
+}
+LOG_VIEW_LINES = 300
+LOG_SEARCH_TAIL_BYTES = 4 * 1024 * 1024
+
+def core_log_level(line):
+    match = re.search(r"level=([a-zA-Z]+)", line)
+    level = match.group(1).lower() if match else ""
+    return {"warning": "warn", "fatal": "error"}.get(level, level)
+
+def read_log_view(source="core", level="", query="", limit=LOG_VIEW_LINES):
+    """返回 (日志文本, 说明)。筛选和搜索在服务端做，范围是日志末尾 4MB，而不是只在最后 100 行里找。"""
+    path = LOG_SOURCES.get(source)
+    if not path:
+        return "", "未知日志"
+    if not os.path.exists(path):
+        return "", "日志还没有生成"
+    filtering = bool(level or query)
+    text = read_recent_log_lines(path, 200000 if filtering else limit, tail_bytes=LOG_SEARCH_TAIL_BYTES if filtering else LOG_TAIL_BYTES)
+    lines = text.splitlines()
+    if level and source == "core":
+        lines = [line for line in lines if core_log_level(line) == level]
+    if query:
+        needle = query.lower()
+        lines = [line for line in lines if needle in line.lower()]
+    total = len(lines)
+    lines = lines[-limit:]
+    note = f"共找到 {total} 行，显示最新 {len(lines)} 行" if filtering and total > len(lines) else ""
+    return "\n".join(lines), note
+
 @app.route('/api/logs')
 @login_required
 def get_logs():
-    if not os.path.exists(LOG_FILE): return jsonify({"logs": "日志未生成"})
-    logs = read_recent_log_lines(LOG_FILE, 100)
-    return jsonify({"logs": logs if logs else "暂无日志"})
+    source = request.args.get("source", "core")
+    level = request.args.get("level", "")
+    level = level if level in ("error", "warn", "info", "debug") else ""
+    query = str(request.args.get("q", ""))[:100].strip()
+    logs, note = read_log_view(source, level, query)
+    return jsonify({"logs": logs, "note": note, "source": source})
 
 @app.route('/api/account', methods=['POST'])
 @login_required
