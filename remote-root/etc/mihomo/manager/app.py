@@ -50,7 +50,7 @@ SUBSCRIPTION_STATE_FILE = f"{MIHOMO_DIR}/.last_subscription"
 SUBSCRIPTION_LOG = "/var/log/mihomo-subscription.log"
 GEO_LOG = "/var/log/mihomo-geo.log"
 MANAGER_DIR = f"{MIHOMO_DIR}/manager"
-PANEL_VERSION = "0.1.43"
+PANEL_VERSION = "0.1.44"
 DEFAULT_PANEL_REPO_URL = "https://github.com/anxiaoyang666/mihomo.git"
 DEFAULT_PANEL_BRANCH = "main"
 PANEL_BACKUP_KEEP_COUNT = 3
@@ -1934,6 +1934,11 @@ def load_traffic_daily(path=None):
     with TRAFFIC_LOCK:
         TRAFFIC_DAILY.update({"date": data["date"], "down": first_number(data.get("down")), "up": first_number(data.get("up")),
                               "yesterday": yesterday, "dirty": False})
+    device_base = data.get("device_base")
+    if isinstance(device_base, dict) and isinstance(device_base.get("base"), dict):
+        base = {str(k)[:64]: first_number(v) for k, v in list(device_base["base"].items())[:4096]}
+        with IKUAI_LOCK:
+            IKUAI_TODAY.update({"date": str(device_base.get("date") or "")[:10], "base": base})
     return True
 
 def save_traffic_daily(path=None):
@@ -1941,8 +1946,12 @@ def save_traffic_daily(path=None):
     with TRAFFIC_LOCK:
         if not TRAFFIC_DAILY["date"]:
             return False
-        text = json.dumps({k: TRAFFIC_DAILY[k] for k in ("date", "down", "up", "yesterday")}, separators=(",", ":"))
+        payload = {k: TRAFFIC_DAILY[k] for k in ("date", "down", "up", "yesterday")}
         TRAFFIC_DAILY["dirty"] = False
+    with IKUAI_LOCK:
+        if IKUAI_TODAY["date"]:
+            payload["device_base"] = {"date": IKUAI_TODAY["date"], "base": dict(IKUAI_TODAY["base"])}
+    text = json.dumps(payload, separators=(",", ":"))
     directory = os.path.dirname(path) or "."
     os.makedirs(directory, exist_ok=True)
     tmp_path = os.path.join(directory, f".traffic_daily.{os.getpid()}.{secrets.token_hex(4)}.tmp")
@@ -2435,6 +2444,44 @@ def ikuai_record_error(key, message, now):
         IKUAI_STATE[key] = str(message)[:300]
         IKUAI_STATE["error_at"] = now
 
+# 爱快只给离线终端填 today_total，在线终端一直是 0。面板自己记每台终端当天第一次看到时的累计流量，
+# 今日流量 = 现在的累计 - 这个基准（北京时间 0 点换日，和概览的今日流量一致），基准随 traffic_daily.json 保存
+IKUAI_TODAY = {"date": "", "base": {}}
+
+def ikuai_client_key(client):
+    return str(client.get("mac") or "").strip().lower() or str(client.get("ip_addr") or "").strip()
+
+def ikuai_client_total(client):
+    return max(0, first_number(client.get("total_up"))) + max(0, first_number(client.get("total_down")))
+
+def update_ikuai_today(clients, now):
+    """调用方持有 IKUAI_LOCK。换日时把基准换成当前累计；累计变小（路由器重启清零）时基准归零。"""
+    day = traffic_day(now)
+    if IKUAI_TODAY["date"] != day:
+        IKUAI_TODAY["date"] = day
+        IKUAI_TODAY["base"] = {}
+    base = IKUAI_TODAY["base"]
+    for client in clients:
+        key = ikuai_client_key(client)
+        if not key:
+            continue
+        total = ikuai_client_total(client)
+        if key not in base:
+            base[key] = total
+        elif total < base[key]:
+            base[key] = 0
+    with TRAFFIC_LOCK:
+        TRAFFIC_DAILY["dirty"] = True
+
+def ikuai_today_total(client, now):
+    """调用方持有 IKUAI_LOCK。"""
+    reported = max(0, first_number(client.get("today_total")))
+    if IKUAI_TODAY["date"] != traffic_day(now):
+        return reported
+    base = IKUAI_TODAY["base"].get(ikuai_client_key(client))
+    counted = ikuai_client_total(client) - base if base is not None else 0
+    return max(reported, counted, 0)
+
 def poll_ikuai(now=None, force_slow=False, settings=None):
     """采样线程每轮调一次：在线终端每 IKUAI_POLL_INTERVAL 秒、DHCP 和离线终端每 IKUAI_SLOW_INTERVAL 秒。
     失败时保留上次的数据，只记录错误。没配置爱快就什么都不做。"""
@@ -2457,6 +2504,7 @@ def poll_ikuai(now=None, force_slow=False, settings=None):
                 IKUAI_STATE["online"] = result
                 IKUAI_STATE["fetched_at"] = now
                 IKUAI_STATE["error"] = ""
+                update_ikuai_today(result, now)
         else:
             ikuai_record_error("error", result, now)
     if due_slow:
@@ -2635,8 +2683,10 @@ def proxy_detail(device, notes, now):
         "chains": payload["chains"],
     }
 
-def ikuai_device_rows(online, offline, statics, notes, mihomo_devices, local_ips, router_ips, now):
-    """爱快的在线 + 离线终端合成设备行：先按 MAC 再按 IP 去重（在线优先），跳过 fake-ip 段。"""
+def ikuai_device_rows(online, offline, statics, notes, mihomo_devices, local_ips, router_ips, now, today_totals=None):
+    """爱快的在线 + 离线终端合成设备行：先按 MAC 再按 IP 去重（在线优先），跳过 fake-ip 段。
+    today_totals：id(client) -> 今日流量（由调用方在 IKUAI_LOCK 里算好）。"""
+    today_totals = today_totals or {}
     static_by_mac, static_by_ip = ikuai_static_index(statics)
     rows = []
     seen_macs, seen_ips = set(), set()
@@ -2681,7 +2731,7 @@ def ikuai_device_rows(online, offline, statics, notes, mihomo_devices, local_ips
                 "rate_down": rate_down,
                 "total_up": total_up,
                 "total_down": total_down,
-                "today_total": max(0, first_number(client.get("today_total"))),
+                "today_total": today_totals.get(id(client), 0),
                 "connections": connections,
                 "since": str(client.get("uptime") or "")[:32] if is_online else "",
                 "offline_at": 0 if is_online else first_number(client.get("logout_time")),
@@ -2696,7 +2746,8 @@ def ikuai_device_rows(online, offline, statics, notes, mihomo_devices, local_ips
                 "upload_total": total_up,
                 "download_total": total_down,
                 "active_connections": connections,
-                "last_seen": first_number(client.get("timestamp")) if is_online else first_number(client.get("logout_time")),
+                # 爱快的 timestamp 是上线时间，不是最近活动；在线就算“现在”
+                "last_seen": int(now) if is_online else first_number(client.get("logout_time")),
             }
             if ssid or signal_value:
                 row["wireless"] = {"ssid": ssid, "signal": signal_value}
@@ -2724,6 +2775,7 @@ def ikuai_devices_snapshot(now, settings):
         online = list(IKUAI_STATE["online"])
         offline = list(IKUAI_STATE["offline"])
         statics = list(IKUAI_STATE["static"])
+        today_totals = {id(client): ikuai_today_total(client, now) for client in online + offline}
     controller = mihomo_controller_settings()
     with DEVICE_LOCK:
         notes = dict(DEVICE_STATE["notes"])
@@ -2731,7 +2783,7 @@ def ikuai_devices_snapshot(now, settings):
         local_ips = set(DEVICE_STATE["local_ips"])
         mihomo_devices = DEVICE_STATE["devices"]
         router_ips = ikuai_router_ips(upstream, settings)
-        rows = ikuai_device_rows(online, offline, statics, notes, mihomo_devices, local_ips, router_ips, now)
+        rows = ikuai_device_rows(online, offline, statics, notes, mihomo_devices, local_ips, router_ips, now, today_totals)
         matched = {row["ip"] for row in rows}
         extra = []
         for key, device in mihomo_devices.items():
