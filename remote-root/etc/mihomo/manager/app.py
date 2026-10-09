@@ -50,7 +50,7 @@ SUBSCRIPTION_STATE_FILE = f"{MIHOMO_DIR}/.last_subscription"
 SUBSCRIPTION_LOG = "/var/log/mihomo-subscription.log"
 GEO_LOG = "/var/log/mihomo-geo.log"
 MANAGER_DIR = f"{MIHOMO_DIR}/manager"
-PANEL_VERSION = "0.1.44"
+PANEL_VERSION = "0.1.45"
 DEFAULT_PANEL_REPO_URL = "https://github.com/anxiaoyang666/mihomo.git"
 DEFAULT_PANEL_BRANCH = "main"
 PANEL_BACKUP_KEEP_COUNT = 3
@@ -3991,7 +3991,9 @@ def handle_settings():
             "cron_geo_sched": e.get('CRON_GEO_SCHED', '0 4 * * *'),
             "cron_geo_schedule": e.get('CRON_GEO_SCHED', '0 4 * * *'),
             "cron_geo_mode": e.get('CRON_GEO_MODE', geo_schedule['mode']),
-            "cron_geo_time": e.get('CRON_GEO_TIME', geo_schedule['time'])
+            "cron_geo_time": e.get('CRON_GEO_TIME', geo_schedule['time']),
+            # 页面按浏览器本地时间显示/填写定时任务，用它换算
+            "timezone": server_timezone_info(),
         })
 
     if request.method == 'POST':

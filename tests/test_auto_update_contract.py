@@ -42,7 +42,10 @@ class AutoUpdateUiContractTest(unittest.TestCase):
         html = text(INDEX)
         self.assertIn("function serverTimeToBrowserLocal", html)
         self.assertIn("服务器时区", html)
-        self.assertIn("相当于你浏览器本地时间", html)
+        self.assertIn("按你电脑的时间填写", html)
+        # 自动更新时间：显示时 服务器 → 本地，保存时 本地 → 服务器
+        self.assertIn("document.getElementById('auto_update_time').value = serverToLocalHHMM(", html)
+        self.assertIn("time: localToServerHHMM(document.getElementById('auto_update_time').value),", html)
 
     def test_run_button_confirms_restart_and_polls(self):
         html = text(INDEX)

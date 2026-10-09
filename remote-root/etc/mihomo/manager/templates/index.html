@@ -1307,7 +1307,7 @@
                                     <input class="form-check-input" type="checkbox" id="auto_update_enabled">
                                     <label class="form-check-label fw-bold" for="auto_update_enabled">每天自动检查并更新</label>
                                 </div>
-                                <label class="form-label fw-bold" for="auto_update_time">更新时间（服务器时间）</label>
+                                <label class="form-label fw-bold" for="auto_update_time">更新时间</label>
                                 <input type="time" class="form-control" id="auto_update_time" value="04:00">
                                 <div class="form-text mb-3" id="auto_update_tz_hint">服务器时区加载中…</div>
 
@@ -2565,15 +2565,40 @@
         } else {
             label.innerHTML = "完整配置文件 URL";
             input.placeholder = "http://... (Sub-Store/Gist)";
-            hint.innerHTML = "系统将完整下载并应用该配置文件，仅注入防回环规则。";
+            hint.innerHTML = "下载完整配置后原样使用，只额外加入：本地直连网段、分流同步的强制直连/代理规则，并保留本机的控制器密钥。";
             input.value = cachedUrlRaw;
         }
     }
 
+    // 定时任务按服务器时区执行（容器多为 UTC）。页面上的时间一律按浏览器本地时间填写和显示，
+    // 读出来时 服务器 → 本地，保存时 本地 → 服务器。serverTz 来自 /api/settings 或自动更新状态
+    let serverTz = null;
+
+    function shiftHHMM(hhmm, deltaMinutes) {
+        const match = /^(\d{2}):(\d{2})$/.exec(hhmm || '');
+        if (!match) return hhmm;
+        const total = (((Number(match[1]) * 60 + Number(match[2]) + deltaMinutes) % 1440) + 1440) % 1440;
+        return `${pad2(Math.floor(total / 60))}:${pad2(total % 60)}`;
+    }
+
+    function serverTzDelta() {
+        return serverTz ? -new Date().getTimezoneOffset() - Number(serverTz.offset_minutes || 0) : 0;
+    }
+
+    function serverToLocalHHMM(hhmm) { return shiftHHMM(hhmm, serverTzDelta()); }
+    function localToServerHHMM(hhmm) { return shiftHHMM(hhmm, -serverTzDelta()); }
+
+    // timeValue 是本地时间；每 6 / 12 小时的任务在服务器时间的 0/6/12/18 点（或 0/12 点）跑，换算成本地列出来
     function scheduleLabel(mode, timeValue, label) {
-        if (mode === 'every6h') return `从 ${timeValue || '00:00'} 起，每 6 小时自动更新${label}`;
-        if (mode === 'every12h') return `从 ${timeValue || '00:00'} 起，每 12 小时自动更新${label}`;
-        if (mode === 'advanced') return '使用高级 Cron 表达式';
+        if (mode === 'every6h' || mode === 'every12h') {
+            const step = mode === 'every6h' ? 6 : 12;
+            const minute = (localToServerHHMM(timeValue || '00:00') || '00:00').slice(3);
+            const times = [];
+            for (let h = 0; h < 24; h += step) times.push(serverToLocalHHMM(`${pad2(h)}:${minute}`));
+            times.sort();
+            return `每 ${step} 小时自动更新${label}（${times.join('、')}）`;
+        }
+        if (mode === 'advanced') return '使用高级 Cron 表达式（按服务器时间执行）';
         return `每天 ${timeValue || '--:--'} 自动更新${label}`;
     }
 
@@ -2598,16 +2623,8 @@
         const hint = document.getElementById(`cron_${kind}_hint`);
         if (!modeInput || !timeInput || !schedInput || !hint) return;
         const mode = modeInput.value || 'daily';
-        schedInput.value = scheduleToCron(mode, timeInput.value, schedInput.value, schedInput.value || '0 5 * * *');
-        hint.textContent = scheduleLabel(mode, timeInput.value, label) + scheduleLocalNote(mode, timeInput.value);
-    }
-
-    // 时间按服务器时区执行（容器多为 UTC）；和浏览器时区不同时注明换算后的本地时间
-    function scheduleLocalNote(mode, timeValue) {
-        if (mode === 'advanced' || !autoUpdateTz) return '';
-        if (-new Date().getTimezoneOffset() === Number(autoUpdateTz.offset_minutes)) return '';
-        const local = serverTimeToBrowserLocal(timeValue, autoUpdateTz.offset_minutes);
-        return local ? `（服务器时间，相当于你本地 ${local}）` : '';
+        schedInput.value = scheduleToCron(mode, localToServerHHMM(timeInput.value), schedInput.value, schedInput.value || '0 5 * * *');
+        hint.textContent = scheduleLabel(mode, timeInput.value, label);
     }
 
     function updateScheduleVisibility(kind, label) {
@@ -2851,14 +2868,15 @@
             localNetworksAuto = { effective: Array.isArray(res.local_networks_effective) ? res.local_networks_effective : [], auto: res.local_networks_auto !== false };
             if (document.getElementById('local_cidr')) document.getElementById('local_cidr').value = res.local_cidr || '';
             updateLocalCidrPreview();
+            if (res.timezone) serverTz = res.timezone;
             if (document.getElementById('cron_sub_enabled')) document.getElementById('cron_sub_enabled').checked = isTrue(res.cron_sub_enabled);
             if (document.getElementById('cron_sub_mode')) document.getElementById('cron_sub_mode').value = res.cron_sub_mode || 'daily';
             if (document.getElementById('cron_sub_sched')) document.getElementById('cron_sub_sched').value = res.cron_sub_sched || '0 5 * * *';
-            if (document.getElementById('cron_sub_time')) document.getElementById('cron_sub_time').value = res.cron_sub_time || cronToDailyTime(res.cron_sub_sched, '05:00');
+            if (document.getElementById('cron_sub_time')) document.getElementById('cron_sub_time').value = serverToLocalHHMM(res.cron_sub_time || cronToDailyTime(res.cron_sub_sched, '05:00'));
             if (document.getElementById('cron_geo_enabled')) document.getElementById('cron_geo_enabled').checked = isTrue(res.cron_geo_enabled);
             if (document.getElementById('cron_geo_mode')) document.getElementById('cron_geo_mode').value = res.cron_geo_mode || 'daily';
             if (document.getElementById('cron_geo_sched')) document.getElementById('cron_geo_sched').value = res.cron_geo_sched || '0 4 * * *';
-            if (document.getElementById('cron_geo_time')) document.getElementById('cron_geo_time').value = res.cron_geo_time || cronToDailyTime(res.cron_geo_sched, '04:00');
+            if (document.getElementById('cron_geo_time')) document.getElementById('cron_geo_time').value = serverToLocalHHMM(res.cron_geo_time || cronToDailyTime(res.cron_geo_sched, '04:00'));
             updateScheduleVisibility('sub', '订阅');
             updateScheduleVisibility('geo', ' Geo 数据库');
             settingsLoaded = true;
@@ -3145,11 +3163,11 @@
                 local_cidr: document.getElementById('local_cidr') ? document.getElementById('local_cidr').value : '',
                 cron_sub_enabled: document.getElementById('cron_sub_enabled') ? String(document.getElementById('cron_sub_enabled').checked) : 'false',
                 cron_sub_mode: document.getElementById('cron_sub_mode') ? document.getElementById('cron_sub_mode').value : 'daily',
-                cron_sub_time: document.getElementById('cron_sub_time') ? document.getElementById('cron_sub_time').value : '05:00',
+                cron_sub_time: document.getElementById('cron_sub_time') ? localToServerHHMM(document.getElementById('cron_sub_time').value) : '05:00',
                 cron_sub_sched: document.getElementById('cron_sub_sched') ? document.getElementById('cron_sub_sched').value : '',
                 cron_geo_enabled: document.getElementById('cron_geo_enabled') ? String(document.getElementById('cron_geo_enabled').checked) : 'false',
                 cron_geo_mode: document.getElementById('cron_geo_mode') ? document.getElementById('cron_geo_mode').value : 'daily',
-                cron_geo_time: document.getElementById('cron_geo_time') ? document.getElementById('cron_geo_time').value : '04:00',
+                cron_geo_time: document.getElementById('cron_geo_time') ? localToServerHHMM(document.getElementById('cron_geo_time').value) : '04:00',
                 cron_geo_sched: document.getElementById('cron_geo_sched') ? document.getElementById('cron_geo_sched').value : ''
             };
             if (siteName !== null) payload.site_name = siteName;
@@ -3187,14 +3205,10 @@
         const hint = document.getElementById('auto_update_tz_hint');
         if (!hint || !tz) return;
         autoUpdateTz = tz;
-        updateScheduleHint('sub', '订阅');
-        updateScheduleHint('geo', ' Geo 数据库');
-        const value = document.getElementById('auto_update_time').value;
-        const local = serverTimeToBrowserLocal(value, tz.offset_minutes);
-        const browserOffset = -new Date().getTimezoneOffset();
-        const same = browserOffset === Number(tz.offset_minutes);
-        hint.textContent = `服务器时区 ${tz.name}（${tz.offset_text}），服务器现在 ${tz.now}` +
-            (local ? (same ? '；与你的浏览器时区相同' : `；相当于你浏览器本地时间 ${local}`) : '');
+        const same = -new Date().getTimezoneOffset() === Number(tz.offset_minutes);
+        hint.textContent = same
+            ? `按你电脑的时间填写（服务器时区 ${tz.name}，与你相同）`
+            : `按你电脑的时间填写；服务器时区是 ${tz.name}（${tz.offset_text}），保存时自动换算`;
     }
 
     // 版本号比较："v1.19.35" / "0.1.38" 都可以；无法识别时返回 null
@@ -3302,10 +3316,11 @@
         if (!res || !res.settings) return;
         autoUpdateLabels = res.labels || autoUpdateLabels;
         const s = res.settings;
+        if (res.timezone) serverTz = res.timezone;
         // 轮询时不覆盖用户正在编辑的输入框
         if (!document.getElementById('autoUpdateCard').contains(document.activeElement)) {
             document.getElementById('auto_update_enabled').checked = Boolean(s.enabled);
-            document.getElementById('auto_update_time').value = s.time || '04:00';
+            document.getElementById('auto_update_time').value = serverToLocalHHMM(s.time || '04:00');
             document.getElementById('auto_update_core_min_age').value = s.core_min_age_days;
             document.getElementById('auto_update_panel_min_age').value = s.panel_min_age_days;
             document.getElementById('auto_update_ui_interval').value = s.ui_interval_days;
@@ -3365,7 +3380,7 @@
         try {
             const res = await api('/auto-update/settings', {
                 enabled: document.getElementById('auto_update_enabled').checked,
-                time: document.getElementById('auto_update_time').value,
+                time: localToServerHHMM(document.getElementById('auto_update_time').value),
                 core_min_age_days: document.getElementById('auto_update_core_min_age').value,
                 panel_min_age_days: document.getElementById('auto_update_panel_min_age').value,
                 ui_interval_days: document.getElementById('auto_update_ui_interval').value
