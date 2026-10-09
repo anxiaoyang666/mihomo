@@ -284,7 +284,7 @@ class SmallFixesContractTest(unittest.TestCase):
         self.assertIn('python3 - "$CONFIG_FILE" <<\'PY\'', geo)
         self.assertIn("open(sys.argv[1]", geo)
         self.assertIn('python3 - "$TEMPLATE_FILE" "$TEMP_NEW" <<\'PY\'', update)
-        self.assertIn('python3 - "$TEMP_NEW" <<\'PY\'', update)
+        self.assertIn('python3 - "$TEMP_NEW" "${MIHOMO_DIR}/manager" <<\'PY\'', update)
         self.assertNotIn("template_path = '$TEMPLATE_FILE'", update)
         self.assertNotIn("config_path = '$TEMP_NEW'", update)
         self.assertNotIn('python3 -c "', update)

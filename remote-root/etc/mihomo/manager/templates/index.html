@@ -1187,12 +1187,14 @@
                                 <textarea class="form-control" id="sub_url" rows="4" placeholder="http://..."></textarea>
                                 <div class="form-text mb-3" id="sub_url_hint">请填入 Sub-Store 或完整配置文件的链接。</div>
 
-                                <label class="form-label fw-bold">本地直连网段</label>
-                                <input type="text" class="form-control" id="local_cidr" placeholder="例如: 10.10.1.0/24，留空则不启用">
+                                <label class="form-label fw-bold" for="local_cidr">本地直连网段</label>
+                                <div class="form-text mt-0 mb-2" id="local_cidr_help">各站点共用的配置里有“去其他站点的网段走隧道”的规则；本机所在的局域网网段必须直连，否则访问本地设备会绕进指向自己的隧道。留空会自动使用这台机器所在的网段。</div>
+                                <input type="text" class="form-control" id="local_cidr" placeholder="留空自动识别，例如 10.10.20.0 或 10.10.20.0/24，多个用逗号分隔" oninput="updateLocalCidrPreview()">
+                                <div class="form-text" id="local_cidr_preview">将使用：--</div>
 
                                 <div class="d-flex justify-content-between align-items-center mt-3">
                                     <small class="text-muted">保存后会覆盖当前配置并应用</small>
-                                    <button class="action-button primary" onclick="saveAndUpdateSub(this)"><i class="bi bi-check2-circle"></i> 保存并应用配置</button>
+                                    <button class="action-button primary" data-requires-settings disabled onclick="saveAndUpdateSub(this)"><i class="bi bi-check2-circle"></i> 保存并应用配置</button>
                                 </div>
                             </div>
                         </div>
@@ -1246,7 +1248,7 @@
                                     <div class="form-text" id="cron_geo_hint">每天 04:00 自动更新 Geo 数据库</div>
                                 </div>
 
-                                <button class="action-button primary w-100 mt-4" onclick="saveSettings(false, this)"><i class="bi bi-save"></i> 仅保存设置</button>
+                                <button class="action-button primary w-100 mt-4" data-requires-settings disabled onclick="saveSettings(false, this)"><i class="bi bi-save"></i> 仅保存设置</button>
                             </div>
                         </div>
 
@@ -1377,7 +1379,7 @@
                         </div>
                         <input type="text" class="form-control" id="api_url" placeholder="http://...">
                         <div class="form-text">支持发送 JSON 通知的 Webhook 地址</div>
-                        <button class="action-button primary mt-3" onclick="saveSettings(false, this)"><i class="bi bi-save"></i> 保存所有设置</button>
+                        <button class="action-button primary mt-3" data-requires-settings disabled onclick="saveSettings(false, this)"><i class="bi bi-save"></i> 保存所有设置</button>
                     </div>
                 </div>
 
@@ -1651,7 +1653,7 @@
                 ['上次订阅更新', formatLastSubscription(settings.last_subscription), !settings.last_subscription ? 'small-pill warn' : (settings.last_subscription.ok ? 'small-pill' : 'small-pill warn')],
                 ['Geo 任务', settings.cron_geo_enabled ? '已开启' : '未开启', settings.cron_geo_enabled ? 'small-pill' : 'small-pill warn'],
                 ['通知', settings.notify_api ? '已开启' : '未开启', settings.notify_api ? 'small-pill' : 'small-pill warn'],
-                ['直连网段', settings.local_cidr || '未设置', settings.local_cidr ? 'small-pill' : 'small-pill warn']
+                ['直连网段', formatLocalNetworks(settings.local_networks_effective, settings.local_networks_auto), (settings.local_networks_effective || []).length ? 'small-pill' : 'small-pill warn']
             ].map(item => `<div class="health-row"><div><strong>${item[0]}</strong><span>${escapeHtml(item[1])}</span></div><span class="${item[2]}">${escapeHtml(item[1])}</span></div>`).join('');
         }
 
@@ -2567,6 +2569,10 @@
 
     async function saveAndUpdateSub(trigger = null) {
         if (trigger?.classList?.contains('is-busy')) return;
+        if (!settingsLoaded) {
+            showToast('设置未加载，暂时不能保存', 'error');
+            return;
+        }
         if (!document.getElementById('sub_url').value) {
             showToast("请先填写订阅链接。", 'warning');
             return;
@@ -2590,8 +2596,106 @@
         }
     }
 
+    // ===== 本地直连网段：和 app.py normalize_local_networks 同一套规则（常见写法），给输入框下方的实时预览用 =====
+    let settingsLoaded = false;
+    let localNetworksAuto = { effective: [], auto: true };
+    const LOCAL_NETWORKS_MAX = 8;
+
+    function ipv4ToInt(text) {
+        const parts = text.split('.');
+        if (parts.length !== 4 || parts.some(p => !/^\d{1,3}$/.test(p) || (p.length > 1 && p[0] === '0') || Number(p) > 255)) return null;
+        return parts.reduce((acc, p) => acc * 256 + Number(p), 0);
+    }
+
+    function intToIpv4(value) {
+        return [24, 16, 8, 0].map(shift => Math.floor(value / 2 ** shift) % 256).join('.');
+    }
+
+    function normalizeLocalNetworkEntry(raw) {
+        const shown = raw.length > 40 ? raw.slice(0, 40) + '…' : raw;
+        const bad = { error: `无法识别「${shown}」，请填写形如 10.10.20.0 或 10.10.20.0/24 的网段` };
+        if (raw.includes(':')) {
+            // IPv6 交给服务端精确校验；这里只做基本判断，预览原样显示（不带前缀按 /64）
+            const [addr, prefix = '64'] = raw.split('/');
+            if (!/^[0-9a-fA-F:]+$/.test(addr) || !/^\d{1,3}$/.test(prefix) || Number(prefix) > 128) return bad;
+            if (Number(prefix) < 32) return { error: `「${raw}」范围太大，IPv6 网段至少要 /32` };
+            if (!/^f[cd]/i.test(addr)) return { error: `「${raw}」不是局域网地址，只能填写局域网网段（10.x、172.16-31.x、192.168.x、100.64-127.x 或 IPv6 fd00::/8）` };
+            return { net: `${addr.toLowerCase()}/${Number(prefix)}` };
+        }
+        let addr = raw, prefix = 24;
+        if (raw.includes('/')) {
+            const idx = raw.indexOf('/');
+            addr = raw.slice(0, idx);
+            const p = raw.slice(idx + 1);
+            if (!/^\d{1,2}$/.test(p) || Number(p) > 32) return bad;
+            prefix = Number(p);
+        } else if (/^\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(raw)) {
+            addr = raw + '.0';
+        }
+        const value = ipv4ToInt(addr);
+        if (value === null) return bad;
+        const size = 2 ** (32 - prefix);
+        const network = Math.floor(value / size) * size;
+        const net = `${intToIpv4(network)}/${prefix}`;
+        if (prefix < 8) return { error: `「${net}」范围太大，IPv4 网段至少要 /8` };
+        const within = (base, bits) => prefix >= bits && Math.floor(network / 2 ** (32 - bits)) === Math.floor(ipv4ToInt(base) / 2 ** (32 - bits));
+        if (!(within('10.0.0.0', 8) || within('172.16.0.0', 12) || within('192.168.0.0', 16) || within('100.64.0.0', 10))) {
+            return { error: `「${net}」不是局域网地址，只能填写局域网网段（10.x、172.16-31.x、192.168.x、100.64-127.x 或 IPv6 fd00::/8）` };
+        }
+        return { net };
+    }
+
+    function normalizeLocalNetworks(text) {
+        const networks = [];
+        for (const raw of String(text || '').split(/[\s,，、;；]+/)) {
+            if (!raw) continue;
+            const result = normalizeLocalNetworkEntry(raw);
+            if (result.error) return { networks: [], error: result.error };
+            if (!networks.includes(result.net)) networks.push(result.net);
+        }
+        if (networks.length > LOCAL_NETWORKS_MAX) return { networks: [], error: `最多填写 ${LOCAL_NETWORKS_MAX} 个网段（现在有 ${networks.length} 个）` };
+        return { networks, error: null };
+    }
+
+    function formatLocalNetworks(list, auto) {
+        const nets = Array.isArray(list) ? list : [];
+        if (!nets.length) return auto ? '自动识别失败，请手动填写' : '未设置';
+        return nets.join(', ') + (auto ? '（自动）' : '');
+    }
+
+    function updateLocalCidrPreview() {
+        const input = document.getElementById('local_cidr');
+        const preview = document.getElementById('local_cidr_preview');
+        if (!input || !preview) return;
+        const { networks, error } = normalizeLocalNetworks(input.value);
+        preview.classList.toggle('text-danger', Boolean(error));
+        if (error) {
+            preview.textContent = error;
+        } else if (networks.length) {
+            preview.textContent = '将使用：' + networks.join(', ');
+        } else {
+            const current = localNetworksAuto.effective.length ? localNetworksAuto.effective.join(', ') : '未识别到，请手动填写';
+            preview.textContent = `将使用：自动识别（当前 ${current}）`;
+        }
+    }
+
+    // 设置读回来之前保存会把空表单提交上去，所以保存按钮一直禁用到第一次加载成功
+    function setSettingsButtonsEnabled(enabled) {
+        document.querySelectorAll('[data-requires-settings]').forEach(button => {
+            button.disabled = !enabled;
+            button.title = enabled ? '' : '设置未加载，暂时不能保存';
+        });
+    }
+
     function loadSettings() {
         api('/settings').then(res => {
+            if (!res || res.success === false) {
+                if (!settingsLoaded) {
+                    setSettingsButtonsEnabled(false);
+                    showToast('设置未加载，暂时不能保存', 'error');
+                }
+                return;
+            }
             const isTrue = val => val === true || val === 'true';
             if (document.getElementById('account_user')) document.getElementById('account_user').value = res.web_user || 'admin';
             document.getElementById('notify_api').checked = isTrue(res.notify_api);
@@ -2613,7 +2717,9 @@
                 document.getElementById('sub_url').value = cachedUrlRaw;
             }
             toggleModeDesc();
+            localNetworksAuto = { effective: Array.isArray(res.local_networks_effective) ? res.local_networks_effective : [], auto: res.local_networks_auto !== false };
             if (document.getElementById('local_cidr')) document.getElementById('local_cidr').value = res.local_cidr || '';
+            updateLocalCidrPreview();
             if (document.getElementById('cron_sub_enabled')) document.getElementById('cron_sub_enabled').checked = isTrue(res.cron_sub_enabled);
             if (document.getElementById('cron_sub_mode')) document.getElementById('cron_sub_mode').value = res.cron_sub_mode || 'daily';
             if (document.getElementById('cron_sub_sched')) document.getElementById('cron_sub_sched').value = res.cron_sub_sched || '0 5 * * *';
@@ -2624,6 +2730,8 @@
             if (document.getElementById('cron_geo_time')) document.getElementById('cron_geo_time').value = res.cron_geo_time || cronToDailyTime(res.cron_geo_sched, '04:00');
             updateScheduleVisibility('sub', '订阅');
             updateScheduleVisibility('geo', ' Geo 数据库');
+            settingsLoaded = true;
+            setSettingsButtonsEnabled(true);
         });
     }
 
@@ -2873,6 +2981,16 @@
 
     async function saveSettings(silent = false, trigger = null) {
         if (trigger?.classList?.contains('is-busy')) return;
+        if (!settingsLoaded) {
+            showToast('设置未加载，暂时不能保存', 'error');
+            return { success: false, message: '设置未加载，暂时不能保存' };
+        }
+        const localCidrInput = document.getElementById('local_cidr');
+        const localCheck = normalizeLocalNetworks(localCidrInput ? localCidrInput.value : '');
+        if (localCheck.error) {
+            showToast('本地直连网段：' + localCheck.error, 'error');
+            return { success: false, message: '本地直连网段：' + localCheck.error };
+        }
         let currentMode = document.getElementById('mode_airport').checked ? 'airport' : 'raw';
         if (currentMode === 'airport') cachedUrlAirport = document.getElementById('sub_url').value;
         else cachedUrlRaw = document.getElementById('sub_url').value;
@@ -2905,6 +3023,7 @@
             };
             if (siteName !== null) payload.site_name = siteName;
             const res = await api('/settings', payload);
+            if (res.success) loadSettings();
             if (!silent) showToast(res.message, res.success ? 'success' : 'error');
             loadOverview();
             return res;

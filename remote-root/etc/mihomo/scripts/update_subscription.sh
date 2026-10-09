@@ -136,55 +136,151 @@ fi
 # 第二阶段：通用补丁 (注入防回环规则)
 # ==========================================
 
-# 只有当 LOCAL_CIDR 不为空时才执行注入
-if [ -n "$LOCAL_CIDR" ]; then
-    echo "🛡️ 检测到防回环设置 ($LOCAL_CIDR)，正在注入规则..."
-    export LOCAL_CIDR
+# 四个站点共用一份托管配置，里面有 IP-CIDR,<各站点网段>,Home-xx 规则（经隧道去别的站点）；
+# 本站点自己的网段必须走 DIRECT 并从 TUN 排除，否则访问本地局域网会绕进指向自己的隧道。
+# LOCAL_CIDR 可以是逗号分隔的多个网段；留空时自动识别本机网段（和面板 app.effective_local_networks 同一套规则）。
+echo "🛡️ 正在注入本地直连网段（防回环）..."
+export LOCAL_CIDR
+python3 - "$TEMP_NEW" "${MIHOMO_DIR}/manager" <<'PY'
+import ipaddress, os, re, subprocess, sys
 
-    python3 - "$TEMP_NEW" <<'PY'
-import sys, yaml, os
+config_path, manager_dir = sys.argv[1], sys.argv[2]
 
-config_path = sys.argv[1]
-local_cidr = os.environ.get('LOCAL_CIDR', '').strip()
+# BEGIN_LOCAL_NETWORKS_FALLBACK
+# 面板 app.py 加载不了时（缺 Flask 等）用的同款实现，规则必须和 app.normalize_local_networks 保持一致（有测试比对）
+LOCAL_NETWORKS_MAX = 8
+_ALLOWED_V4 = tuple(ipaddress.ip_network(n) for n in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "100.64.0.0/10"))
+_ALLOWED_V6 = (ipaddress.ip_network("fc00::/7"),)
+_TUN_V4 = ipaddress.ip_network("198.18.0.0/15")
+
+def _parse_local_network(raw):
+    shown = raw if len(raw) <= 40 else raw[:40] + "…"
+    bad = f"无法识别「{shown}」，请填写形如 10.10.20.0 或 10.10.20.0/24 的网段"
+    try:
+        if "/" in raw:
+            net = ipaddress.ip_network(raw, strict=False)
+        elif re.fullmatch(r"\d{1,3}\.\d{1,3}\.\d{1,3}", raw):
+            net = ipaddress.ip_network(raw + ".0/24")
+        else:
+            addr = ipaddress.ip_address(raw)
+            net = ipaddress.ip_network(f"{addr}/{24 if addr.version == 4 else 64}", strict=False)
+    except ValueError:
+        return None, bad
+    if net.version == 4:
+        if net.prefixlen < 8:
+            return None, f"「{net}」范围太大，IPv4 网段至少要 /8"
+        allowed = _ALLOWED_V4
+    else:
+        if net.prefixlen < 32:
+            return None, f"「{net}」范围太大，IPv6 网段至少要 /32"
+        allowed = _ALLOWED_V6
+    if not any(net.subnet_of(a) for a in allowed):
+        return None, (f"「{net}」不是局域网地址，只能填写局域网网段"
+                      "（10.x、172.16-31.x、192.168.x、100.64-127.x 或 IPv6 fd00::/8）")
+    return net, None
+
+def normalize_local_networks(text):
+    if text is None:
+        return [], None
+    if isinstance(text, (list, tuple)):
+        text = ",".join(str(item) for item in text)
+    networks = []
+    for raw in re.split(r"[\s,，、;；]+", str(text)):
+        if not raw:
+            continue
+        net, error = _parse_local_network(raw)
+        if error:
+            return [], error
+        if str(net) not in networks:
+            networks.append(str(net))
+    if len(networks) > LOCAL_NETWORKS_MAX:
+        return [], f"最多填写 {LOCAL_NETWORKS_MAX} 个网段（现在有 {len(networks)} 个）"
+    return networks, None
+
+def parse_ip_addr_networks(output):
+    networks = []
+    for line in str(output or "").splitlines():
+        match = re.match(r"^\s*\d+:\s+(\S+)\s+inet\s+(\d+\.\d+\.\d+\.\d+/\d+)", line)
+        if not match:
+            continue
+        ifname = match.group(1).split("@")[0].lower()
+        if "meta" in ifname or ifname.startswith(("tun", "utun")):
+            continue
+        try:
+            iface = ipaddress.ip_interface(match.group(2))
+        except ValueError:
+            continue
+        if iface.ip in _TUN_V4:
+            continue
+        net, error = _parse_local_network(str(iface.network))
+        if error or str(net) in networks:
+            continue
+        networks.append(str(net))
+    return networks[:LOCAL_NETWORKS_MAX]
+
+def detect_local_networks():
+    try:
+        result = subprocess.run(["ip", "-4", "-o", "addr", "show", "scope", "global"], capture_output=True, text=True, timeout=5)
+        return parse_ip_addr_networks(result.stdout) if result.returncode == 0 else []
+    except Exception:
+        return []
+
+def effective_local_networks(stored, detect=None):
+    networks, error = normalize_local_networks(stored)
+    if networks and not error:
+        return networks, False, None
+    return list((detect or detect_local_networks)()), True, error
+# END_LOCAL_NETWORKS_FALLBACK
 
 try:
+    sys.path.insert(0, manager_dir)
+    import app as panel
+    effective_local_networks = panel.effective_local_networks
+except Exception as e:
+    print(f"ℹ️ 未加载面板模块，使用脚本内置的网段识别: {e}")
+
+try:
+    import yaml
+    networks, auto, error = effective_local_networks(os.environ.get('LOCAL_CIDR', ''))
+    if error:
+        print(f"⚠️ .env 里的 LOCAL_CIDR 无效（{error}），改为自动识别本机网段")
+    if not networks:
+        print("⚠️ 没有可用的本地直连网段（LOCAL_CIDR 为空且没识别到本机局域网网段），跳过防回环注入")
+        sys.exit(0)
+    print(f"🛡️ 本地直连网段{'（自动识别）' if auto else ''}: {', '.join(networks)}")
+
     with open(config_path, 'r', encoding='utf-8') as f:
         config = yaml.safe_load(f) or {}
 
-    # 构造防回环规则
-    # 格式: IP-CIDR,192.168.1.0/24,DIRECT,no-resolve
-    loop_rule = f'IP-CIDR,{local_cidr},DIRECT,no-resolve'
+    # 规则：IP-CIDR,10.10.20.0/24,DIRECT,no-resolve；IPv6 用 IP-CIDR6。按填写顺序放在最前面
+    loop_rules = [
+        f"{'IP-CIDR6' if ipaddress.ip_network(net).version == 6 else 'IP-CIDR'},{net},DIRECT,no-resolve"
+        for net in networks
+    ]
 
     # 同步 TUN 路由排除，避免本地网段被 auto-route 接管
-    if 'tun' not in config or not isinstance(config['tun'], dict):
+    if not isinstance(config.get('tun'), dict):
         config['tun'] = {}
     route_exclude = config['tun'].get('route-exclude-address')
     if not isinstance(route_exclude, list):
         route_exclude = []
-    route_exclude = [cidr for cidr in route_exclude if cidr != local_cidr]
-    route_exclude.insert(0, local_cidr)
-    config['tun']['route-exclude-address'] = route_exclude
-    print(f'✅ 已同步 TUN 路由排除: {local_cidr}')
+    config['tun']['route-exclude-address'] = list(networks) + [c for c in route_exclude if c not in networks]
+    print(f"✅ 已同步 TUN 路由排除: {', '.join(networks)}")
 
-    # 确保 rules 列表存在
-    if 'rules' not in config or config['rules'] is None:
-        config['rules'] = []
-
-    # 【关键】将规则插入到第一位 (Index 0)
-    # 避免重复插入
-    config['rules'] = [r for r in config['rules'] if r != loop_rule]
-    config['rules'].insert(0, loop_rule)
-    print(f'✅ 已插入规则: {loop_rule}')
+    rules = config.get('rules')
+    if not isinstance(rules, list):
+        rules = []
+    config['rules'] = loop_rules + [r for r in rules if r not in loop_rules]
+    for rule in loop_rules:
+        print(f"✅ 已插入规则: {rule}")
 
     with open(config_path, 'w', encoding='utf-8') as f:
         yaml.dump(config, f, allow_unicode=True, sort_keys=False)
 
 except Exception as e:
-    print(f'⚠️ 防回环注入失败: {e}')
-    # 注意：这里我们不退出 exit 1，因为即使注入失败，主体配置可能还是能用的，
-    # 但建议在日志里看到警告。
+    # 不退出：主体配置可能仍然可用，后面还有内核校验；日志里留警告
+    print(f"⚠️ 防回环注入失败: {e}")
 PY
-fi
 
 # ==========================================
 # 第二阶段 B：保留控制器密钥

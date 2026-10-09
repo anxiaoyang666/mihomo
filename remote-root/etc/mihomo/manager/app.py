@@ -49,7 +49,7 @@ SUBSCRIPTION_STATE_FILE = f"{MIHOMO_DIR}/.last_subscription"
 SUBSCRIPTION_LOG = "/var/log/mihomo-subscription.log"
 GEO_LOG = "/var/log/mihomo-geo.log"
 MANAGER_DIR = f"{MIHOMO_DIR}/manager"
-PANEL_VERSION = "0.1.37"
+PANEL_VERSION = "0.1.38"
 DEFAULT_PANEL_REPO_URL = "https://github.com/anxiaoyang666/mihomo.git"
 DEFAULT_PANEL_BRANCH = "main"
 PANEL_BACKUP_KEEP_COUNT = 3
@@ -472,6 +472,114 @@ def remove_quietly(path):
 
 def is_true(val):
     return str(val).lower() == 'true'
+
+# ===== 本地直连网段（LOCAL_CIDR）=====
+# 四个站点共用一份托管配置，里面有 IP-CIDR,<各站点网段>,Home-xx 规则（经 SS 隧道去别的站点）。
+# 在某个站点上，它自己的网段必须走 DIRECT 并从 TUN 排除，否则访问本地局域网会绕进指向自己的隧道。
+# update_subscription.sh 的防回环阶段 import 这里的函数（失败时用脚本里的同款备份实现），两边结论一致。
+LOCAL_NETWORKS_MAX = 8
+LOCAL_NETWORKS_ALLOWED_V4 = tuple(ipaddress.ip_network(n) for n in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "100.64.0.0/10"))
+LOCAL_NETWORKS_ALLOWED_V6 = (ipaddress.ip_network("fc00::/7"),)
+# TUN 自己的地址段（fake-ip / tun 网卡），自动识别时跳过
+LOCAL_NETWORKS_TUN_V4 = ipaddress.ip_network("198.18.0.0/15")
+LOCAL_NETWORKS_DETECT_TTL = 30
+_local_networks_detect_cache = {"at": 0.0, "value": None}
+
+def _parse_local_network(raw):
+    """单个条目 → (ip_network, None) 或 (None, 错误信息)。"""
+    shown = raw if len(raw) <= 40 else raw[:40] + "…"
+    bad = f"无法识别「{shown}」，请填写形如 10.10.20.0 或 10.10.20.0/24 的网段"
+    try:
+        if "/" in raw:
+            net = ipaddress.ip_network(raw, strict=False)
+        elif re.fullmatch(r"\d{1,3}\.\d{1,3}\.\d{1,3}", raw):
+            net = ipaddress.ip_network(raw + ".0/24")
+        else:
+            addr = ipaddress.ip_address(raw)
+            net = ipaddress.ip_network(f"{addr}/{24 if addr.version == 4 else 64}", strict=False)
+    except ValueError:
+        return None, bad
+    if net.version == 4:
+        if net.prefixlen < 8:
+            return None, f"「{net}」范围太大，IPv4 网段至少要 /8"
+        allowed = LOCAL_NETWORKS_ALLOWED_V4
+    else:
+        if net.prefixlen < 32:
+            return None, f"「{net}」范围太大，IPv6 网段至少要 /32"
+        allowed = LOCAL_NETWORKS_ALLOWED_V6
+    if not any(net.subnet_of(a) for a in allowed):
+        return None, (f"「{net}」不是局域网地址，只能填写局域网网段"
+                      "（10.x、172.16-31.x、192.168.x、100.64-127.x 或 IPv6 fd00::/8）")
+    return net, None
+
+def normalize_local_networks(text):
+    """把面板里填的本地直连网段规范化为 (["10.10.20.0/24", ...], None)，出错时返回 ([], 错误信息)。
+
+    支持逗号/中文逗号/空白/换行分隔；a.b.c.d → 所在 /24，a.b.c → a.b.c.0/24，带掩码的清掉主机位；
+    IPv6 不带前缀按 /64。去重保序，最多 LOCAL_NETWORKS_MAX 个。空输入返回 ([], None)，表示自动识别。
+    """
+    if text is None:
+        return [], None
+    if isinstance(text, (list, tuple)):
+        text = ",".join(str(item) for item in text)
+    networks = []
+    for raw in re.split(r"[\s,，、;；]+", str(text)):
+        if not raw:
+            continue
+        net, error = _parse_local_network(raw)
+        if error:
+            return [], error
+        if str(net) not in networks:
+            networks.append(str(net))
+    if len(networks) > LOCAL_NETWORKS_MAX:
+        return [], f"最多填写 {LOCAL_NETWORKS_MAX} 个网段（现在有 {len(networks)} 个）"
+    return networks, None
+
+def parse_ip_addr_networks(output):
+    """从 `ip -4 -o addr show scope global` 的输出取本机局域网网段；跳过 TUN（Meta/tun 网卡、198.18/15）。"""
+    networks = []
+    for line in str(output or "").splitlines():
+        match = re.match(r"^\s*\d+:\s+(\S+)\s+inet\s+(\d+\.\d+\.\d+\.\d+/\d+)", line)
+        if not match:
+            continue
+        ifname = match.group(1).split("@")[0].lower()
+        if "meta" in ifname or ifname.startswith(("tun", "utun")):
+            continue
+        try:
+            iface = ipaddress.ip_interface(match.group(2))
+        except ValueError:
+            continue
+        if iface.ip in LOCAL_NETWORKS_TUN_V4:
+            continue
+        net, error = _parse_local_network(str(iface.network))
+        if error or str(net) in networks:
+            continue
+        networks.append(str(net))
+    return networks[:LOCAL_NETWORKS_MAX]
+
+def detect_local_networks(use_cache=True):
+    now = time.time()
+    cache = _local_networks_detect_cache
+    if use_cache and cache["value"] is not None and now - cache["at"] < LOCAL_NETWORKS_DETECT_TTL:
+        return list(cache["value"])
+    try:
+        result = subprocess.run(["ip", "-4", "-o", "addr", "show", "scope", "global"], capture_output=True, text=True, timeout=5)
+        networks = parse_ip_addr_networks(result.stdout) if result.returncode == 0 else []
+    except Exception:
+        networks = []
+    cache.update(at=now, value=list(networks))
+    return networks
+
+def effective_local_networks(stored, detect=None):
+    """返回 (实际使用的网段列表, 是否自动识别, 错误信息)。
+
+    填了且合法 → 用填的；留空 → 自动识别本机网段；填的内容不合法（老版本没校验时存进去的）→ 自动识别并带上错误信息。
+    """
+    networks, error = normalize_local_networks(stored)
+    if networks and not error:
+        return networks, False, None
+    detected = (detect or detect_local_networks)()
+    return list(detected), True, error
 
 def is_safe_text(value, max_len=50000):
     return isinstance(value, str) and len(value.encode("utf-8")) <= max_len and "\x00" not in value
@@ -2565,6 +2673,7 @@ def collect_overview():
     proxies_ok, proxies = mihomo_api_get("/proxies")
     connection_list = connections.get("connections") if isinstance(connections.get("connections"), list) else []
     proxy_groups = proxy_group_summary(proxies) if proxies_ok else []
+    local_effective, local_auto, _ = effective_local_networks(env.get("LOCAL_CIDR", ""))
     return {
         "running": running,
         "controller": {
@@ -2589,6 +2698,8 @@ def collect_overview():
             "cron_geo_enabled": env.get("CRON_GEO_ENABLED") == "true",
             "notify_api": env.get("NOTIFY_API") == "true",
             "local_cidr": env.get("LOCAL_CIDR", ""),
+            "local_networks_effective": local_effective,
+            "local_networks_auto": local_auto,
             "last_subscription": last_subscription_state(),
         },
         "updated_at": int(time.time()),
@@ -3602,7 +3713,8 @@ def handle_settings():
         sub_url_airport = e.get('SUB_URL_AIRPORT', '').replace('\\n', '\n')
         sub_schedule = cron_to_mode(e.get('CRON_SUB_SCHED', '0 5 * * *'), '05:00')
         geo_schedule = cron_to_mode(e.get('CRON_GEO_SCHED', '0 4 * * *'), '04:00')
-        
+        local_effective, local_auto, _ = effective_local_networks(e.get('LOCAL_CIDR', ''))
+
         return jsonify({
             "web_user": os.environ.get('WEB_USER') or e.get('WEB_USER', ''),
             "web_port": e.get('WEB_PORT', '7838'),
@@ -3619,6 +3731,8 @@ def handle_settings():
             "site_name_default": notify_format.DEFAULT_SITE_NAME,
             
             "local_cidr": e.get('LOCAL_CIDR', ''),
+            "local_networks_effective": local_effective,
+            "local_networks_auto": local_auto,
             "cron_sub_enabled": e.get('CRON_SUB_ENABLED') == 'true',
             "cron_sub_sched": e.get('CRON_SUB_SCHED', '0 5 * * *'), 
             "cron_sub_schedule": e.get('CRON_SUB_SCHED', '0 5 * * *'),
@@ -3633,60 +3747,67 @@ def handle_settings():
 
     if request.method == 'POST':
         d = json_body()
-        mode = d.get('config_mode', 'airport')
+        current = read_env()
+        # 只改请求里带了的键：没带的保持 .env 原值，老页面/设置没加载完的页面不会把它们清空
+        updates = {}
+        if 'config_mode' in d:
+            updates["CONFIG_MODE"] = d.get('config_mode') if d.get('config_mode') in ('raw', 'airport') else 'airport'
+        if 'sub_url_raw' in d:
+            updates["SUB_URL_RAW"] = str(d.get('sub_url_raw') or '')
+        if 'sub_url_airport' in d:
+            raw_airport = d.get('sub_url_airport') or ''
+            if isinstance(raw_airport, list):
+                raw_airport = "\n".join(str(item) for item in raw_airport)
+            updates["SUB_URL_AIRPORT"] = str(raw_airport).replace('\n', '\\n')
 
-        raw_airport = d.get('sub_url_airport', '')
-        if isinstance(raw_airport, list):
-            raw_airport = "\n".join(raw_airport)
-        escaped_airport = raw_airport.replace('\n', '\\n')
-
-        api_url = d.get('api_url') or d.get('notify_api_url') or ''
-        site_name = None
+        if 'notify_api' in d:
+            updates["NOTIFY_API"] = str(is_true(d.get('notify_api'))).lower()
+        if 'api_url' in d or 'notify_api_url' in d:
+            updates["NOTIFY_API_URL"] = d.get('api_url') or d.get('notify_api_url') or ''
+        # 只有通知页带了站点名时才改，别的调用方不会把它清掉
         if 'site_name' in d:
             ok, site_name, site_error = notify_format.validate_site_name(d.get('site_name'))
             if not ok:
                 return jsonify({"success": False, "message": site_error}), 400
-        cron_sub_mode = d.get('cron_sub_mode', 'daily')
-        cron_sub_time = d.get('cron_sub_time', '05:00')
-        cron_sub = build_schedule(cron_sub_mode, cron_sub_time, d.get('cron_sub_sched') or d.get('cron_sub_schedule'), '0 5 * * *')
-        cron_geo_mode = d.get('cron_geo_mode', 'daily')
-        cron_geo_time = d.get('cron_geo_time', '04:00')
-        cron_geo = build_schedule(cron_geo_mode, cron_geo_time, d.get('cron_geo_sched') or d.get('cron_geo_schedule'), '0 4 * * *')
-
-        updates = {
-            "CONFIG_MODE": mode,
-            "SUB_URL_RAW": d.get('sub_url_raw', ''),
-            "SUB_URL_AIRPORT": escaped_airport,
-            
-            # 仅更新 API 配置
-            "NOTIFY_API": str(is_true(d.get('notify_api'))).lower(),
-            "NOTIFY_API_URL": api_url,
-            
-            "LOCAL_CIDR": d.get('local_cidr', ''),
-            
-            "CRON_SUB_ENABLED": str(is_true(d.get('cron_sub_enabled'))).lower(),
-            "CRON_SUB_SCHED": cron_sub,
-            "CRON_SUB_MODE": cron_sub_mode,
-            "CRON_SUB_TIME": cron_sub_time,
-            
-            "CRON_GEO_ENABLED": str(is_true(d.get('cron_geo_enabled'))).lower(),
-            "CRON_GEO_SCHED": cron_geo,
-            "CRON_GEO_MODE": cron_geo_mode,
-            "CRON_GEO_TIME": cron_geo_time
-        }
-        
-        # 只有通知页带了站点名时才改，别的调用方不会把它清掉
-        if site_name is not None:
             updates["SITE_NAME"] = site_name
 
-        write_env(updates)
+        if 'local_cidr' in d:
+            networks, cidr_error = normalize_local_networks(d.get('local_cidr'))
+            if cidr_error:
+                return jsonify({"success": False, "message": "本地直连网段：" + cidr_error}), 400
+            # 规范化后逗号分隔存；空字符串 = 自动识别本机网段
+            updates["LOCAL_CIDR"] = ",".join(networks)
+
+        cron_jobs = []
+        for kind, job_id, default_cron, default_time, script, log_path in (
+            ("sub", "# JOB_SUB", "0 5 * * *", "05:00", "update_subscription.sh", SUBSCRIPTION_LOG),
+            ("geo", "# JOB_GEO", "0 4 * * *", "04:00", "update_geo.sh", GEO_LOG),
+        ):
+            keys = [f"cron_{kind}_{name}" for name in ("enabled", "mode", "time", "sched", "schedule")]
+            if not any(key in d for key in keys):
+                continue
+            prefix = f"CRON_{kind.upper()}_"
+            enabled = is_true(d[f"cron_{kind}_enabled"]) if f"cron_{kind}_enabled" in d else current.get(prefix + "ENABLED") == 'true'
+            mode = d.get(f"cron_{kind}_mode", current.get(prefix + "MODE", "daily"))
+            time_value = d.get(f"cron_{kind}_time", current.get(prefix + "TIME", default_time))
+            advanced = d.get(f"cron_{kind}_sched") or d.get(f"cron_{kind}_schedule") or current.get(prefix + "SCHED") or default_cron
+            schedule = build_schedule(mode, time_value, advanced, default_cron)
+            updates.update({
+                prefix + "ENABLED": str(enabled).lower(),
+                prefix + "SCHED": schedule,
+                prefix + "MODE": mode,
+                prefix + "TIME": time_value,
+            })
+            cron_jobs.append((job_id, schedule, script, log_path, enabled))
+
+        if updates:
+            write_env(updates)
 
         cron_errors = []
-        for ok, message in (
+        for job_id, schedule, script, log_path, enabled in cron_jobs:
             # 输出进日志而不是 /dev/null，不然用户没法知道定时任务到底跑没跑
-            update_cron("# JOB_SUB", updates['CRON_SUB_SCHED'], f"bash {SCRIPT_DIR}/update_subscription.sh >> {SUBSCRIPTION_LOG} 2>&1", updates['CRON_SUB_ENABLED'] == 'true'),
-            update_cron("# JOB_GEO", updates['CRON_GEO_SCHED'], f"bash {SCRIPT_DIR}/update_geo.sh >> {GEO_LOG} 2>&1", updates['CRON_GEO_ENABLED'] == 'true'),
-        ):
+            # (update_subscription.sh >> {SUBSCRIPTION_LOG} 2>&1 / update_geo.sh >> {GEO_LOG} 2>&1)
+            ok, message = update_cron(job_id, schedule, f"bash {SCRIPT_DIR}/{script} >> {log_path} 2>&1", enabled)
             if not ok:
                 cron_errors.append(message)
         # 顺带确认自动更新的定时任务和 .env 一致（升级上来的老面板也能补上）
