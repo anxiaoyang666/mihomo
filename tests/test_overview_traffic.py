@@ -122,10 +122,44 @@ class TrafficSeriesTest(unittest.TestCase):
             f.write("{bad")
         self.assertFalse(fresh.load_traffic_daily(path))
 
+    def test_breakdown_by_exit_and_rule(self):
+        app = self.app
+        record = app.record_traffic_sample
+        def conn(cid, up, down, chains, rule, payload, inbound="DEFAULT-TUN"):
+            return {"id": cid, "upload": up, "download": down, "chains": chains, "rule": rule, "rulePayload": payload,
+                    "metadata": {"inboundName": inbound}}
+        record({"downloadTotal": 0, "uploadTotal": 0, "connections": [
+            conn("a", 0, 0, ["DMIT", "🪜 DMIT", "♻️ 自动选择"], "RuleSet", "proxy")]}, now=100)
+        record({"downloadTotal": 9000, "uploadTotal": 1500, "connections": [
+            conn("a", 100, 5000, ["DMIT", "🪜 DMIT", "♻️ 自动选择"], "RuleSet", "proxy"),
+            conn("b", 400, 3000, ["DIRECT"], "IPCIDR", "10.10.10.0/24"),
+            conn("c", 1000, 1000, ["DIRECT"], "Match", "", inbound="ss-inbound")]}, now=105)
+        result = app.traffic_breakdown()
+        exits = {row["name"]: (row["down"], row["up"]) for row in result["exits"]}
+        self.assertEqual(exits["DMIT"], (5000, 100))
+        self.assertEqual(exits["DIRECT"], (3000 + 1000, 400 + 1000), "隧道进来的连接方向对调后算到 DIRECT")
+        rules = {row["name"]: row for row in result["rules"]}
+        self.assertEqual(rules["RuleSet(proxy)"]["group"], "♻️ 自动选择")
+        self.assertIn("其他站点经隧道访问本地", rules)
+        self.assertEqual(result["covered"], 5100 + 3400 + 2000)
+        # 第二天清零
+        app.add_daily_traffic(105 + 86400, 0, 0)
+        self.assertEqual(app.traffic_breakdown()["exits"], [])
+
+    def test_breakdown_caps_keys(self):
+        app = self.app
+        app.TRAFFIC_BREAKDOWN_KEYS = 3
+        bucket = {}
+        for i in range(5):
+            app.add_breakdown(bucket, f"k{i}", 1, 1)
+        self.assertEqual(sorted(bucket), ["k0", "k1", "k2", "其他"])
+        self.assertEqual(bucket["其他"], [2, 2])
+
     def test_wired_into_overview_and_page(self):
         source = (ROOT / "remote-root" / "etc" / "mihomo" / "manager" / "app.py").read_text(encoding="utf-8")
         self.assertIn('"traffic_series": traffic_series(),', source)
         self.assertIn('"traffic_daily": traffic_daily_summary(),', source)
+        self.assertIn('"traffic_breakdown": traffic_breakdown(),', source)
         self.assertIn("load_traffic_daily()", source)
         self.assertIn("save_traffic_daily()", source)
         self.assertIn("record_traffic_sample(data)", source)

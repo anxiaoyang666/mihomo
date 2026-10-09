@@ -456,6 +456,20 @@
         .traffic-empty { height: 100%; display: flex; align-items: center; justify-content: center; color: var(--faint); font-size: 13px; }
         .traffic-axis { display: flex; justify-content: space-between; font-size: 11px; color: var(--faint); margin-top: 6px; }
 
+        .split-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 28px; margin-top: 6px; }
+        .split-title { margin-bottom: 4px; color: var(--muted); font-size: 12px; }
+        .split-list { display: grid; }
+        .split-row { display: grid; grid-template-columns: minmax(0, 1.2fr) minmax(80px, 1fr) 84px; gap: 12px; align-items: center; padding: 8px 0; border-top: 1px solid var(--line); font-size: 13px; }
+        .split-row:first-child { border-top: 0; }
+        .split-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 550; }
+        .split-name small { margin-left: 6px; color: var(--faint); font-weight: 400; font-size: 12px; }
+        .split-bar { height: 6px; border-radius: 3px; background: var(--surface-3); overflow: hidden; display: flex; }
+        .split-bar i { display: block; height: 100%; }
+        .split-bar i.down { background: var(--accent); }
+        .split-bar i.up { background: var(--up); }
+        .split-value { text-align: right; font-variant-numeric: tabular-nums; font-weight: 550; }
+        .split-row.direct .split-name { color: var(--muted); }
+        .split-empty { color: var(--faint); font-size: 12.5px; padding: 8px 0; }
         .exit-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 12px; margin-top: 8px; }
         .exit-card { padding: 12px 14px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface-2); }
         .exit-card .exit-head { display: flex; justify-content: space-between; gap: 8px; font-size: 13px; font-weight: 600; }
@@ -830,6 +844,7 @@
             .kpi:nth-child(even) { border-left: 1px solid var(--line); }
             .kpi:last-child:nth-child(odd) { grid-column: 1 / -1; }
             .notify-grid { grid-template-columns: 1fr; }
+            .split-grid { grid-template-columns: 1fr; gap: 16px; }
             .dash-row, .devices-strip, .device-details-grid, .ikuai-form, .log-toolbar { grid-template-columns: 1fr; }
             .device-head { display: none; }
             .device-main { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px 12px; }
@@ -1010,6 +1025,25 @@
                         </div>
                         <div class="proxy-list" id="proxyHealthList">
                             <div class="health-row"><div><strong>等待数据</strong><span>控制器连通后会显示代理组</span></div></div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="panel mt-3">
+                    <div class="panel-title-row">
+                        <div class="topline-title">
+                            <h2 class="panel-title">今日流量去向</h2>
+                            <span class="panel-sub" id="breakdownNote">按出口节点和命中规则统计，北京时间 0 点清零</span>
+                        </div>
+                    </div>
+                    <div class="split-grid">
+                        <div>
+                            <div class="split-title">按出口</div>
+                            <div class="split-list" id="breakdownExits"><div class="split-empty">正在统计…</div></div>
+                        </div>
+                        <div>
+                            <div class="split-title">按规则</div>
+                            <div class="split-list" id="breakdownRules"><div class="split-empty">正在统计…</div></div>
                         </div>
                     </div>
                 </div>
@@ -1740,6 +1774,38 @@
         }
     }
 
+    // 今日流量去向：条形按下载 / 上传分两段，长度相对于本列最大的一项
+    function renderTrafficBreakdown(breakdown, daily) {
+        const fill = (id, rows, withGroup) => {
+            const box = document.getElementById(id);
+            if (!box) return;
+            if (!rows || !rows.length) {
+                box.innerHTML = '<div class="split-empty">今天还没有统计到流量</div>';
+                return;
+            }
+            const max = Math.max(...rows.map(row => row.total), 1);
+            box.innerHTML = rows.map(row => {
+                const name = withGroup ? row.name : plainGroupName(row.name);
+                const group = withGroup && row.group ? `<small>→ ${escapeHtml(plainGroupName(row.group))}</small>` : '';
+                const downPct = (row.down / max * 100).toFixed(1);
+                const upPct = (row.up / max * 100).toFixed(1);
+                const direct = /^DIRECT\b/.test(row.name) ? ' direct' : '';
+                return `<div class="split-row${direct}" title="${escapeHtml(row.name)}${row.group ? ' → ' + escapeHtml(row.group) : ''} · ↓ ${formatBytesText(row.down)} · ↑ ${formatBytesText(row.up)}">
+                    <div class="split-name">${escapeHtml(name)}${group}</div>
+                    <div class="split-bar"><i class="down" style="width:${downPct}%"></i><i class="up" style="width:${upPct}%"></i></div>
+                    <div class="split-value">${formatBytesText(row.total)}</div>
+                </div>`;
+            }).join('');
+        };
+        fill('breakdownExits', breakdown?.exits, false);
+        fill('breakdownRules', breakdown?.rules, true);
+        const today = daily?.today ? (daily.today.down || 0) + (daily.today.up || 0) : 0;
+        const covered = breakdown?.covered || 0;
+        setText('breakdownNote', today
+            ? `今日共 ${formatBytesText(today)}，其中 ${Math.min(100, Math.round(covered / today * 100))}% 能对应到具体连接（几秒内就结束的短连接采样不到）· 北京时间 0 点清零`
+            : '按出口节点和命中规则统计，北京时间 0 点清零');
+    }
+
     function renderOverview(data) {
         const running = Boolean(data.running);
         const statusDot = document.getElementById('statusDot');
@@ -1772,6 +1838,7 @@
         renderTrafficChart(data.traffic_series);
 
         renderProxyGroups(data.proxy_groups || []);
+        renderTrafficBreakdown(data.traffic_breakdown, data.traffic_daily);
 
         const settings = data.settings || {};
         const settingsList = document.getElementById('settingsHealthList');

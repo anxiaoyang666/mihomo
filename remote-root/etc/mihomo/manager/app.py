@@ -50,7 +50,7 @@ SUBSCRIPTION_STATE_FILE = f"{MIHOMO_DIR}/.last_subscription"
 SUBSCRIPTION_LOG = "/var/log/mihomo-subscription.log"
 GEO_LOG = "/var/log/mihomo-geo.log"
 MANAGER_DIR = f"{MIHOMO_DIR}/manager"
-PANEL_VERSION = "0.1.57"
+PANEL_VERSION = "0.1.58"
 DEFAULT_PANEL_REPO_URL = "https://github.com/anxiaoyang666/mihomo.git"
 DEFAULT_PANEL_BRANCH = "main"
 PANEL_BACKUP_KEEP_COUNT = 3
@@ -1938,7 +1938,11 @@ def is_listener_inbound(connection):
 # 每天按北京时间 0 点换日（四个地点都在国内；容器是 UTC，不能用本地时间），存到 traffic_daily.json
 TRAFFIC_DAILY_FILE = f"{MIHOMO_DIR}/traffic_daily.json"
 TRAFFIC_DAY_OFFSET = 8 * 3600
-TRAFFIC_DAILY = {"date": "", "down": 0, "up": 0, "yesterday": None, "dirty": False}
+TRAFFIC_DAILY = {"date": "", "down": 0, "up": 0, "yesterday": None, "dirty": False, "by_exit": {}, "by_rule": {}}
+# 今日流量按出口 / 规则分开记：每条连接两次采样之间的增量，按它的出口节点和命中规则累加。
+# 5 秒内开始又结束的短连接采样不到，所以分项加起来会比今日总量略少
+TRAFFIC_BREAKDOWN_KEYS = 300
+TRAFFIC_BREAKDOWN_OTHER = "其他"
 
 def traffic_day(now):
     return time.strftime("%Y-%m-%d", time.gmtime(now + TRAFFIC_DAY_OFFSET))
@@ -1951,10 +1955,45 @@ def add_daily_traffic(now, d_down, d_up):
             TRAFFIC_DAILY["yesterday"] = {"date": TRAFFIC_DAILY["date"], "down": TRAFFIC_DAILY["down"], "up": TRAFFIC_DAILY["up"]}
         elif TRAFFIC_DAILY["date"]:
             TRAFFIC_DAILY["yesterday"] = None
-        TRAFFIC_DAILY.update({"date": day, "down": 0, "up": 0})
+        TRAFFIC_DAILY.update({"date": day, "down": 0, "up": 0, "by_exit": {}, "by_rule": {}})
     TRAFFIC_DAILY["down"] += max(0, int(d_down))
     TRAFFIC_DAILY["up"] += max(0, int(d_up))
     TRAFFIC_DAILY["dirty"] = True
+
+def connection_breakdown_keys(conn):
+    """连接的出口节点（chains 第一项）、命中规则（如 RuleSet(google)）和规则指向的策略组（chains 最后一项）。"""
+    chains = conn.get("chains") if isinstance(conn.get("chains"), list) else []
+    exit_name = str(chains[0]) if chains else "DIRECT"
+    group = str(chains[-1]) if chains else ""
+    rule = str(conn.get("rule") or "").strip() or "未知规则"
+    payload = str(conn.get("rulePayload") or "").strip()
+    rule_label = f"{rule}({payload})" if payload else rule
+    if is_listener_inbound(conn):
+        rule_label, group = "其他站点经隧道访问本地", ""
+    return exit_name[:80], rule_label[:120], group[:80]
+
+def add_breakdown(bucket, key, d_down, d_up, group=None):
+    """调用方持有 TRAFFIC_LOCK。条目太多时新键并进“其他”，免得常年累积撑大文件。"""
+    if key not in bucket and len(bucket) >= TRAFFIC_BREAKDOWN_KEYS:
+        key = TRAFFIC_BREAKDOWN_OTHER
+    entry = bucket.setdefault(key, [0, 0, ""] if group is not None else [0, 0])
+    entry[0] += d_down
+    entry[1] += d_up
+    if group:
+        entry[2] = group
+
+def breakdown_rows(bucket, limit):
+    rows = [{"name": key, "down": value[0], "up": value[1], "total": value[0] + value[1],
+             **({"group": value[2]} if len(value) > 2 else {})} for key, value in bucket.items()]
+    rows.sort(key=lambda row: row["total"], reverse=True)
+    return rows[:limit]
+
+def traffic_breakdown(limit=12):
+    with TRAFFIC_LOCK:
+        exits = breakdown_rows(TRAFFIC_DAILY.get("by_exit") or {}, limit)
+        rules = breakdown_rows(TRAFFIC_DAILY.get("by_rule") or {}, limit)
+        covered = sum(v[0] + v[1] for v in (TRAFFIC_DAILY.get("by_exit") or {}).values())
+    return {"exits": exits, "rules": rules, "covered": covered}
 
 def traffic_daily_summary(now=None):
     now = time.time() if now is None else now
@@ -1978,8 +2017,20 @@ def load_traffic_daily(path=None):
     else:
         yesterday = None
     with TRAFFIC_LOCK:
+        def clean_bucket(value, width):
+            if not isinstance(value, dict):
+                return {}
+            out = {}
+            for key, item in list(value.items())[:TRAFFIC_BREAKDOWN_KEYS]:
+                if isinstance(item, list) and len(item) >= 2:
+                    row = [first_number(item[0]), first_number(item[1])]
+                    if width == 3:
+                        row.append(str(item[2])[:80] if len(item) > 2 else "")
+                    out[str(key)[:120]] = row
+            return out
         TRAFFIC_DAILY.update({"date": data["date"], "down": first_number(data.get("down")), "up": first_number(data.get("up")),
-                              "yesterday": yesterday, "dirty": False})
+                              "yesterday": yesterday, "dirty": False,
+                              "by_exit": clean_bucket(data.get("by_exit"), 2), "by_rule": clean_bucket(data.get("by_rule"), 3)})
     device_today = data.get("device_today")
     if isinstance(device_today, dict):
         def clean(value):
@@ -1994,7 +2045,7 @@ def save_traffic_daily(path=None):
     with TRAFFIC_LOCK:
         if not TRAFFIC_DAILY["date"]:
             return False
-        payload = {k: TRAFFIC_DAILY[k] for k in ("date", "down", "up", "yesterday")}
+        payload = {k: TRAFFIC_DAILY[k] for k in ("date", "down", "up", "yesterday", "by_exit", "by_rule")}
         TRAFFIC_DAILY["dirty"] = False
     with IKUAI_LOCK:
         if IKUAI_TODAY["date"]:
@@ -2027,9 +2078,14 @@ def record_traffic_sample(data, now=None):
     up = first_number(data.get("uploadTotal"))
     connections = data.get("connections") if isinstance(data.get("connections"), list) else []
     inbound = {}
+    conns = {}
     for conn in connections:
-        if is_listener_inbound(conn) and conn.get("id"):
-            inbound[conn["id"]] = (first_number(conn.get("upload")), first_number(conn.get("download")))
+        if not conn.get("id"):
+            continue
+        pair = (first_number(conn.get("upload")), first_number(conn.get("download")))
+        conns[conn["id"]] = pair
+        if is_listener_inbound(conn):
+            inbound[conn["id"]] = pair
     with TRAFFIC_LOCK:
         prev_at = TRAFFIC_PREV.get("at")
         elapsed = now - prev_at if prev_at else 0
@@ -2046,11 +2102,27 @@ def record_traffic_sample(data, now=None):
             site_down = max(0, down - base_down - in_down + in_up)
             site_up = max(0, up - base_up - in_up + in_down)
             add_daily_traffic(now, site_down, site_up)
+            # 分项：每条连接的增量记到它的出口和规则上（方向同样按本地点算）
+            prev_conns = {} if restarted else (TRAFFIC_PREV.get("conns") or {})
+            for conn in connections:
+                cid = conn.get("id")
+                if not cid:
+                    continue
+                c_up, c_down = conns[cid]
+                p_up, p_down = prev_conns.get(cid, (0, 0))
+                d_up, d_down = max(0, c_up - p_up), max(0, c_down - p_down)
+                if is_listener_inbound(conn):
+                    d_up, d_down = d_down, d_up
+                if not (d_up or d_down):
+                    continue
+                exit_name, rule_label, group = connection_breakdown_keys(conn)
+                add_breakdown(TRAFFIC_DAILY["by_exit"], exit_name, d_down, d_up)
+                add_breakdown(TRAFFIC_DAILY["by_rule"], rule_label, d_down, d_up, group)
             # 曲线只画正常间隔的点；重启或控制器断过的那一段速率算不准，不画
             if not restarted and 0 < elapsed <= DEVICE_SAMPLE_INTERVAL * 6:
                 TRAFFIC_SERIES.append({"t": int(now), "down": int(site_down / elapsed), "up": int(site_up / elapsed)})
                 del TRAFFIC_SERIES[:-TRAFFIC_SERIES_POINTS]
-        TRAFFIC_PREV.update({"at": now, "down": down, "up": up, "inbound": inbound})
+        TRAFFIC_PREV.update({"at": now, "down": down, "up": up, "inbound": inbound, "conns": conns})
 
 def traffic_series():
     with TRAFFIC_LOCK:
@@ -2971,6 +3043,7 @@ def collect_overview():
         "proxy_groups": proxy_groups,
         "traffic_series": traffic_series(),
         "traffic_daily": traffic_daily_summary(),
+        "traffic_breakdown": traffic_breakdown(),
         "devices": devices_summary(),
         "log_levels": log_level_summary(),
         "settings": {
