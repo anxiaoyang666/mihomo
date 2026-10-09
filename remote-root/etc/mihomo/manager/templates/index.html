@@ -1033,7 +1033,7 @@
                     <div class="panel-title-row">
                         <div class="topline-title">
                             <h2 class="panel-title">今日流量去向</h2>
-                            <span class="panel-sub" id="breakdownNote">按出口节点和命中规则统计，北京时间 0 点清零</span>
+                            <span class="panel-sub" id="breakdownNote">0 点清零</span>
                         </div>
                     </div>
                     <div class="split-grid">
@@ -1804,11 +1804,13 @@
         const measured = breakdown?.measured || 0;
         const since = breakdown?.since ? new Date(breakdown.since * 1000) : null;
         const fromMidnight = since && since.getHours() === 0 && since.getMinutes() < 5;
-        const parts = [];
-        if (since && !fromMidnight) parts.push(`从今天 ${pad2(since.getHours())}:${pad2(since.getMinutes())} 开始统计`);
-        if (measured) parts.push(`${Math.min(100, Math.round(covered / measured * 100))}% 的流量能对应到具体连接（几秒内就结束的短连接采样不到）`);
-        parts.push('北京时间 0 点清零');
-        setText('breakdownNote', parts.join(' · '));
+        const note = document.getElementById('breakdownNote');
+        if (note) {
+            note.textContent = since && !fromMidnight ? `从 ${pad2(since.getHours())}:${pad2(since.getMinutes())} 起 · 0 点清零` : '0 点清零';
+            // 细节放在悬停提示里，不常驻页面
+            note.title = '按每条连接的出口节点和命中规则统计，北京时间 0 点清零。'
+                + (measured ? `今天约 ${Math.min(100, Math.round(covered / measured * 100))}% 的流量能对应到具体连接，几秒内就结束的短连接采样不到。` : '');
+        }
     }
 
     function renderOverview(data) {
