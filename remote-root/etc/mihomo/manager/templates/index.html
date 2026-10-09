@@ -1799,11 +1799,16 @@
         };
         fill('breakdownExits', breakdown?.exits, false);
         fill('breakdownRules', breakdown?.rules, true);
-        const today = daily?.today ? (daily.today.down || 0) + (daily.today.up || 0) : 0;
+        // 升级当天分项不是从 0 点开始统计的：注明起点，覆盖率只拿起点之后的流量算
         const covered = breakdown?.covered || 0;
-        setText('breakdownNote', today
-            ? `今日共 ${formatBytesText(today)}，其中 ${Math.min(100, Math.round(covered / today * 100))}% 能对应到具体连接（几秒内就结束的短连接采样不到）· 北京时间 0 点清零`
-            : '按出口节点和命中规则统计，北京时间 0 点清零');
+        const measured = breakdown?.measured || 0;
+        const since = breakdown?.since ? new Date(breakdown.since * 1000) : null;
+        const fromMidnight = since && since.getHours() === 0 && since.getMinutes() < 5;
+        const parts = [];
+        if (since && !fromMidnight) parts.push(`从今天 ${pad2(since.getHours())}:${pad2(since.getMinutes())} 开始统计`);
+        if (measured) parts.push(`${Math.min(100, Math.round(covered / measured * 100))}% 的流量能对应到具体连接（几秒内就结束的短连接采样不到）`);
+        parts.push('北京时间 0 点清零');
+        setText('breakdownNote', parts.join(' · '));
     }
 
     function renderOverview(data) {

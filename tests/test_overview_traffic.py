@@ -142,6 +142,8 @@ class TrafficSeriesTest(unittest.TestCase):
         self.assertEqual(rules["RuleSet(proxy)"]["group"], "♻️ 自动选择")
         self.assertIn("其他站点经隧道访问本地", rules)
         self.assertEqual(result["covered"], 5100 + 3400 + 2000)
+        self.assertEqual(result["since"], 105)
+        self.assertEqual(result["measured"], 9000 + 1500, "覆盖率只按开始统计之后的流量算")
         # 第二天清零
         app.add_daily_traffic(105 + 86400, 0, 0)
         self.assertEqual(app.traffic_breakdown()["exits"], [])

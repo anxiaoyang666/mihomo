@@ -50,7 +50,7 @@ SUBSCRIPTION_STATE_FILE = f"{MIHOMO_DIR}/.last_subscription"
 SUBSCRIPTION_LOG = "/var/log/mihomo-subscription.log"
 GEO_LOG = "/var/log/mihomo-geo.log"
 MANAGER_DIR = f"{MIHOMO_DIR}/manager"
-PANEL_VERSION = "0.1.58"
+PANEL_VERSION = "0.1.59"
 DEFAULT_PANEL_REPO_URL = "https://github.com/anxiaoyang666/mihomo.git"
 DEFAULT_PANEL_BRANCH = "main"
 PANEL_BACKUP_KEEP_COUNT = 3
@@ -1955,7 +1955,8 @@ def add_daily_traffic(now, d_down, d_up):
             TRAFFIC_DAILY["yesterday"] = {"date": TRAFFIC_DAILY["date"], "down": TRAFFIC_DAILY["down"], "up": TRAFFIC_DAILY["up"]}
         elif TRAFFIC_DAILY["date"]:
             TRAFFIC_DAILY["yesterday"] = None
-        TRAFFIC_DAILY.update({"date": day, "down": 0, "up": 0, "by_exit": {}, "by_rule": {}})
+        TRAFFIC_DAILY.update({"date": day, "down": 0, "up": 0, "by_exit": {}, "by_rule": {},
+                              "breakdown_since": 0, "breakdown_base": 0})
     TRAFFIC_DAILY["down"] += max(0, int(d_down))
     TRAFFIC_DAILY["up"] += max(0, int(d_up))
     TRAFFIC_DAILY["dirty"] = True
@@ -1993,7 +1994,9 @@ def traffic_breakdown(limit=12):
         exits = breakdown_rows(TRAFFIC_DAILY.get("by_exit") or {}, limit)
         rules = breakdown_rows(TRAFFIC_DAILY.get("by_rule") or {}, limit)
         covered = sum(v[0] + v[1] for v in (TRAFFIC_DAILY.get("by_exit") or {}).values())
-    return {"exits": exits, "rules": rules, "covered": covered}
+        since = TRAFFIC_DAILY.get("breakdown_since") or 0
+        measured = max(0, TRAFFIC_DAILY["down"] + TRAFFIC_DAILY["up"] - (TRAFFIC_DAILY.get("breakdown_base") or 0))
+    return {"exits": exits, "rules": rules, "covered": covered, "since": since, "measured": measured}
 
 def traffic_daily_summary(now=None):
     now = time.time() if now is None else now
@@ -2030,7 +2033,9 @@ def load_traffic_daily(path=None):
             return out
         TRAFFIC_DAILY.update({"date": data["date"], "down": first_number(data.get("down")), "up": first_number(data.get("up")),
                               "yesterday": yesterday, "dirty": False,
-                              "by_exit": clean_bucket(data.get("by_exit"), 2), "by_rule": clean_bucket(data.get("by_rule"), 3)})
+                              "by_exit": clean_bucket(data.get("by_exit"), 2), "by_rule": clean_bucket(data.get("by_rule"), 3),
+                              "breakdown_since": first_number(data.get("breakdown_since")),
+                              "breakdown_base": first_number(data.get("breakdown_base"))})
     device_today = data.get("device_today")
     if isinstance(device_today, dict):
         def clean(value):
@@ -2045,7 +2050,7 @@ def save_traffic_daily(path=None):
     with TRAFFIC_LOCK:
         if not TRAFFIC_DAILY["date"]:
             return False
-        payload = {k: TRAFFIC_DAILY[k] for k in ("date", "down", "up", "yesterday", "by_exit", "by_rule")}
+        payload = {k: TRAFFIC_DAILY.get(k) for k in ("date", "down", "up", "yesterday", "by_exit", "by_rule", "breakdown_since", "breakdown_base")}
         TRAFFIC_DAILY["dirty"] = False
     with IKUAI_LOCK:
         if IKUAI_TODAY["date"]:
@@ -2102,7 +2107,11 @@ def record_traffic_sample(data, now=None):
             site_down = max(0, down - base_down - in_down + in_up)
             site_up = max(0, up - base_up - in_up + in_down)
             add_daily_traffic(now, site_down, site_up)
-            # 分项：每条连接的增量记到它的出口和规则上（方向同样按本地点算）
+            # 分项：每条连接的增量记到它的出口和规则上（方向同样按本地点算）。
+            # 记下分项从什么时候、今日总量多少时开始统计（升级当天不是从 0 点开始），覆盖率按这之后的流量算
+            if not TRAFFIC_DAILY.get("breakdown_since"):
+                TRAFFIC_DAILY["breakdown_since"] = int(now)
+                TRAFFIC_DAILY["breakdown_base"] = TRAFFIC_DAILY["down"] + TRAFFIC_DAILY["up"] - site_down - site_up
             prev_conns = {} if restarted else (TRAFFIC_PREV.get("conns") or {})
             for conn in connections:
                 cid = conn.get("id")
