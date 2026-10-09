@@ -50,7 +50,7 @@ SUBSCRIPTION_STATE_FILE = f"{MIHOMO_DIR}/.last_subscription"
 SUBSCRIPTION_LOG = "/var/log/mihomo-subscription.log"
 GEO_LOG = "/var/log/mihomo-geo.log"
 MANAGER_DIR = f"{MIHOMO_DIR}/manager"
-PANEL_VERSION = "0.1.52"
+PANEL_VERSION = "0.1.53"
 DEFAULT_PANEL_REPO_URL = "https://github.com/anxiaoyang666/mihomo.git"
 DEFAULT_PANEL_BRANCH = "main"
 PANEL_BACKUP_KEEP_COUNT = 3
@@ -1980,11 +1980,13 @@ def load_traffic_daily(path=None):
     with TRAFFIC_LOCK:
         TRAFFIC_DAILY.update({"date": data["date"], "down": first_number(data.get("down")), "up": first_number(data.get("up")),
                               "yesterday": yesterday, "dirty": False})
-    device_base = data.get("device_base")
-    if isinstance(device_base, dict) and isinstance(device_base.get("base"), dict):
-        base = {str(k)[:64]: first_number(v) for k, v in list(device_base["base"].items())[:4096]}
+    device_today = data.get("device_today")
+    if isinstance(device_today, dict):
+        def clean(value):
+            return {str(k)[:64]: first_number(v) for k, v in list(value.items())[:4096]} if isinstance(value, dict) else {}
         with IKUAI_LOCK:
-            IKUAI_TODAY.update({"date": str(device_base.get("date") or "")[:10], "base": base})
+            IKUAI_TODAY.update({"date": str(device_today.get("date") or "")[:10],
+                                "last": clean(device_today.get("last")), "today": clean(device_today.get("today"))})
     return True
 
 def save_traffic_daily(path=None):
@@ -1996,7 +1998,7 @@ def save_traffic_daily(path=None):
         TRAFFIC_DAILY["dirty"] = False
     with IKUAI_LOCK:
         if IKUAI_TODAY["date"]:
-            payload["device_base"] = {"date": IKUAI_TODAY["date"], "base": dict(IKUAI_TODAY["base"])}
+            payload["device_today"] = {"date": IKUAI_TODAY["date"], "last": dict(IKUAI_TODAY["last"]), "today": dict(IKUAI_TODAY["today"])}
     text = json.dumps(payload, separators=(",", ":"))
     directory = os.path.dirname(path) or "."
     os.makedirs(directory, exist_ok=True)
@@ -2490,9 +2492,12 @@ def ikuai_record_error(key, message, now):
         IKUAI_STATE[key] = str(message)[:300]
         IKUAI_STATE["error_at"] = now
 
-# 爱快只给离线终端填 today_total，在线终端一直是 0。面板自己记每台终端当天第一次看到时的累计流量，
-# 今日流量 = 现在的累计 - 这个基准（北京时间 0 点换日，和概览的今日流量一致），基准随 traffic_daily.json 保存
-IKUAI_TODAY = {"date": "", "base": {}}
+# 爱快只给离线终端填 today_total，在线终端一直是 0。面板每次拉到在线终端时，把两次读数之间的增量累加成
+# 今日流量（北京时间 0 点换日，和概览的今日流量一致），随 traffic_daily.json 保存。
+# 爱快偶尔会把某台终端的累计值报成 0 再恢复，所以：读数变小只重新对齐、不累加；单次增量大得不可能
+# （超过 IKUAI_TODAY_MAX_STEP）也丢弃，免得一次异常把几百 GB 的累计值算进今天。
+IKUAI_TODAY = {"date": "", "last": {}, "today": {}}
+IKUAI_TODAY_MAX_STEP = 2 * 1024 ** 3
 
 def ikuai_client_key(client):
     return str(client.get("mac") or "").strip().lower() or str(client.get("ip_addr") or "").strip()
@@ -2501,21 +2506,21 @@ def ikuai_client_total(client):
     return max(0, first_number(client.get("total_up"))) + max(0, first_number(client.get("total_down")))
 
 def update_ikuai_today(clients, now):
-    """调用方持有 IKUAI_LOCK。换日时把基准换成当前累计；累计变小（路由器重启清零）时基准归零。"""
+    """调用方持有 IKUAI_LOCK。"""
     day = traffic_day(now)
     if IKUAI_TODAY["date"] != day:
         IKUAI_TODAY["date"] = day
-        IKUAI_TODAY["base"] = {}
-    base = IKUAI_TODAY["base"]
+        IKUAI_TODAY["today"] = {}
+    last, today = IKUAI_TODAY["last"], IKUAI_TODAY["today"]
     for client in clients:
         key = ikuai_client_key(client)
         if not key:
             continue
         total = ikuai_client_total(client)
-        if key not in base:
-            base[key] = total
-        elif total < base[key]:
-            base[key] = 0
+        previous = last.get(key)
+        if previous is not None and total >= previous and total - previous <= IKUAI_TODAY_MAX_STEP:
+            today[key] = today.get(key, 0) + (total - previous)
+        last[key] = total
     with TRAFFIC_LOCK:
         TRAFFIC_DAILY["dirty"] = True
 
@@ -2524,9 +2529,7 @@ def ikuai_today_total(client, now):
     reported = max(0, first_number(client.get("today_total")))
     if IKUAI_TODAY["date"] != traffic_day(now):
         return reported
-    base = IKUAI_TODAY["base"].get(ikuai_client_key(client))
-    counted = ikuai_client_total(client) - base if base is not None else 0
-    return max(reported, counted, 0)
+    return max(reported, IKUAI_TODAY["today"].get(ikuai_client_key(client), 0))
 
 def poll_ikuai(now=None, force_slow=False, settings=None):
     """采样线程每轮调一次：在线终端每 IKUAI_POLL_INTERVAL 秒、DHCP 和离线终端每 IKUAI_SLOW_INTERVAL 秒。

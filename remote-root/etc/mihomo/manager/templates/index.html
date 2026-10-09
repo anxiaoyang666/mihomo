@@ -633,6 +633,24 @@
         .confirm-dialog-actions { display: flex; justify-content: flex-end; gap: 8px; padding: 14px 20px 18px; }
 
         /* ===== 设备页 ===== */
+        .devices-kpis { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+        .device-help { margin: 2px 0 10px; }
+        .device-help summary { color: var(--faint); font-size: 12px; }
+        .device-help summary:hover { color: var(--text); }
+        .device-help .device-explainer { margin: 8px 0 0; }
+        .device-head, .device-main {
+            display: grid;
+            grid-template-columns: minmax(240px, 2.2fr) minmax(170px, 1.2fr) repeat(4, minmax(84px, .7fr));
+            gap: 16px;
+            align-items: center;
+        }
+        .device-head { padding: 10px 8px; border-bottom: 1px solid var(--line); color: var(--faint); font-size: 12px; }
+        .device-head .num, .device-num { text-align: right; }
+        .device-num { font-size: 13px; font-weight: 550; font-variant-numeric: tabular-nums; white-space: nowrap; }
+        .device-num.zero { color: var(--faint); font-weight: 400; }
+        .device-addr { min-width: 0; font-size: 13px; font-variant-numeric: tabular-nums; }
+        .device-addr span { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .device-addr .device-mac { margin: 2px 0 0; }
         .devices-strip { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 0; margin-bottom: 16px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--surface); box-shadow: var(--shadow); }
         .devices-strip .metric-card { border: 0; border-left: 1px solid var(--line); border-radius: 0; box-shadow: none; background: transparent; }
         .devices-strip .metric-card:first-child { border-left: 0; }
@@ -641,18 +659,23 @@
         .device-sort { width: auto; min-height: 32px; font-size: 12.5px; }
         .device-empty { margin-top: 12px; padding: 28px 12px; text-align: center; color: var(--faint); font-size: 13px; border: 1px dashed var(--line-2); border-radius: var(--radius-sm); }
         .device-list { display: grid; margin-top: 10px; }
-        .device-row { padding: 15px 8px; border-top: 1px solid var(--line); }
+        .device-row { padding: 14px 8px; border-top: 1px solid var(--line); }
         .device-row:first-child { border-top: 0; }
+        .device-row .device-details { margin-left: 17px; }
+        .device-row .device-details summary { list-style: none; display: inline-flex; align-items: center; gap: 4px; }
+        .device-row .device-details summary::-webkit-details-marker { display: none; }
+        .device-row .device-details summary::before { content: '\25B8'; font-size: 10px; transition: transform .15s; }
+        .device-row .device-details[open] summary::before { transform: rotate(90deg); }
+        .device-note-field { display: grid; gap: 6px; }
         .device-row:hover { background: color-mix(in srgb, var(--surface-2) 60%, transparent); }
         .device-row.offline { opacity: .66; }
         .device-row.neighbour { opacity: .55; }
         .device-row.neighbour:focus-within { opacity: 1; }
         .device-explainer { margin: 0 0 14px; color: var(--muted); font-size: 12.5px; line-height: 1.65; }
-        .device-main { display: grid; grid-template-columns: minmax(0, 1.3fr) minmax(160px, .75fr) minmax(0, 1.6fr); gap: 14px; align-items: center; }
         .device-identity { display: flex; align-items: flex-start; gap: 10px; min-width: 0; }
         .device-identity .state-dot { margin-top: 7px; }
         .device-ip { display: block; font-size: 14px; font-weight: 600; overflow-wrap: anywhere; }
-        .device-mac { margin-left: 6px; color: var(--faint); font-size: 11px; font-weight: 400; font-family: var(--mono); }
+        .device-mac { color: var(--faint); font-size: 11px; font-weight: 400; font-family: var(--mono); }
         .device-tag { margin-left: 6px; min-height: 18px; padding: 0 7px; font-size: 10.5px; vertical-align: middle; }
         .device-tag.warn { background: var(--warning-soft); color: var(--warning); }
         .device-tag.inbound, .device-tag.wifi { background: var(--up-soft); color: var(--up); }
@@ -686,7 +709,7 @@
         .device-household { margin-bottom: 16px; }
         .device-household .device-stats { margin-top: 10px; }
         .device-name-sub { display: block; margin-top: 1px; color: var(--faint); font-size: 11px; font-family: var(--mono); overflow-wrap: anywhere; }
-        .device-proxy-line { margin-top: 6px; font-size: 12px; color: var(--up); overflow-wrap: anywhere; }
+        .device-proxy-line { margin: 6px 0 0 17px; font-size: 12px; color: var(--up); overflow-wrap: anywhere; }
         .device-apps { display: grid; gap: 6px; margin-top: 6px; font-size: 12px; }
         .device-app { display: grid; grid-template-columns: minmax(80px, 1fr) minmax(0, 2fr) auto; gap: 8px; align-items: center; }
         .device-app-name { min-width: 0; overflow-wrap: anywhere; }
@@ -765,7 +788,14 @@
             .kpi:nth-child(-n+2) { border-top: 0; }
             .kpi:nth-child(even) { border-left: 1px solid var(--line); }
             .kpi:last-child:nth-child(odd) { grid-column: 1 / -1; }
-            .dash-row, .devices-strip, .device-main, .device-details-grid, .ikuai-form, .log-toolbar { grid-template-columns: 1fr; }
+            .dash-row, .devices-strip, .device-details-grid, .ikuai-form, .log-toolbar { grid-template-columns: 1fr; }
+            .device-head { display: none; }
+            .device-main { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px 12px; }
+            .device-main .device-identity, .device-main .device-addr { grid-column: 1 / -1; }
+            .device-main .device-addr { padding-left: 17px; }
+            .device-num { text-align: left; padding-left: 17px; }
+            .device-num::before { content: attr(data-label); display: block; color: var(--faint); font-size: 11px; font-weight: 400; }
+            .devices-kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); }
             .devices-strip .metric-card { border-left: 0; border-top: 1px solid var(--line); }
             .devices-strip .metric-card:first-child { border-top: 0; }
             .device-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
@@ -988,16 +1018,17 @@
 
             <section class="tab-pane fade" id="tab-devices">
                 <div class="topline">
-                    <div>
+                    <div class="topline-title">
                         <h1 class="page-title">设备</h1>
+                        <span class="status-chip" id="deviceDataSource">数据来源：--</span>
+                        <span class="status-chip" id="deviceSampledAt">等待首次采样</span>
                     </div>
                     <div class="top-actions">
+                        <button class="soft-button" type="button" onclick="toggleIkuaiCard()"><i class="bi bi-router"></i> 爱快设置</button>
                         <button class="soft-button" onclick="confirmResetDevices(this)"><i class="bi bi-eraser"></i> 清零统计</button>
                         <button class="action-button primary" onclick="loadDevices(this)"><i class="bi bi-arrow-clockwise"></i> 刷新</button>
                     </div>
                 </div>
-
-                <div class="device-source" id="deviceDataSource">数据来源：--</div>
 
                 <details class="panel ikuai-card" id="ikuaiCard">
                     <summary>爱快数据源 <span class="small-pill device-tag muted" id="ikuaiCardBadge">未配置</span></summary>
@@ -1020,28 +1051,26 @@
                     <div class="ikuai-status" id="ikuaiStatus">--</div>
                 </details>
 
-                <p class="device-explainer" id="deviceExplainer">这里只统计经过本网关的连接。设备直连国内站点、或路由器做了 NAT 再转发的流量，分别不会出现或会合并显示在上级路由名下。同网段通过 ARP 看到但没有流量经过网关的设备以灰色列出。只覆盖网关直连的网段。</p>
-
-                <div class="control-strip devices-strip">
-                    <div class="metric-card">
-                        <div class="metric-label">局域网设备</div>
-                        <div class="metric-value"><span id="deviceOnlineCount">--</span><span class="metric-unit">在线 / 共 <span id="deviceTotalCount">--</span> 台</span></div>
-                        <div class="metric-foot" id="deviceSampledAt">等待首次采样</div>
+                <div class="kpi-strip devices-kpis">
+                    <div class="kpi">
+                        <div class="metric-label">在线设备</div>
+                        <div class="metric-value"><span id="deviceOnlineCount">--</span><span class="metric-unit">/ <span id="deviceTotalCount">--</span> 台</span></div>
+                        <div class="metric-foot">局域网终端</div>
                     </div>
-                    <div class="metric-card">
-                        <div class="metric-label">实时下行</div>
+                    <div class="kpi">
+                        <div class="metric-label"><i class="swatch down"></i>实时下行</div>
                         <div class="metric-value"><span id="deviceRateDown">--</span><span class="metric-unit" id="deviceRateDownUnit">B/s</span></div>
                         <div class="metric-foot" id="deviceTotalDown">累计 --</div>
                     </div>
-                    <div class="metric-card">
-                        <div class="metric-label">实时上行</div>
+                    <div class="kpi">
+                        <div class="metric-label"><i class="swatch up"></i>实时上行</div>
                         <div class="metric-value"><span id="deviceRateUp">--</span><span class="metric-unit" id="deviceRateUpUnit">B/s</span></div>
                         <div class="metric-foot" id="deviceTotalUp">累计 --</div>
                     </div>
-                    <div class="metric-card">
-                        <div class="metric-label">控制器</div>
-                        <div class="metric-value device-controller-state" id="deviceControllerState">检测中</div>
-                        <div class="metric-foot" id="deviceControllerDetail">--</div>
+                    <div class="kpi">
+                        <div class="metric-label">今日合计</div>
+                        <div class="metric-value"><span id="deviceTodayTotal">--</span><span class="metric-unit" id="deviceTodayUnit"></span></div>
+                        <div class="metric-foot"><span id="deviceControllerState">检测中</span><span id="deviceControllerDetail" hidden></span></div>
                     </div>
                 </div>
 
@@ -1049,9 +1078,9 @@
 
                 <div class="panel">
                     <div class="panel-title-row">
-                        <div>
+                        <div class="topline-title">
                             <h2 class="panel-title">设备列表</h2>
-                            <div class="text-muted small mt-1" id="deviceListHint">按连接来源 IP 聚合，90 秒内有连接算在线；时间按浏览器时区显示</div>
+                            <span class="panel-sub" id="deviceListHint">按连接来源 IP 聚合，90 秒内有连接算在线</span>
                         </div>
                         <select class="form-select device-sort" id="deviceSort" onchange="renderDevices()" aria-label="设备排序">
                             <option value="default">在线 › 速率 › 最近活动</option>
@@ -1061,6 +1090,13 @@
                             <option value="last_seen">最近活动</option>
                             <option value="ip">IP 地址</option>
                         </select>
+                    </div>
+                    <details class="device-help">
+                        <summary>这些数字怎么来的</summary>
+                        <p class="device-explainer" id="deviceExplainer">这里只统计经过本网关的连接。设备直连国内站点、或路由器做了 NAT 再转发的流量，分别不会出现或会合并显示在上级路由名下。同网段通过 ARP 看到但没有流量经过网关的设备以灰色列出。只覆盖网关直连的网段。</p>
+                    </details>
+                    <div class="device-head" aria-hidden="true">
+                        <span>设备</span><span>地址</span><span class="num">↓ 实时</span><span class="num">↑ 实时</span><span class="num" id="deviceHeadCol3">今日</span><span class="num" id="deviceHeadCol4">累计</span>
                     </div>
                     <div class="device-empty" id="deviceEmpty">还没有采样到设备流量。面板启动后每 5 秒从 mihomo 控制器读取连接。</div>
                     <div class="device-list" id="deviceList"></div>
@@ -1877,32 +1913,36 @@
         const proxyLine = proxy
             ? `<div class="device-proxy-line">经 mihomo 代理：↓ ${formatRate(proxy.rate_down)} · ↑ ${formatRate(proxy.rate_up)} · 累计 ↓ ${formatBytesText(proxy.download)} ↑ ${formatBytesText(proxy.upload)} · ${proxy.active_connections || 0} 个连接</div>`
             : '';
+        const noteInput = `<input class="form-control device-note-input" placeholder="例如 客厅电视（会作为名称显示）" maxlength="80" value="${escapeHtml(device.note || '')}" data-original="${escapeHtml(device.note || '')}" aria-label="设备备注">`;
         return `
             <div class="device-main">
                 <div class="device-identity">
                     <span class="state-dot ${online ? 'running' : 'stopped'}" title="${online ? '在线' : '离线'}"></span>
                     <div class="min-w-0">
                         <strong class="device-ip">${escapeHtml(device.name || device.ip)}${ikuaiDeviceTags(device)}</strong>
-                        <span class="device-name-sub">${escapeHtml(sub)}</span>
                         <span class="device-meta">${escapeHtml(meta.join(' · '))}</span>
                     </div>
                 </div>
-                <div class="device-note"><input class="form-control device-note-input" placeholder="备注（优先作为名称）" maxlength="80" value="${escapeHtml(device.note || '')}" data-original="${escapeHtml(device.note || '')}" aria-label="设备备注"></div>
-                <div class="device-stats">
-                    <div><span>↓ 实时</span><strong>${formatRate(device.rate_down)}</strong></div>
-                    <div><span>↑ 实时</span><strong>${formatRate(device.rate_up)}</strong></div>
-                    <div><span>今日</span><strong>${formatBytesText(device.today_total)}</strong></div>
-                    <div><span>累计 ↓/↑</span><strong title="↓ ${formatBytesText(device.total_down)} · ↑ ${formatBytesText(device.total_up)}">${formatBytesText((device.total_down || 0) + (device.total_up || 0))}</strong></div>
-                </div>
+                <div class="device-addr"><span>${escapeHtml(device.ip)}</span>${device.mac ? `<span class="device-mac">${escapeHtml(device.mac)}</span>` : ''}</div>
+                ${deviceNum('↓ 实时', formatRate(device.rate_down), device.rate_down)}
+                ${deviceNum('↑ 实时', formatRate(device.rate_up), device.rate_up)}
+                ${deviceNum('今日', formatBytesText(device.today_total), device.today_total)}
+                ${deviceNum('累计', formatBytesText((device.total_down || 0) + (device.total_up || 0)), (device.total_down || 0) + (device.total_up || 0), `↓ ${formatBytesText(device.total_down)} · ↑ ${formatBytesText(device.total_up)}`)}
             </div>
             ${proxyLine}
             <details class="device-details" data-apps-ip="${escapeHtml(device.ip)}"${deviceDetailsOpen.has(device.ip) ? ' open' : ''}>
-                <summary>应用流量（爱快）${proxy ? ' · 代理域名与出口' : ''}</summary>
+                <summary>备注与应用流量${proxy ? ' · 代理域名与出口' : ''}</summary>
                 <div class="device-details-grid">
-                    <div><div class="device-sub-title">应用流量 Top 8（按累计）</div><div class="device-apps">${renderDeviceApps(device.ip)}</div></div>
+                    <div class="device-note-field"><div class="device-sub-title">备注（优先作为名称显示）</div>${noteInput}</div>
+                    <div><div class="device-sub-title">应用流量 Top 8（按累计，来自爱快）</div><div class="device-apps">${renderDeviceApps(device.ip)}</div></div>
                     ${proxy ? proxyLists(proxy) : ''}
                 </div>
             </details>`;
+    }
+
+    // 设备表的数字列：手机上没有表头，靠 data-label 显示列名；为 0 时淡一点
+    function deviceNum(label, text, raw, title = '') {
+        return `<div class="device-num${Number(raw || 0) ? '' : ' zero'}" data-label="${escapeHtml(label)}"${title ? ` title="${escapeHtml(title)}"` : ''}>${text}</div>`;
     }
 
     // 展开时才向爱快要应用统计；同一 IP 30 秒内不重复请求
@@ -1969,23 +2009,22 @@
                 <div class="device-identity">
                     ${dot}
                     <div class="min-w-0">
-                        <strong class="device-ip">${escapeHtml(device.ip)}${device.mac ? `<span class="device-mac">${escapeHtml(device.mac)}</span>` : ''}${deviceTags(device)}</strong>
+                        <strong class="device-ip">${escapeHtml(device.note || device.ip)}${deviceTags(device)}</strong>
                         <span class="device-meta">${escapeHtml(meta.join(' · '))}</span>
                     </div>
                 </div>
-                <div class="device-note">${noteField}</div>
-                <div class="device-stats">
-                    <div><span>↓ 实时</span><strong>${formatRate(device.rate_down)}</strong></div>
-                    <div><span>↑ 实时</span><strong>${formatRate(device.rate_up)}</strong></div>
-                    <div><span>↓ 累计</span><strong>${formatBytesText(device.download_total)}</strong></div>
-                    <div><span>↑ 累计</span><strong>${formatBytesText(device.upload_total)}</strong></div>
-                </div>
+                <div class="device-addr"><span>${escapeHtml(device.ip)}</span>${device.mac ? `<span class="device-mac">${escapeHtml(device.mac)}</span>` : ''}</div>
+                ${deviceNum('↓ 实时', formatRate(device.rate_down), device.rate_down)}
+                ${deviceNum('↑ 实时', formatRate(device.rate_up), device.rate_up)}
+                ${deviceNum('↓ 累计', formatBytesText(device.download_total), device.download_total)}
+                ${deviceNum('↑ 累计', formatBytesText(device.upload_total), device.upload_total)}
             </div>
             <details class="device-details"${deviceDetailsOpen.has(device.ip) ? ' open' : ''}>
-                <summary>域名与出口 · 首次发现 ${stamp(device.first_seen)} · 最近活动 ${stamp(device.last_seen)}</summary>
+                <summary>备注、域名与出口 · 最近活动 ${stamp(device.last_seen)}</summary>
                 <div class="device-details-grid">
+                    <div class="device-note-field"><div class="device-sub-title">备注（会作为名称显示）</div>${noteField}</div>
                     <div><div class="device-sub-title">访问最多的域名（按流量）</div><ul class="device-kv">${domains}</ul></div>
-                    <div><div class="device-sub-title">出口链路</div><ul class="device-kv">${chains}</ul></div>
+                    <div><div class="device-sub-title">出口链路 · 首次发现 ${stamp(device.first_seen)}</div><ul class="device-kv">${chains}</ul></div>
                     ${remoteList}
                 </div>
             </details>`;
@@ -2012,21 +2051,26 @@
         setText('deviceTotalDown', '累计 ' + formatBytesText(totals.download || 0));
         setText('deviceTotalUp', '累计 ' + formatBytesText(totals.upload || 0));
         const ikuaiMode = data.data_source === 'ikuai';
+        const today = formatBytes(totals.today || 0);
+        setText('deviceTodayTotal', ikuaiMode ? today.value : '--');
+        setText('deviceTodayUnit', ikuaiMode ? today.unit : '');
+        setText('deviceHeadCol3', ikuaiMode ? '今日' : '↓ 累计');
+        setText('deviceHeadCol4', ikuaiMode ? '累计' : '↑ 累计');
         const ikuai = data.ikuai || {};
         if (ikuaiMode) {
             setText('deviceSampledAt', ikuai.fetched_at
-                ? `爱快更新于 ${new Date(ikuai.fetched_at * 1000).toLocaleTimeString()}，每 ${data.ikuai_interval || 10} 秒一次`
+                ? `更新于 ${new Date(ikuai.fetched_at * 1000).toLocaleTimeString()} · 每 ${data.ikuai_interval || 10} 秒`
                 : '等待爱快数据');
         } else {
             setText('deviceSampledAt', data.sampled_at
-                ? `采样于 ${new Date(data.sampled_at * 1000).toLocaleTimeString()}，每 ${data.sample_interval || 5} 秒一次`
+                ? `采样于 ${new Date(data.sampled_at * 1000).toLocaleTimeString()} · 每 ${data.sample_interval || 5} 秒`
                 : '等待首次采样');
         }
         renderDeviceSource(data);
         const ctrl = data.controller || {};
         const state = document.getElementById('deviceControllerState');
         if (state) {
-            state.textContent = ctrl.reachable ? '控制器在线' : (ctrl.error ? '控制器不可达' : '等待采样');
+            state.textContent = ctrl.reachable ? 'mihomo 控制器在线' : (ctrl.error ? 'mihomo 控制器不可达' : '等待采样');
             state.classList.toggle('text-muted', !ctrl.reachable);
         }
         setText('deviceControllerDetail', ctrl.reachable
@@ -2061,8 +2105,8 @@
         const explainer = document.getElementById('deviceExplainer');
         if (explainer) explainer.textContent = data.data_source === 'ikuai' ? DEVICE_EXPLAINER_IKUAI : DEVICE_EXPLAINER_MIHOMO;
         setText('deviceListHint', data.data_source === 'ikuai'
-            ? '每台终端来自爱快的在线 / 离线列表；展开可查看爱快按应用统计的流量'
-            : '按连接来源 IP 聚合，90 秒内有连接算在线；时间按浏览器时区显示');
+            ? '来自爱快的在线 / 离线终端；展开一行可改备注、看应用流量'
+            : '按连接来源 IP 聚合，90 秒内有连接算在线；展开一行可改备注');
     }
 
     // 经爱快转发的代理流量：mihomo 里来源都是爱快的 IP，没法分到设备，单独汇总成一张卡片
@@ -2233,6 +2277,15 @@
         }
     }
 
+    function toggleIkuaiCard() {
+        const card = document.getElementById('ikuaiCard');
+        if (!card) return;
+        const show = card.hidden || !card.open;
+        card.hidden = !show;
+        card.open = show;
+        if (show) card.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    }
+
     // ---- 爱快数据源设置 ----
     function renderIkuaiSettings(res) {
         const urlInput = document.getElementById('ikuaiUrl');
@@ -2258,7 +2311,11 @@
             status.classList.toggle('error', Boolean(res.last_error));
         }
         const card = document.getElementById('ikuaiCard');
-        if (card && !ikuaiSettingsLoaded) card.open = !res.configured;
+        // 已连上爱快时整张卡片收起来，顶部的「爱快设置」按钮再打开；没配置时直接展开等着填
+        if (card && !ikuaiSettingsLoaded) {
+            card.open = !res.configured;
+            card.hidden = Boolean(res.configured);
+        }
     }
 
     // 没保存过地址时用默认路由的下一跳预填一次，通常就是爱快
