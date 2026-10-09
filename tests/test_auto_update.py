@@ -321,7 +321,10 @@ class CoreUpdateTest(AutoUpdateTestBase):
     def test_dry_run_reports_without_changes(self):
         report = self.au.update_core(self.rt, self.settings(), dry_run=True)
         self.assertEqual(report["result"], "available")
-        self.assertEqual(report["latest"], "v1.19.35")
+        # latest = 最新稳定版（还不满 3 天），latest_eligible = 这次能装的版本
+        self.assertEqual(report["latest"], "v1.19.36")
+        self.assertEqual(report["latest_eligible"], "v1.19.35")
+        self.assertEqual(report["latest_published_at"], NOW - DAY)
         self.assertEqual(self.sys.downloads, [])
         self.assertEqual(self.sys.restarts, 0)
 

@@ -274,6 +274,13 @@ def record(rt, state, report, dry_run):
     for key in ("current", "latest"):
         if report.get(key):
             item[key] = report[key]
+    # 只有真正查到远端版本的结果才带 latest_eligible；状态卡片用它和发布时间算“还差几天”
+    if "latest_eligible" in report:
+        item["latest_eligible"] = report["latest_eligible"] or ""
+        if report.get("latest_published_at"):
+            item["latest_published_at"] = int(report["latest_published_at"])
+        else:
+            item.pop("latest_published_at", None)
     if dry_run:
         item["last_dry_run"] = {"time": now, "result": report["result"], "message": report["message"]}
         return
@@ -372,6 +379,14 @@ def pick_core_release(releases, min_age_days, now):
             note = "" if tag == newest_tag else f"最新稳定版 {newest_tag} 发布 {format_days(now - newest_published)} 天，不足 {min_age_days} 天"
             return tag, newest_tag, note
     return "", newest_tag, f"最新稳定版 {newest_tag} 发布 {format_days(now - newest_published)} 天，不足 {min_age_days} 天"
+
+
+def release_published_at(releases, tag):
+    """指定 tag 的 GitHub published_at（epoch），找不到返回 None。"""
+    for release in releases if isinstance(releases, list) else []:
+        if isinstance(release, dict) and release.get("tag_name") == tag:
+            return parse_github_time(release.get("published_at"))
+    return None
 
 
 def core_asset(tag, machine):
@@ -581,6 +596,18 @@ def decompress_core(gz_path, output):
 
 
 def update_core(rt, settings, dry_run):
+    """结果里 latest = 最新稳定版，latest_eligible = 满足发布天数、可以安装的版本，
+    latest_published_at = 最新稳定版的发布时间（状态卡片据此显示“还差几天”）。"""
+    seen = {}
+    report = _update_core(rt, settings, dry_run, seen)
+    if seen:
+        report["latest"] = seen["latest"] or report.get("latest", "")
+        report["latest_eligible"] = seen["latest_eligible"]
+        report["latest_published_at"] = seen["latest_published_at"]
+    return report
+
+
+def _update_core(rt, settings, dry_run, seen):
     current = binary_version(rt, rt.core_bin)
     if not current:
         return make_result("core", "skipped", f"{rt.core_bin} 不存在或无法执行，自动更新不负责首次安装")
@@ -588,6 +615,8 @@ def update_core(rt, settings, dry_run):
     if not ok:
         return make_result("core", "skipped", f"无法获取 mihomo 发布列表，跳过：{releases}", current=current)
     tag, newest, note = pick_core_release(releases, settings["core_min_age_days"], rt.now())
+    if newest:
+        seen.update(latest=newest, latest_eligible=tag, latest_published_at=release_published_at(releases, newest))
     if not tag:
         return make_result("core", "up_to_date", note or "没有可安装的稳定版", current=current)
     if version_tuple(tag) <= version_tuple(current):
@@ -692,7 +721,7 @@ def update_ui(rt, settings, state, dry_run):
     if not target:
         return make_result("ui", "skipped", "config.yaml 没有配置 external-ui，跳过")
     if dry_run:
-        return make_result("ui", "available", f"已到更新间隔（{interval} 天），将通过控制器重新下载面板 UI")
+        return make_result("ui", "available", f"已到更新间隔（{interval} 天），将通过控制器重新下载 Dashboard")
 
     workdir = tempfile.mkdtemp(prefix=".ui-backup.", dir=rt.mihomo_dir)
     backup = os.path.join(workdir, "ui")
@@ -713,16 +742,16 @@ def update_ui(rt, settings, state, dry_run):
                 problems.append("更新后 index.html 不存在")
             reason = "新版本下载后页面打不开"
         if not problems:
-            report = make_result("ui", "updated", "面板 UI 已重新下载，/ui/ 可以访问",
+            report = make_result("ui", "updated", "Dashboard 已重新下载，/ui/ 可以访问",
                                  detail_lines=["已重新下载最新版本", "检查通过：页面可以正常打开"])
             report["last_success"] = int(rt.now())
             return report
         if had_ui:
             shutil.rmtree(target, ignore_errors=True)
             shutil.move(backup, target)
-            return make_result("ui", "rolled_back", "面板 UI 更新失败，已恢复原文件：" + "；".join(problems),
+            return make_result("ui", "rolled_back", "Dashboard 更新失败，已恢复原文件：" + "；".join(problems),
                                reason=reason, detail_lines=["已恢复原来的 Dashboard，可以继续使用"])
-        return make_result("ui", "failed", "面板 UI 更新失败：" + "；".join(problems),
+        return make_result("ui", "failed", "Dashboard 更新失败：" + "；".join(problems),
                            reason=reason, detail_lines=["之前没有安装 Dashboard，代理不受影响"])
     finally:
         shutil.rmtree(workdir, ignore_errors=True)
@@ -738,19 +767,28 @@ def check_panel(rt, settings):
     if not remote.get("success"):
         return make_result("panel", "skipped", f"无法获取远端面板版本，跳过：{remote.get('message', '')}", current=current)
     latest = remote.get("latest_version", "")
+    def with_release(report, eligible, published=None):
+        report["latest_eligible"] = eligible
+        report["latest_published_at"] = published
+        return report
+
     if not version_tuple(latest) or version_tuple(latest) <= version_tuple(current):
-        return make_result("panel", "up_to_date", f"当前 v{current}，远端 v{latest}", current=current, latest=latest)
+        return with_release(make_result("panel", "up_to_date", f"当前 v{current}，远端 v{latest}", current=current, latest=latest),
+                            latest if version_tuple(latest) else "")
     min_age = settings["panel_min_age_days"]
+    stamp = None
     if min_age > 0:
         stamp, reason = panel_latest_commit_time(rt, panel.panel_repo_settings())
         if stamp is None:
             # 拿不到提交时间就不升级，绝不放行
-            return make_result("panel", "skipped", f"{reason}，无法确认提交已满 {min_age} 天，跳过", current=current, latest=latest)
+            return with_release(make_result("panel", "skipped", f"{reason}，无法确认提交已满 {min_age} 天，跳过",
+                                            current=current, latest=latest), "")
         age = rt.now() - stamp
         if age < min_age * DAY:
-            return make_result("panel", "skipped", f"v{latest} 的最新提交距今 {format_days(age)} 天，不足 {min_age} 天", current=current, latest=latest)
-    return make_result("panel", "available", f"可以从 v{current} 升级到 v{latest}", current=current, latest=latest,
-                       from_version=current, to_version=latest)
+            return with_release(make_result("panel", "skipped", f"v{latest} 的最新提交距今 {format_days(age)} 天，不足 {min_age} 天",
+                                            current=current, latest=latest), "", stamp)
+    return with_release(make_result("panel", "available", f"可以从 v{current} 升级到 v{latest}", current=current, latest=latest,
+                                    from_version=current, to_version=latest), latest, stamp)
 
 
 def run_panel_upgrade(rt, state, settings):
@@ -829,7 +867,7 @@ def run_updates(rt, dry_run=False, only=None):
 
 
 def main(argv=None):
-    parser = argparse.ArgumentParser(description="Mihomo 自动更新（面板 UI / 内核 / 管理面板）")
+    parser = argparse.ArgumentParser(description="Mihomo 自动更新（Dashboard / 内核 / 管理面板）")
     parser.add_argument("--dry-run", action="store_true", help="只检查并报告，不安装")
     parser.add_argument("--only", choices=("core", "ui", "panel"), help="只处理其中一项")
     parser.add_argument("--json", action="store_true", help="最后一行输出 JSON 报告（面板用）")

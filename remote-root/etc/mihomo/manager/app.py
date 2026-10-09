@@ -49,7 +49,7 @@ SUBSCRIPTION_STATE_FILE = f"{MIHOMO_DIR}/.last_subscription"
 SUBSCRIPTION_LOG = "/var/log/mihomo-subscription.log"
 GEO_LOG = "/var/log/mihomo-geo.log"
 MANAGER_DIR = f"{MIHOMO_DIR}/manager"
-PANEL_VERSION = "0.1.38"
+PANEL_VERSION = "0.1.39"
 DEFAULT_PANEL_REPO_URL = "https://github.com/anxiaoyang666/mihomo.git"
 DEFAULT_PANEL_BRANCH = "main"
 PANEL_BACKUP_KEEP_COUNT = 3
@@ -3021,7 +3021,7 @@ AUTO_UPDATE_STATE_FILE = f"{MIHOMO_DIR}/auto_update_state.json"
 AUTO_UPDATE_LOG = "/var/log/mihomo-auto-update.log"
 AUTO_UPDATE_LOCK_NAME = "mihomo-auto-update.lock"
 AUTO_UPDATE_ITEMS = ("ui", "core", "panel")
-AUTO_UPDATE_ITEM_LABELS = {"ui": "面板 UI (zashboard)", "core": "mihomo 内核", "panel": "管理面板"}
+AUTO_UPDATE_ITEM_LABELS = {"ui": "Dashboard", "core": "mihomo 内核", "panel": "管理面板"}
 AUTO_UPDATE_RESULT_LABELS = {
     "updated": "已更新", "up_to_date": "已是最新", "skipped": "已跳过", "failed": "失败",
     "rolled_back": "已回滚", "started": "升级已开始", "available": "有可用更新", "not_due": "未到间隔",
@@ -3035,7 +3035,7 @@ AUTO_UPDATE_ENV_KEYS = {
     "ui_interval_days": "AUTO_UPDATE_UI_INTERVAL_DAYS",
 }
 AUTO_UPDATE_RANGES = {"core_min_age_days": (0, 90), "panel_min_age_days": (0, 90), "ui_interval_days": (1, 365)}
-AUTO_UPDATE_NUMBER_LABELS = {"core_min_age_days": "内核最小发布天数", "panel_min_age_days": "面板最小提交天数", "ui_interval_days": "面板 UI 更新间隔天数"}
+AUTO_UPDATE_NUMBER_LABELS = {"core_min_age_days": "内核发布满几天才更新", "panel_min_age_days": "面板发布满几天才更新", "ui_interval_days": "Dashboard 每隔几天更新"}
 # 面板升级写下 started 后，新进程启动时把它标成 updated；超过这个时间还没到新版本就算失败
 AUTO_UPDATE_PANEL_PENDING_SECONDS = 600
 AUTO_UPDATE_DRY_RUN_TIMEOUT = 180
@@ -3266,6 +3266,15 @@ def server_timezone_info(now=None):
         "now": time.strftime("%Y-%m-%d %H:%M", local),
     }
 
+def dashboard_updated_at():
+    """Dashboard（external-ui 目录，默认 /etc/mihomo/ui）index.html 的修改时间；没有返回 0。"""
+    value = config_value("external-ui") or "ui"
+    target = value if os.path.isabs(value) else os.path.join(MIHOMO_DIR, value)
+    try:
+        return int(os.path.getmtime(os.path.join(target, "index.html")))
+    except OSError:
+        return 0
+
 def auto_update_status_payload():
     version_ok, version = mihomo_api_get("/version", timeout=2)
     return {
@@ -3275,6 +3284,8 @@ def auto_update_status_payload():
         "timezone": server_timezone_info(),
         "panel_version": PANEL_VERSION,
         "core_version": version.get("version", "") if version_ok and isinstance(version, dict) else "",
+        "ui_updated_at": dashboard_updated_at(),
+        "server_time": int(time.time()),
         "labels": {"items": AUTO_UPDATE_ITEM_LABELS, "results": AUTO_UPDATE_RESULT_LABELS},
     }
 
@@ -3366,7 +3377,8 @@ def logout():
 @app.route('/')
 def index():
     if session.get('logged_in'):
-        return render_template('index.html')
+        # 页面里写死自己的版本号，轮询发现服务端版本变了就提示刷新（旧标签页还跑着旧 JS）
+        return render_template('index.html', panel_version=PANEL_VERSION)
     return redirect('/login')
 
 @app.route('/api/status')

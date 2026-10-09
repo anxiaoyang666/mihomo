@@ -10,6 +10,7 @@
     <link rel="apple-touch-icon" href="/static/logo.png">
     <meta name="apple-mobile-web-app-capable" content="yes">
     <meta name="theme-color" content="#101214">
+    <meta name="mihomo-panel-version" content="{{ panel_version }}">
 
     <link href="/static/vendor/bootstrap.min.css" rel="stylesheet">
     <link rel="stylesheet" href="/static/vendor/bootstrap-icons.css">
@@ -885,9 +886,34 @@
             .quick-grid,
             .log-strip { grid-template-columns: 1fr; }
         }
+        /* 自动更新状态表：跟随主题变量，不用 Bootstrap .table 的白底 */
+        .update-table-wrap { overflow-x: auto; border: 1px solid var(--border-color); border-radius: 8px; }
+        .update-table { width: 100%; border-collapse: collapse; font-size: 13px; color: var(--text-main); background: transparent; }
+        .update-table th, .update-table td { padding: 9px 12px; text-align: left; vertical-align: top; border-top: 1px solid var(--border-color); }
+        .update-table thead th { border-top: 0; background: var(--bg-card-soft); color: var(--text-muted); font-size: 12px; font-weight: 800; }
+        .update-table .update-item { font-weight: 800; white-space: nowrap; }
+        .update-table .update-version { font-weight: 760; }
+        .update-table .update-sub { margin-top: 3px; color: var(--text-muted); font-size: 12px; line-height: 1.45; white-space: pre-wrap; }
+        .update-table .update-sub.warn { color: var(--warning); font-weight: 700; }
+        /* 面板已升级、本页还是旧 JS 时的提示条 */
+        .stale-page-banner {
+            position: fixed; top: 0; left: 0; right: 0; z-index: 3000;
+            display: flex; align-items: center; justify-content: center; gap: 12px; flex-wrap: wrap;
+            padding: 10px 16px; background: var(--warning); color: #1b1b1b; font-weight: 760;
+            box-shadow: var(--shadow);
+        }
+        .stale-page-banner[hidden] { display: none; }
+        .stale-page-banner button {
+            border: 1px solid rgba(0,0,0,.35); border-radius: 8px; background: rgba(255,255,255,.55);
+            color: #1b1b1b; font-weight: 800; padding: 4px 14px;
+        }
     </style>
 </head>
 <body data-theme="dark">
+<div class="stale-page-banner" id="stalePageBanner" role="alert" hidden>
+    <span id="stalePageBannerText"></span>
+    <button type="button" onclick="location.reload()"><i class="bi bi-arrow-clockwise"></i> 刷新</button>
+</div>
 <div class="mobile-header">
     <div class="d-flex align-items-center gap-2">
         <button class="icon-button" onclick="toggleSidebar()" aria-label="打开导航"><i class="bi bi-list"></i></button>
@@ -1267,24 +1293,25 @@
                                 <div class="form-text mb-3" id="auto_update_tz_hint">服务器时区加载中…</div>
 
                                 <div class="row g-2">
-                                    <div class="col-4">
-                                        <label class="form-label small fw-bold" for="auto_update_core_min_age">内核发布满（天）</label>
+                                    <div class="col-12 col-md-4">
+                                        <label class="form-label small fw-bold" for="auto_update_core_min_age">内核发布满几天才更新</label>
                                         <input type="number" class="form-control" id="auto_update_core_min_age" min="0" max="90" step="1" value="3">
                                     </div>
-                                    <div class="col-4">
-                                        <label class="form-label small fw-bold" for="auto_update_panel_min_age">面板提交满（天）</label>
+                                    <div class="col-12 col-md-4">
+                                        <label class="form-label small fw-bold" for="auto_update_panel_min_age">面板发布满几天才更新</label>
                                         <input type="number" class="form-control" id="auto_update_panel_min_age" min="0" max="90" step="1" value="0">
+                                        <div class="form-text">新版面板发布后等几天再更新，0 表示有新版就更新</div>
                                     </div>
-                                    <div class="col-4">
-                                        <label class="form-label small fw-bold" for="auto_update_ui_interval">UI 间隔（天）</label>
+                                    <div class="col-12 col-md-4">
+                                        <label class="form-label small fw-bold" for="auto_update_ui_interval">Dashboard 每隔几天更新</label>
                                         <input type="number" class="form-control" id="auto_update_ui_interval" min="1" max="365" step="1" value="7">
                                     </div>
                                 </div>
-                                <div class="form-text">内核只装发布已满指定天数的稳定版，绝不降级；更新后 30 秒内检查服务、控制器、DNS 和所有入站端口，不通过自动回滚旧内核。顺序：面板 UI → 内核 → 管理面板。</div>
+                                <div class="form-text">内核只装发布已满指定天数的稳定版，绝不降级；更新后 30 秒内检查服务、控制器、DNS 和所有入站端口，不通过自动回滚旧内核。顺序：Dashboard → 内核 → 管理面板。</div>
 
-                                <div class="table-responsive mt-3">
-                                    <table class="table table-sm align-middle mb-0 small">
-                                        <thead><tr><th>项目</th><th>当前</th><th>最新可用</th><th>上次结果</th></tr></thead>
+                                <div class="update-table-wrap mt-3">
+                                    <table class="update-table" id="autoUpdateTable">
+                                        <thead><tr><th>项目</th><th>版本</th><th>上次检查</th></tr></thead>
                                         <tbody id="auto_update_items"></tbody>
                                     </table>
                                 </div>
@@ -1669,6 +1696,7 @@
         }
 
         panelCurrentVersion = data.panel_version || panelCurrentVersion;
+        checkStalePage(data.panel_version);
         const versionLabel = document.getElementById('versionLabel');
         if (versionLabel && !panelUpdateAvailable) versionLabel.textContent = 'v' + (panelCurrentVersion || '--');
         renderVersionPopover();
@@ -3064,34 +3092,160 @@
             (local ? (same ? '；与你的浏览器时区相同' : `；相当于你浏览器本地时间 ${local}`) : '');
     }
 
+    // 版本号比较："v1.19.35" / "0.1.38" 都可以；无法识别时返回 null
+    function compareAutoUpdateVersions(a, b) {
+        const parse = v => {
+            const m = /^v?(\d+(?:\.\d+)*)/i.exec(String(v || '').trim());
+            return m ? m[1].split('.').map(Number) : null;
+        };
+        const pa = parse(a), pb = parse(b);
+        if (!pa || !pb) return null;
+        for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+            const diff = (pa[i] || 0) - (pb[i] || 0);
+            if (diff) return diff > 0 ? 1 : -1;
+        }
+        return 0;
+    }
+
+    // 纯函数：根据 auto_update_state.json 里的一项 + 实际运行版本，算出表格一行要显示的内容（不碰 DOM，便于测试）
+    // item: state.items.core / panel；liveCurrent: 控制器/面板报告的当前版本；minAgeDays: 设置里的天数；
+    // nowSec: 当前 epoch 秒；resultLabels: 结果代码 → 中文
+    function describeAutoUpdateItem(item, liveCurrent, minAgeDays, nowSec, resultLabels) {
+        const data = item || {};
+        const labels = resultLabels || {};
+        const withV = v => {
+            const t = String(v || '').trim();
+            return /^\d/.test(t) ? 'v' + t : t;
+        };
+        const current = withV(liveCurrent) || withV(data.current);
+        const recorded = withV(data.current);
+        const eligible = withV(data.latest_eligible);
+        const latest = withV(data.latest);
+        // 上次检查记录的版本和现在实际运行的不同：检查之后手动升级过，那次检查的结论已过时
+        const manualCmp = recorded && current ? compareAutoUpdateVersions(current, recorded) : 0;
+        const manual = manualCmp !== null && manualCmp !== 0;
+        let status = '';
+        let warn = false;
+        let waiting = false;
+        if (eligible && compareAutoUpdateVersions(eligible, current) > 0) {
+            status = '可更新到 ' + eligible;
+            warn = true;
+        } else if (latest && compareAutoUpdateVersions(latest, current) > 0) {
+            waiting = true;
+            const days = Math.max(0, Number(minAgeDays) || 0);
+            if (days > 0) {
+                status = latest + ' 已发布，满 ' + days + ' 天后自动更新';
+                const published = Number(data.latest_published_at) || 0;
+                if (published && nowSec) {
+                    const left = Math.ceil((published + days * 86400 - nowSec) / 86400);
+                    if (left > 0) status += '（还差 ' + left + ' 天）';
+                }
+            } else {
+                status = latest + ' 已发布，下次检查时更新';
+            }
+        } else if (latest && compareAutoUpdateVersions(current, latest) >= 0) {
+            status = '已是最新';
+        }
+        if (manual) status = (status || '') + '（上次检查后已手动升级）';
+
+        const dry = data.last_dry_run || {};
+        const checkOnly = Boolean(dry.time) && (!data.last_run || dry.time > data.last_run + 300);
+        let result = '';
+        let message = '';
+        let resultLabel = '还没有记录';
+        let resultTime = 0;
+        if (checkOnly) {
+            result = dry.result || '';
+            message = dry.message || '';
+            resultLabel = '已检查（未安装）';
+            resultTime = dry.time;
+        } else if (data.last_result) {
+            result = data.last_result;
+            message = data.message || '';
+            resultLabel = labels[result] || result;
+            resultTime = data.last_run || data.last_check || 0;
+            if (data.from && data.to && data.from !== data.to) resultLabel += ' ' + withV(data.from) + ' → ' + withV(data.to);
+        } else if (data.last_check) {
+            resultLabel = '已检查';
+            resultTime = data.last_check;
+        }
+        // 说明只在能补充信息时显示一行：手动升级后旧结论不再显示；
+        // 状态行已经说清楚的（已是最新 / 可更新 / 等满天数）不重复
+        let detail = '';
+        message = String(message || '').trim();
+        if (!manual && message) {
+            const covered = status && (['up_to_date', 'available', 'not_due'].includes(result) || (result === 'skipped' && waiting));
+            if (!covered) detail = message.split('\n')[0];
+        }
+        return { current: current || '—', status, warn, resultLabel, resultTime, detail };
+    }
+
+    function formatDate(epoch) {
+        if (!epoch) return '';
+        const date = new Date(Number(epoch) * 1000);
+        return `${date.getFullYear()}-${pad2(date.getMonth() + 1)}-${pad2(date.getDate())}`;
+    }
+
+    function renderAutoUpdateRow(name, view) {
+        const sub = (text, warn) => text ? `<div class="update-sub${warn ? ' warn' : ''}">${escapeHtml(text)}</div>` : '';
+        return `<tr><td class="update-item">${escapeHtml(name)}</td>` +
+            `<td><div class="update-version">${escapeHtml(view.current)}</div>${sub(view.status, view.warn)}</td>` +
+            `<td><div>${escapeHtml(view.resultLabel)}</div>${sub(view.resultTime ? formatEpoch(view.resultTime) : '')}${sub(view.detail)}</td></tr>`;
+    }
+
     function renderAutoUpdate(res) {
         if (!res || !res.settings) return;
         autoUpdateLabels = res.labels || autoUpdateLabels;
         const s = res.settings;
-        document.getElementById('auto_update_enabled').checked = Boolean(s.enabled);
-        document.getElementById('auto_update_time').value = s.time || '04:00';
-        document.getElementById('auto_update_core_min_age').value = s.core_min_age_days;
-        document.getElementById('auto_update_panel_min_age').value = s.panel_min_age_days;
-        document.getElementById('auto_update_ui_interval').value = s.ui_interval_days;
+        // 轮询时不覆盖用户正在编辑的输入框
+        if (!document.getElementById('autoUpdateCard').contains(document.activeElement)) {
+            document.getElementById('auto_update_enabled').checked = Boolean(s.enabled);
+            document.getElementById('auto_update_time').value = s.time || '04:00';
+            document.getElementById('auto_update_core_min_age').value = s.core_min_age_days;
+            document.getElementById('auto_update_panel_min_age').value = s.panel_min_age_days;
+            document.getElementById('auto_update_ui_interval').value = s.ui_interval_days;
+        }
         updateAutoUpdateTzHint(res.timezone);
+        checkStalePage(res.panel_version);
         const items = (res.state && res.state.items) || {};
-        const live = { core: res.core_version || '', panel: res.panel_version ? 'v' + res.panel_version : '', ui: '' };
-        const rows = ['ui', 'core', 'panel'].map(key => {
-            const item = items[key] || {};
-            const result = item.last_result ? (autoUpdateLabels.results[item.last_result] || item.last_result) : '尚未运行';
-            const when = formatEpoch(item.last_run || item.last_check);
-            const latest = item.latest ? (String(item.latest).startsWith('v') ? item.latest : 'v' + item.latest) : '—';
-            const title = escapeHtml(item.message || '');
-            return `<tr title="${title}"><td>${escapeHtml(autoUpdateLabels.items[key] || key)}</td>` +
-                `<td>${escapeHtml(live[key] || item.current || '—')}</td><td>${escapeHtml(latest)}</td>` +
-                `<td>${escapeHtml(result)}${when ? `<div class="text-muted">${escapeHtml(when)}</div>` : ''}` +
-                `${item.message ? `<div class="text-muted">${escapeHtml(item.message)}</div>` : ''}</td></tr>`;
-        });
-        document.getElementById('auto_update_items').innerHTML = rows.join('');
+        const nowSec = Number(res.server_time) || Math.floor(Date.now() / 1000);
+        const results = autoUpdateLabels.results || {};
+        const uiView = describeAutoUpdateItem(items.ui, '', 0, nowSec, results);
+        uiView.current = res.ui_updated_at ? '更新于 ' + formatDate(res.ui_updated_at) : '—';
+        const nextDue = Number((items.ui || {}).next_due) || 0;
+        uiView.status = nextDue > nowSec ? '下次更新：' + formatDate(nextDue) + ' 之后' : '';
+        const coreView = describeAutoUpdateItem(items.core, res.core_version, s.core_min_age_days, nowSec, results);
+        const panelView = describeAutoUpdateItem(items.panel, res.panel_version, s.panel_min_age_days, nowSec, results);
+        const name = key => (autoUpdateLabels.items || {})[key] || key;
+        document.getElementById('auto_update_items').innerHTML =
+            renderAutoUpdateRow(name('ui'), uiView) + renderAutoUpdateRow(name('core'), coreView) + renderAutoUpdateRow(name('panel'), panelView);
         const lastRun = res.state && res.state.last_run;
         document.getElementById('auto_update_last_run').textContent = lastRun
             ? `上次运行：${formatEpoch(lastRun)}（${res.state.last_run_mode === 'dry-run' ? '只检查' : '更新'}）` : '';
         document.getElementById('auto_update_running').textContent = res.running ? '正在运行…' : '';
+    }
+
+    // ===== 旧页面提示 =====
+    // 纯函数：页面渲染时的版本 vs 服务端现在的版本，不同就返回提示文字，否则返回 ''
+    function stalePageMessage(pageVersion, serverVersion) {
+        const page = String(pageVersion || '').trim();
+        const server = String(serverVersion || '').trim();
+        if (!page || !server || page.includes('{') || page === server) return '';
+        const cmp = compareAutoUpdateVersions(server, page);
+        if (cmp === 0) return '';
+        const target = 'v' + server.replace(/^v/i, '');
+        return (cmp === null || cmp > 0 ? `面板已升级到 ${target}` : `面板版本已变为 ${target}`) + '，当前页面是旧版本，请刷新';
+    }
+
+    const PAGE_PANEL_VERSION = document.querySelector('meta[name="mihomo-panel-version"]')?.getAttribute('content') || '';
+
+    function checkStalePage(serverVersion) {
+        const message = stalePageMessage(PAGE_PANEL_VERSION, serverVersion);
+        if (!message) return;
+        const banner = document.getElementById('stalePageBanner');
+        if (!banner) return;
+        document.getElementById('stalePageBannerText').textContent = message;
+        banner.hidden = false;
     }
 
     async function loadAutoUpdate() {
