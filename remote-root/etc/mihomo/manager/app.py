@@ -49,7 +49,7 @@ SUBSCRIPTION_STATE_FILE = f"{MIHOMO_DIR}/.last_subscription"
 SUBSCRIPTION_LOG = "/var/log/mihomo-subscription.log"
 GEO_LOG = "/var/log/mihomo-geo.log"
 MANAGER_DIR = f"{MIHOMO_DIR}/manager"
-PANEL_VERSION = "0.1.39"
+PANEL_VERSION = "0.1.40"
 DEFAULT_PANEL_REPO_URL = "https://github.com/anxiaoyang666/mihomo.git"
 DEFAULT_PANEL_BRANCH = "main"
 PANEL_BACKUP_KEEP_COUNT = 3
@@ -1399,31 +1399,48 @@ def first_number(value):
         return 0
 
 def latest_delay(proxy):
+    """最近一次测速结果：毫秒数；0 表示最近一次超时；没有记录返回 None。"""
     history = proxy.get("history") if isinstance(proxy, dict) else None
-    if not isinstance(history, list):
+    if not isinstance(history, list) or not history:
         return None
-    for item in reversed(history):
-        delay = item.get("delay")
-        if isinstance(delay, (int, float)) and delay >= 0:
-            return delay
-    return None
+    delay = history[-1].get("delay") if isinstance(history[-1], dict) else None
+    return delay if isinstance(delay, (int, float)) and delay >= 0 else None
+
+def resolve_group_leaf(items, name, limit=10):
+    """顺着分组的当前选择一路往下找，返回最终实际使用的节点名（分组本身不测速，延迟要看这个节点）。"""
+    seen = set()
+    current = name
+    while limit > 0:
+        proxy = items.get(current)
+        if not isinstance(proxy, dict) or "all" not in proxy or not proxy.get("now") or current in seen:
+            return current
+        seen.add(current)
+        current = proxy["now"]
+        limit -= 1
+    return current
 
 def proxy_group_summary(proxies):
     items = proxies.get("proxies") if isinstance(proxies, dict) else {}
     if not isinstance(items, dict):
         return []
+    # GLOBAL 的 all 就是配置文件里的顺序；按它排，GLOBAL 自己不显示
+    global_group = items.get("GLOBAL") if isinstance(items.get("GLOBAL"), dict) else {}
+    order = {n: i for i, n in enumerate(global_group.get("all") or [])}
+    names = [n for n, p in items.items() if n != "GLOBAL" and isinstance(p, dict) and "all" in p]
+    names.sort(key=lambda n: order.get(n, len(order)))
     groups = []
-    for name, proxy in items.items():
-        if not isinstance(proxy, dict) or "all" not in proxy:
-            continue
+    for name in names:
+        proxy = items[name]
+        leaf = resolve_group_leaf(items, name)
         groups.append({
             "name": name,
             "type": proxy.get("type", "Group"),
             "now": proxy.get("now", ""),
+            "leaf": leaf if leaf not in (name, proxy.get("now")) else "",
             "count": len(proxy.get("all") or []),
-            "delay": latest_delay(proxy),
+            "delay": latest_delay(items.get(leaf)),
         })
-    return groups[:8]
+    return groups
 
 def log_level_summary():
     levels = {"error": 0, "warn": 0, "info": 0, "debug": 0}
@@ -1830,9 +1847,37 @@ def refresh_device_neighbours():
             if key in macs:
                 device["mac"] = macs[key]
 
+# 概览页的网速曲线：采样线程顺手用 /connections 的累计上传/下载算出每秒速率，保留最近 10 分钟
+TRAFFIC_SERIES_POINTS = 120
+TRAFFIC_SERIES = []
+TRAFFIC_PREV = {}
+TRAFFIC_LOCK = threading.Lock()
+
+def record_traffic_sample(data, now=None):
+    now = time.time() if now is None else now
+    down = first_number(data.get("downloadTotal")) if isinstance(data, dict) else 0
+    up = first_number(data.get("uploadTotal")) if isinstance(data, dict) else 0
+    with TRAFFIC_LOCK:
+        prev_at = TRAFFIC_PREV.get("at")
+        elapsed = now - prev_at if prev_at else 0
+        # 累计值变小说明 mihomo 重启过；间隔太长（控制器断过）也不算，只更新基准
+        if 0 < elapsed <= DEVICE_SAMPLE_INTERVAL * 6 and down >= TRAFFIC_PREV["down"] and up >= TRAFFIC_PREV["up"]:
+            TRAFFIC_SERIES.append({
+                "t": int(now),
+                "down": int((down - TRAFFIC_PREV["down"]) / elapsed),
+                "up": int((up - TRAFFIC_PREV["up"]) / elapsed),
+            })
+            del TRAFFIC_SERIES[:-TRAFFIC_SERIES_POINTS]
+        TRAFFIC_PREV.update({"at": now, "down": down, "up": up})
+
+def traffic_series():
+    with TRAFFIC_LOCK:
+        return [dict(item) for item in TRAFFIC_SERIES]
+
 def sample_devices_once():
     ok, data = mihomo_api_get("/connections", timeout=3)
     if ok:
+        record_traffic_sample(data)
         connections = data.get("connections") if isinstance(data, dict) else None
         apply_connections_sample(connections if isinstance(connections, list) else [])
         return True
@@ -2688,6 +2733,7 @@ def collect_overview():
         "upload_total": first_number(connections.get("uploadTotal")),
         "memory": first_number(connections.get("memory")),
         "proxy_groups": proxy_groups,
+        "traffic_series": traffic_series(),
         "devices": devices_summary(),
         "log_levels": log_level_summary(),
         "settings": {

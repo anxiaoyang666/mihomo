@@ -457,25 +457,28 @@
         }
 
         .panel { padding: 18px; }
-        .traffic-bars {
-            height: 150px;
-            display: grid;
-            grid-template-columns: repeat(24, minmax(5px, 1fr));
-            align-items: end;
-            gap: 7px;
+        .traffic-chart {
             margin-top: 18px;
-            padding-top: 12px;
+            padding-top: 14px;
             border-top: 1px solid var(--border-color);
         }
-
-        .traffic-bar {
-            min-height: 8px;
-            border-radius: 5px 5px 0 0;
-            background: linear-gradient(180deg, var(--accent), rgba(85,214,139,.24));
-        }
-
-        .traffic-bar:nth-child(3n) { background: linear-gradient(180deg, var(--accent-2), rgba(110,216,232,.22)); }
-        .traffic-bar:nth-child(5n) { background: linear-gradient(180deg, var(--purple), rgba(179,156,255,.20)); }
+        .traffic-legend { display: flex; flex-wrap: wrap; gap: 8px 28px; margin-bottom: 10px; }
+        .traffic-legend > div { display: flex; align-items: baseline; gap: 8px; }
+        .traffic-legend span { color: var(--text-muted); font-size: 13px; }
+        .traffic-legend strong { font-size: 20px; font-variant-numeric: tabular-nums; }
+        .traffic-legend em { font-style: normal; font-size: 12px; color: var(--text-muted); }
+        .traffic-legend .dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; align-self: center; }
+        .traffic-legend .dot.down, .traffic-plot .down { --series: var(--accent); }
+        .traffic-legend .dot.up, .traffic-plot .up { --series: var(--accent-2); }
+        .traffic-legend .dot { background: var(--series); }
+        .traffic-plot { position: relative; height: 140px; }
+        .traffic-plot svg { width: 100%; height: 100%; display: block; overflow: visible; }
+        .traffic-plot .grid { stroke: var(--border-color); stroke-width: 1; vector-effect: non-scaling-stroke; }
+        .traffic-plot path.line { fill: none; stroke: var(--series); stroke-width: 2; vector-effect: non-scaling-stroke; stroke-linejoin: round; }
+        .traffic-plot path.area { fill: var(--series); opacity: .14; stroke: none; }
+        .traffic-plot .scale { position: absolute; right: 0; font-size: 11px; color: var(--text-muted); }
+        .traffic-empty { height: 100%; display: flex; align-items: center; justify-content: center; color: var(--text-muted); font-size: 13px; }
+        .traffic-axis { display: flex; justify-content: space-between; font-size: 11px; color: var(--text-muted); margin-top: 6px; }
 
         .quick-grid {
             display: grid;
@@ -1033,15 +1036,22 @@
                     <div class="panel">
                         <div class="panel-title-row">
                             <div>
-                                <h2 class="panel-title">流量脉冲</h2>
-                                <div class="text-muted small mt-1">基于控制器返回的累计上传与下载生成轻量趋势视图</div>
+                                <h2 class="panel-title">实时网速</h2>
+                                <div class="text-muted small mt-1">经过 mihomo 的流量，每 5 秒采样，显示最近 10 分钟</div>
                             </div>
                             <div class="d-flex align-items-center gap-2 flex-wrap">
                                 <button type="button" class="small-pill device-pill" id="devicesPill" onclick="document.getElementById('tab-devices-btn').click()" title="查看设备">设备 --</button>
                                 <span class="small-pill" id="controllerReachable">检测中</span>
                             </div>
                         </div>
-                        <div class="traffic-bars" id="trafficBars"></div>
+                        <div class="traffic-chart">
+                            <div class="traffic-legend">
+                                <div><i class="dot down"></i><span>下载</span><strong id="trafficDownNow">--</strong><em id="trafficDownPeak"></em></div>
+                                <div><i class="dot up"></i><span>上传</span><strong id="trafficUpNow">--</strong><em id="trafficUpPeak"></em></div>
+                            </div>
+                            <div class="traffic-plot" id="trafficPlot"><div class="traffic-empty">正在采集，稍等几秒…</div></div>
+                            <div class="traffic-axis"><span id="trafficAxisStart">10 分钟前</span><span>现在</span></div>
+                        </div>
                         <div class="quick-grid">
                             <div class="ops-card" role="button" tabindex="0" onclick="control('update_geo', this)" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();control('update_geo', this);}">
                                 <i class="bi bi-geo-alt"></i>
@@ -1499,7 +1509,6 @@
 
     let logInterval = null;
     let overviewInterval = null;
-    let trafficHistory = [];
     let cachedUrlRaw = "";
     let cachedUrlAirport = "";
     let panelLatestVersion = "";
@@ -1615,17 +1624,53 @@
         if (el) el.textContent = value;
     }
 
-    function renderTrafficBars(total) {
-        const bars = document.getElementById('trafficBars');
-        if (!bars) return;
-        trafficHistory.push(Number(total || 0));
-        if (trafficHistory.length > 24) trafficHistory = trafficHistory.slice(-24);
-        while (trafficHistory.length < 24) trafficHistory.unshift(Math.max(0, total * (trafficHistory.length + 1) / 30));
-        const max = Math.max(...trafficHistory, 1);
-        bars.innerHTML = trafficHistory.map(value => {
-            const height = Math.max(8, Math.round((value / max) * 138));
-            return `<div class="traffic-bar" style="height:${height}px"></div>`;
-        }).join('');
+    function niceRateCeiling(value) {
+        // 纵轴上限取 1/2/5/10/20/50… × KB/MB，刻度读起来是整数
+        const v = Math.max(value, 1024);
+        const unit = Math.pow(1024, Math.floor(Math.log(v) / Math.log(1024)));
+        for (const m of [1, 2, 5, 10, 20, 50, 100, 200, 500]) if (v <= m * unit) return m * unit;
+        return 1024 * unit;
+    }
+
+    function renderTrafficChart(series) {
+        const plot = document.getElementById('trafficPlot');
+        if (!plot) return;
+        const points = Array.isArray(series) ? series : [];
+        const last = points[points.length - 1];
+        setText('trafficDownNow', last ? formatRate(last.down) : '--');
+        setText('trafficUpNow', last ? formatRate(last.up) : '--');
+        const peakDown = Math.max(0, ...points.map(p => p.down));
+        const peakUp = Math.max(0, ...points.map(p => p.up));
+        setText('trafficDownPeak', points.length ? '峰值 ' + formatRate(peakDown) : '');
+        setText('trafficUpPeak', points.length ? '峰值 ' + formatRate(peakUp) : '');
+        if (points.length < 2) {
+            plot.innerHTML = '<div class="traffic-empty">正在采集，稍等几秒…</div>';
+            return;
+        }
+        const span = Math.max(points[points.length - 1].t - points[0].t, 1);
+        const minutes = Math.round(span / 60);
+        setText('trafficAxisStart', minutes >= 1 ? minutes + ' 分钟前' : Math.round(span) + ' 秒前');
+        const top = niceRateCeiling(Math.max(peakDown, peakUp));
+        const W = 600, H = 140;
+        const build = key => {
+            const line = points.map((p, i) => {
+                const x = ((p.t - points[0].t) / span) * W;
+                const y = H - Math.min(p[key] / top, 1) * H;
+                return (i ? 'L' : 'M') + x.toFixed(1) + ' ' + y.toFixed(1);
+            }).join(' ');
+            return { line, area: line + ` L${W} ${H} L0 ${H} Z` };
+        };
+        const down = build('down');
+        const up = build('up');
+        plot.innerHTML = `<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" role="img" aria-label="最近网速曲线">
+                <line class="grid" x1="0" y1="0.5" x2="${W}" y2="0.5"></line>
+                <line class="grid" x1="0" y1="${H / 2}" x2="${W}" y2="${H / 2}"></line>
+                <line class="grid" x1="0" y1="${H - 0.5}" x2="${W}" y2="${H - 0.5}"></line>
+                <g class="down"><path class="area" d="${down.area}"></path><path class="line" d="${down.line}"></path></g>
+                <g class="up"><path class="area" d="${up.area}"></path><path class="line" d="${up.line}"></path></g>
+            </svg>
+            <span class="scale" style="top:-7px">${formatRate(top)}</span>
+            <span class="scale" style="top:${H / 2 - 7}px">${formatRate(top / 2)}</span>`;
     }
 
     function renderOverview(data) {
@@ -1656,15 +1701,16 @@
         const devicesPill = document.getElementById('devicesPill');
         if (devicesPill) devicesPill.textContent = data.devices ? `设备 在线 ${data.devices.lan_online ?? data.devices.online ?? 0} / 共 ${data.devices.lan_total ?? data.devices.total ?? 0}` : '设备 --';
 
-        renderTrafficBars(Number(data.download_total || 0) + Number(data.upload_total || 0));
+        renderTrafficChart(data.traffic_series);
 
         const proxyList = document.getElementById('proxyHealthList');
         const proxyGroups = data.proxy_groups || [];
         if (proxyList) {
             proxyList.innerHTML = proxyGroups.length ? proxyGroups.map(group => {
-                const delay = group.delay === null || group.delay === undefined ? '--' : group.delay + 'ms';
+                const delay = group.delay === null || group.delay === undefined ? '--' : (group.delay === 0 ? '超时' : group.delay + 'ms');
+                const current = (group.now || '未选择') + (group.leaf ? ' → ' + group.leaf : '');
                 return `<div class="proxy-row">
-                    <div><strong>${escapeHtml(group.name)}</strong><span>${escapeHtml(group.type)} · 当前 ${escapeHtml(group.now || '未选择')} · ${group.count || 0} 个节点</span></div>
+                    <div><strong>${escapeHtml(group.name)}</strong><span>${escapeHtml(group.type)} · 当前 ${escapeHtml(current)} · ${group.count || 0} 个节点</span></div>
                     <span class="latency-pill">${delay}</span>
                 </div>`;
             }).join('') : '<div class="health-row"><div><strong>没有代理组数据</strong><span>请确认 external-controller 已启用并允许访问</span></div><span class="latency-pill">--</span></div>';
