@@ -137,7 +137,7 @@
             margin-left: var(--sidebar-w);
             padding: 22px 28px 48px;
         }
-        .tab-content { max-width: 1360px; }
+        .tab-content { width: 100%; }
         .mobile-header, .overlay { display: none !important; }
 
         /* 站点切换 */
@@ -425,6 +425,12 @@
         .dash-grid { display: grid; grid-template-columns: minmax(0, 1.65fr) minmax(320px, 1fr); gap: 16px; }
         .dash-row { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; margin-top: 16px; }
         .dash-grid > .panel, .dash-row > .panel { min-width: 0; }
+        .dash-grid > .panel:first-child { display: flex; flex-direction: column; }
+        .dash-grid > .panel:first-child .traffic-chart { flex: 1; display: flex; flex-direction: column; }
+        .dash-grid > .panel:first-child .traffic-plot { flex: 1; min-height: 210px; }
+        @media (min-width: 1800px) {
+            .dash-grid { grid-template-columns: minmax(0, 2fr) minmax(360px, 1fr); }
+        }
 
         .state-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--warning); box-shadow: 0 0 0 3px var(--warning-soft); flex: 0 0 auto; }
         .state-dot.running { background: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
@@ -441,6 +447,7 @@
         .traffic-legend .dot.up, .traffic-plot .up { --series: var(--up); }
         .traffic-legend .dot { background: var(--series); }
         .traffic-plot { position: relative; height: 210px; }
+        .dash-grid > .panel:first-child .traffic-plot { height: auto; }
         .traffic-plot svg { width: 100%; height: 100%; display: block; overflow: visible; }
         .traffic-plot .grid { stroke: var(--line); stroke-width: 1; stroke-dasharray: 3 4; vector-effect: non-scaling-stroke; }
         .traffic-plot path.line { fill: none; stroke: var(--series); stroke-width: 1.8; vector-effect: non-scaling-stroke; stroke-linejoin: round; }
@@ -1573,7 +1580,7 @@
                 <g class="up"><path class="area" fill="url(#trafficFillUp)" d="${up.area}"></path><path class="line" d="${up.line}"></path></g>
             </svg>
             <span class="scale" style="top:-7px">${formatRate(top)}</span>
-            <span class="scale" style="top:${H / 2 - 7}px">${formatRate(top / 2)}</span>`;
+            <span class="scale" style="top:calc(50% - 7px)">${formatRate(top / 2)}</span>`;
     }
 
     // 分组名前面的表情符号只用于区分，列表里去掉显得干净；完整名字放在 title 里
