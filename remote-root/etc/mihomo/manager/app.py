@@ -16,7 +16,6 @@ import ipaddress
 import json
 import shutil
 import signal
-import socket
 import ssl
 import sys
 import tempfile
@@ -32,6 +31,13 @@ try:
 except ImportError:
     yaml = None
 
+# 通知标题/正文/去重的唯一实现，和 scripts/notify.sh --event 共用（只依赖标准库）。
+# 测试会用 exec 载入 app.py（没有 __file__），所以用代码对象的文件名找同目录。
+_APP_DIR = os.path.dirname(os.path.abspath(sys._getframe().f_code.co_filename))
+if _APP_DIR not in sys.path:
+    sys.path.insert(0, _APP_DIR)
+import notify_format
+
 MIHOMO_DIR = "/etc/mihomo"
 SCRIPT_DIR = "/etc/mihomo/scripts"
 ENV_FILE = f"{MIHOMO_DIR}/.env"
@@ -43,7 +49,7 @@ SUBSCRIPTION_STATE_FILE = f"{MIHOMO_DIR}/.last_subscription"
 SUBSCRIPTION_LOG = "/var/log/mihomo-subscription.log"
 GEO_LOG = "/var/log/mihomo-geo.log"
 MANAGER_DIR = f"{MIHOMO_DIR}/manager"
-PANEL_VERSION = "0.1.36"
+PANEL_VERSION = "0.1.37"
 DEFAULT_PANEL_REPO_URL = "https://github.com/anxiaoyang666/mihomo.git"
 DEFAULT_PANEL_BRANCH = "main"
 PANEL_BACKUP_KEEP_COUNT = 3
@@ -3064,7 +3070,8 @@ def auto_update_lock_busy(path=None):
     return False
 
 def run_notify(title, content):
-    """后台发通知，不等结果（notify.sh 自己会写 /var/log/mihomo-notify.log）。"""
+    """后台发通知，不等结果（notify.sh 自己会写 /var/log/mihomo-notify.log）。
+    title/content 应由 notify_event 生成；这里只负责投递。"""
     try:
         subprocess.Popen(["bash", f"{SCRIPT_DIR}/notify.sh", title, content],
                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, close_fds=True, start_new_session=True)
@@ -3072,6 +3079,22 @@ def run_notify(title, content):
     except Exception as e:
         log.warning("发送通知失败：%s", e)
         return False
+
+NOTIFY_STATE_FILE = f"{MIHOMO_DIR}/notify_state.json"
+
+def notify_site_name():
+    return notify_format.site_label(read_env().get("SITE_NAME", ""))
+
+def notify_event(level, subject, lines, key=None, send=None, site=None, state_file=None, now=None):
+    """统一格式的通知：标题 "{图标} {站点名} · {主题}"，正文一行一个事实。
+    level: ok / warn / fail / info；key 不为空时对重复失败去重（见 notify_format.py）。
+    返回实际发送的 (title, body)，被去重抑制时返回 None。"""
+    prepared = notify_format.prepare(level, subject, lines, site=notify_site_name() if site is None else site,
+                                     key=key, state_file=state_file or NOTIFY_STATE_FILE, now=now)
+    if prepared is None:
+        return None
+    (send or run_notify)(*prepared)
+    return prepared
 
 def finalize_panel_auto_update(path=None, now=None, notify=run_notify):
     """自动更新升级面板后旧进程会被替换；新面板启动时在这里把 started 记成最终结果。"""
@@ -3082,10 +3105,16 @@ def finalize_panel_auto_update(path=None, now=None, notify=run_notify):
         return None
     target = panel_version_tuple(item.get("to"))
     current = panel_version_tuple(PANEL_VERSION)
+    from_version = "v" + str(item.get("from") or "?").lstrip("v")
+    to_version = "v" + str(item.get("to") or "?").lstrip("v")
     if target and current and current >= target:
         result, message = "updated", f"面板已升级到 v{PANEL_VERSION}"
+        notice = ("ok", "管理面板已更新", [f"{from_version} → v{PANEL_VERSION}", "新版本已启动，面板可以正常访问"])
     elif now - int(item.get("started_at") or item.get("last_check") or 0) > AUTO_UPDATE_PANEL_PENDING_SECONDS:
-        result, message = "failed", f"升级到 v{str(item.get('to') or '').lstrip('v')} 后面板仍是 v{PANEL_VERSION}，可能已回滚"
+        result, message = "failed", f"升级到 {to_version} 后面板仍是 v{PANEL_VERSION}，可能已回滚"
+        notice = ("fail", "管理面板更新失败，已回滚", [f"{from_version} → {to_version}",
+                  f"升级 10 分钟后仍在运行 v{PANEL_VERSION}，新版本没有启动成功",
+                  f"当前继续使用 v{PANEL_VERSION}"])
     else:
         return None
     item.update({"last_result": result, "message": message, "finished_at": now})
@@ -3097,7 +3126,7 @@ def finalize_panel_auto_update(path=None, now=None, notify=run_notify):
     except OSError:
         pass
     if notify:
-        notify(f"Mihomo 自动更新（{socket.gethostname()}）", f"管理面板：{AUTO_UPDATE_RESULT_LABELS[result]}\n{message}")
+        notify_event(*notice, send=notify)
     return result
 
 def startup_auto_update_hooks():
@@ -3357,7 +3386,7 @@ def control_service():
         'update_sub': ['bash', f'{SCRIPT_DIR}/update_subscription.sh'],
         'update_geo': ['bash', f'{SCRIPT_DIR}/update_geo.sh'],
         'net_init': ['bash', f'{SCRIPT_DIR}/gateway_init.sh'],
-        'test_notify': ['bash', f'{SCRIPT_DIR}/notify.sh', '测试', 'Web端测试消息']
+        'test_notify': ['bash', f'{SCRIPT_DIR}/notify.sh', '--event', 'info', '通知测试', '通知通道正常']
     }
     if action != 'upgrade_panel' and action not in control_actions:
         return jsonify({"success": False, "message": "未知指令"})
@@ -3586,6 +3615,8 @@ def handle_settings():
             "notify_api": e.get('NOTIFY_API') == 'true',
             "api_url": e.get('NOTIFY_API_URL', ''),
             "notify_api_url": e.get('NOTIFY_API_URL', ''),
+            "site_name": e.get('SITE_NAME', ''),
+            "site_name_default": notify_format.DEFAULT_SITE_NAME,
             
             "local_cidr": e.get('LOCAL_CIDR', ''),
             "cron_sub_enabled": e.get('CRON_SUB_ENABLED') == 'true',
@@ -3610,6 +3641,11 @@ def handle_settings():
         escaped_airport = raw_airport.replace('\n', '\\n')
 
         api_url = d.get('api_url') or d.get('notify_api_url') or ''
+        site_name = None
+        if 'site_name' in d:
+            ok, site_name, site_error = notify_format.validate_site_name(d.get('site_name'))
+            if not ok:
+                return jsonify({"success": False, "message": site_error}), 400
         cron_sub_mode = d.get('cron_sub_mode', 'daily')
         cron_sub_time = d.get('cron_sub_time', '05:00')
         cron_sub = build_schedule(cron_sub_mode, cron_sub_time, d.get('cron_sub_sched') or d.get('cron_sub_schedule'), '0 5 * * *')
@@ -3639,6 +3675,10 @@ def handle_settings():
             "CRON_GEO_TIME": cron_geo_time
         }
         
+        # 只有通知页带了站点名时才改，别的调用方不会把它清掉
+        if site_name is not None:
+            updates["SITE_NAME"] = site_name
+
         write_env(updates)
 
         cron_errors = []

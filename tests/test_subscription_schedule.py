@@ -140,7 +140,9 @@ class UpdateSubscriptionScriptTest(unittest.TestCase):
         (root / ".env").write_text("\n".join(env_lines) + "\n", encoding="utf-8")
         (root / "config.yaml").write_text(config_text, encoding="utf-8")
         (root / "templates" / "default.yaml").write_text(config_text, encoding="utf-8")
-        (root / "scripts" / "notify.sh").write_text("#!/bin/bash\nexit 0\n", encoding="utf-8")
+        # 假 notify.sh：一行记录一次调用，参数用 | 分隔
+        (root / "scripts" / "notify.sh").write_text(
+            f"#!/bin/bash\n(IFS='|'; printf '%s\\n' \"$*\") >> '{root}/notify.log'\nexit 0\n", encoding="utf-8")
         fake_bin = root / "bin"
         fake_bin.mkdir()
         (fake_bin / "systemctl").write_text("#!/bin/bash\nexit 0\n", encoding="utf-8")
@@ -210,6 +212,16 @@ class UpdateSubscriptionScriptTest(unittest.TestCase):
         state = (root / ".last_subscription").read_text(encoding="utf-8")
         self.assertIn("\tfailed\t", state)
         self.assertIn("我的机场 HTTP 404", state)
+        # 通知：统一格式 + 去重 key，正文点名机场和 HTTP 码并给出可能原因
+        notes = (root / "notify.log").read_text(encoding="utf-8").splitlines()
+        self.assertEqual(notes, ["--event|warn|--key|sub_providers|订阅节点刷新失败|"
+                                 "机场「我的机场」返回 HTTP 404，订阅链接可能已失效或机场故障|代理继续使用上次拿到的旧节点"])
+
+    def test_raw_mode_download_failure_notifies_in_new_format(self):
+        root, result = self.run_script(['CONFIG_MODE="raw"', 'SUB_URL_RAW="http://127.0.0.1:9/nope"'], "rules:\n  - MATCH,DIRECT\n")
+        self.assertNotEqual(result.returncode, 0)
+        notes = (root / "notify.log").read_text(encoding="utf-8").splitlines()
+        self.assertEqual(notes, ["--event|warn|订阅配置下载失败|托管配置链接下载不下来（网络不通或链接已失效）|配置未变化，代理继续使用当前配置"])
 
     def test_provider_refresh_calls_controller_for_each_provider(self):
         try:

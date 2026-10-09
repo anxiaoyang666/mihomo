@@ -263,7 +263,7 @@ class UpdateGeoTest(unittest.TestCase):
             rules:
               - MATCH,DIRECT
             """), encoding="utf-8")
-        self.write_shim("notify.sh", 'printf "notify %s | %s\\n" "$1" "$2" >> "$CALLS_LOG"\n', scripts=True)
+        self.write_shim("notify.sh", 'printf "notify %s\\n" "$*" >> "$CALLS_LOG"\n', scripts=True)
         self.write_shim("wget", textwrap.dedent("""\
             out=""
             while [ $# -gt 0 ]; do
@@ -304,7 +304,7 @@ class UpdateGeoTest(unittest.TestCase):
     def test_all_downloads_failing_notifies_and_exits_nonzero_without_restart(self):
         out, calls = self.run_geo("fail")
         self.assertEqual(out.returncode, 1, out.stdout + out.stderr)
-        self.assertIn("notify ❌ Geo 更新失败", calls)
+        self.assertIn("notify --event warn --key geo Geo 数据更新失败", calls)
         self.assertNotIn("systemctl restart", calls)
         self.assertEqual(sorted(p.name for p in self.mihomo.glob("geo*")), [])
 
@@ -314,7 +314,9 @@ class UpdateGeoTest(unittest.TestCase):
         self.assertEqual(sorted(p.name for p in self.mihomo.glob("geo*")), ["geoip.dat", "geoip.metadb", "geosite.dat"])
         self.assertEqual((self.mihomo / "geosite.dat").read_text(encoding="utf-8"), "v1-geosite.dat")
         self.assertEqual(calls.count("systemctl restart mihomo"), 1)
-        self.assertNotIn("notify", calls)
+        # 成功时只报一次 ok（notify.sh 按 key 判断：之前没失败过就不发）
+        self.assertNotIn("notify --event warn", calls)
+        self.assertIn("notify --event ok --key geo Geo 数据更新已恢复", calls)
         # rule-providers 通过控制器 API 刷新，名字里的 ! 要 URL 编码，0.0.0.0 要换成 127.0.0.1
         self.assertIn("curl http://127.0.0.1:9090/providers/rules/cn_ip", calls)
         self.assertIn("curl http://127.0.0.1:9090/providers/rules/geolocation-%21cn", calls)

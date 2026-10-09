@@ -7,6 +7,10 @@ CONFIG_FILE="${MIHOMO_DIR}/config.yaml"
 TEMPLATE_FILE="${MIHOMO_DIR}/templates/default.yaml"
 BACKUP_DIR="${MIHOMO_DIR}/backup"
 NOTIFY_SCRIPT="${MIHOMO_DIR}/scripts/notify.sh"
+# 通知统一走 notify.sh --event：标题 "{图标} {站点名} · {主题}"，正文一行一个事实
+notify_event() {
+    bash "$NOTIFY_SCRIPT" --event "$@" >/dev/null 2>&1 || true
+}
 TMP_DIR="$(mktemp -d)"
 TEMP_NEW="${TMP_DIR}/config_generated.yaml"
 # 每次运行的结果（时间 / 状态 / 一句话说明），面板概览页读取它显示"上次订阅更新"
@@ -64,7 +68,7 @@ if [ "$CONFIG_MODE" == "raw" ]; then
     if [ $? -ne 0 ] || [ ! -s "$TEMP_NEW" ]; then
         echo "❌ 下载失败。"
         RESULT_MSG="托管配置下载失败"
-        bash "$NOTIFY_SCRIPT" "❌ 更新失败" "无法下载托管配置。"
+        notify_event warn "订阅配置下载失败" "托管配置链接下载不下来（网络不通或链接已失效）" "配置未变化，代理继续使用当前配置"
         rm -f "$TEMP_NEW"
         exit 1
     fi
@@ -122,7 +126,7 @@ PY
     if [ $? -ne 0 ]; then
         echo "❌ 生成配置失败。"
         RESULT_MSG="按模板生成配置失败"
-        bash "$NOTIFY_SCRIPT" "❌ 生成失败" "YAML 处理错误。"
+        notify_event warn "订阅配置生成失败" "按模板生成新配置时出错（模板文件或机场链接有问题）" "配置未变化，代理继续使用当前配置"
         rm -f "$TEMP_NEW"
         exit 1
     fi
@@ -249,7 +253,7 @@ fi
 if [ ! -s "$TEMP_NEW" ]; then
     rm -f "$TEMP_NEW"
     RESULT_MSG="生成的新配置为空"
-    bash "$NOTIFY_SCRIPT" "❌ 订阅更新失败" "生成的新配置为空，已保留当前配置。"
+    notify_event warn "订阅配置无效" "生成的新配置是空的" "已保留旧配置，代理继续正常工作"
     exit 1
 fi
 
@@ -260,7 +264,7 @@ if [ -x "$CORE_BIN" ]; then
         echo "❌ 新配置校验失败，已保留当前配置。"
         echo "$CHECK_OUT" | tail -n 5
         RESULT_MSG="新配置校验失败，已保留当前配置"
-        bash "$NOTIFY_SCRIPT" "❌ 订阅更新失败" "新配置校验失败，已保留当前配置。"
+        notify_event warn "订阅配置无效" "新配置没通过 mihomo 校验（订阅可能返回了错误页面或已过期）" "已保留旧配置，代理继续正常工作"
         exit 1
     fi
 fi
@@ -307,15 +311,30 @@ with open(new_path, encoding="utf-8") as f:
     new_text = f.read()
 ok, message, action = app.apply_config_change(old_text, new_text)
 print(message, file=sys.stderr)
-print(action)
+# 给通知用的一句话：为什么要重启
+why = ""
+if action == "restarted":
+    needs_restart, reasons = app.config_needs_restart(old_text, new_text)
+    keys = [r[len("修改了 "):] for r in reasons if r.startswith("修改了 ")]
+    if keys:
+        why = "改动了 " + "、".join(keys[:4]) + ("等" if len(keys) > 4 else "") + "，需要重启"
+    elif needs_restart:
+        why = "无法比较新旧配置，保守起见重启"
+    else:
+        why = "热加载没成功，改为重启"
+print(f"{action}\t{why}")
 sys.exit(0 if ok else 1)
 PY
 )"
         APPLY_RC=$?
-        APPLY_ACTION="$(printf '%s\n' "$APPLY_ACTION" | tail -n 1)"
+        APPLY_LINE="$(printf '%s\n' "$APPLY_ACTION" | tail -n 1)"
+        APPLY_ACTION="${APPLY_LINE%%$'\t'*}"
+        APPLY_WHY=""
+        [ "$APPLY_LINE" != "$APPLY_ACTION" ] && APPLY_WHY="${APPLY_LINE#*$'\t'}"
     else
         systemctl restart mihomo
         APPLY_RC=$?
+        APPLY_WHY=""
     fi
     # 应用失败或应用后没在运行就回滚，不然 Restart=always 会让网关一直崩溃循环
     APPLY_FAILED=0
@@ -330,29 +349,35 @@ PY
         if [ -f "$BACKUP_FILE" ]; then
             cp "$BACKUP_FILE" "$CONFIG_FILE"
             systemctl restart mihomo
+            sleep 3
+            if systemctl is-active --quiet mihomo; then
+                ROLLBACK_LINE="已恢复更新前的配置，mihomo 运行正常"
+            else
+                ROLLBACK_LINE="已恢复更新前的配置，但 mihomo 仍未运行，需要人工处理"
+            fi
+        else
+            ROLLBACK_LINE="没有可恢复的旧配置，需要人工处理"
         fi
         RESULT_MSG="新配置启动失败，已回滚"
-        bash "$NOTIFY_SCRIPT" "❌ 订阅更新失败" "新配置启动失败，已回滚到更新前的配置。"
+        notify_event fail "订阅配置应用失败，已回滚" "新配置让 mihomo 启动失败" "$ROLLBACK_LINE"
         exit 1
     fi
     if [ "$APPLY_ACTION" = "reloaded" ]; then
         echo "🎉 更新完成并热加载（未中断连接）。"
         RESULT_MSG="配置已更新并热加载（未中断连接）"
-        APPLY_LABEL="已热加载"
+        APPLY_LINE="已热加载，现有连接没有中断"
     else
         echo "🎉 更新完成并重启。"
         RESULT_MSG="配置已更新并重启"
-        APPLY_LABEL="已重启"
+        APPLY_LINE="已重启 mihomo${APPLY_WHY:+：${APPLY_WHY}}"
     fi
 
-    # --- 文案转换逻辑 ---
     if [ "$CONFIG_MODE" == "raw" ]; then
-        MODE_NAME="配置托管"
+        SOURCE_LINE="来源：托管配置"
     else
-        MODE_NAME="节点订阅"
+        SOURCE_LINE="来源：机场节点订阅"
     fi
-    
-    bash "$NOTIFY_SCRIPT" "♻️ 订阅更新成功" "模式: ${MODE_NAME}，${APPLY_LABEL}"
+    notify_event ok "订阅配置已更新" "$APPLY_LINE" "$SOURCE_LINE"
 else
     rm -f "$TEMP_NEW"
     RESULT_MSG="配置无变更"
@@ -388,7 +413,7 @@ refresh_proxy_providers() {
     local curl_opts=(-sS -m 120 -o /dev/null -w '%{http_code}' -X PUT)
     [ -n "$secret" ] && curl_opts+=(-H "Authorization: Bearer ${secret}")
 
-    local ok=0 bad=0 name encoded code first_error=""
+    local ok=0 bad=0 name encoded code first_error="" failed_lines=()
     # 不依赖 PyYAML：只扫顶层 proxy-providers: 下第一层缩进的键名
     while IFS=$'\t' read -r name encoded; do
         [ -n "$name" ] || continue
@@ -400,6 +425,11 @@ refresh_proxy_providers() {
             # 内核把上游的错误原样转成状态码（机场 404 → 这里也是 404），把它带到结果里
             echo "⚠️  订阅 ${name} 刷新失败 (HTTP ${code:-000})"
             [ -n "$first_error" ] || first_error="${name} HTTP ${code:-000}"
+            if [ "${code:-000}" = "000" ]; then
+                failed_lines+=("机场「${name}」没有响应（超时或连不上），订阅链接可能已失效或机场故障")
+            else
+                failed_lines+=("机场「${name}」返回 HTTP ${code}，订阅链接可能已失效或机场故障")
+            fi
         fi
     done < <(python3 - "$CONFIG_FILE" <<'PY'
 import re, sys
@@ -434,9 +464,15 @@ PY
     echo "🔄 节点订阅刷新完成：成功 ${ok}，失败 ${bad}"
     if [ "$bad" -gt 0 ]; then
         RESULT_MSG="${RESULT_MSG}；节点刷新失败 ${bad} 个（${first_error}），请检查机场订阅地址"
+        # 同一个问题每天都会失败：notify.sh 按 key 去重（首次发、之后每 3 天提醒一次、恢复时发一次）
+        local lines=("${failed_lines[@]:0:2}")
+        [ "$bad" -gt 2 ] && lines+=("另有 $((bad - 2)) 个机场也刷新失败")
+        lines+=("代理继续使用上次拿到的旧节点")
+        notify_event warn --key sub_providers "订阅节点刷新失败" "${lines[@]}"
         return 1
     fi
     RESULT_MSG="${RESULT_MSG}；已刷新 ${ok} 个订阅的节点"
+    notify_event ok --key sub_providers "订阅节点刷新已恢复" "${ok} 个机场订阅的节点都已正常刷新"
 }
 
 refresh_proxy_providers || exit 1

@@ -48,7 +48,7 @@ class MihomoScriptStabilityContractTest(unittest.TestCase):
         self.assertIn('mv -f "$tmp_file" "$target"', text)
         self.assertIn('if [ "$replaced" -gt 0 ]; then', text)
         self.assertIn('if [ "$failed" -eq "${#GEO_FILES[@]}" ]; then', text)
-        self.assertIn('notify "❌ Geo 更新失败"', text)
+        self.assertIn('notify_event warn --key geo "Geo 数据更新失败"', text)
         self.assertIn("exit 1", text)
         self.assertNotIn(".dat.new", text)
         # 模板的规则全走 rule-providers，由控制器 API 触发内核重新拉取，不靠重启

@@ -54,6 +54,8 @@ DAY = 86400
 STABLE_TAG_RE = re.compile(r"^v\d+\.\d+\.\d+$")
 VERSION_RE = re.compile(r"v?(\d+)\.(\d+)\.(\d+)")
 NOTIFY_RESULTS = {"updated", "failed", "rolled_back"}
+# 通知里用的名字（面板状态页仍用 app.AUTO_UPDATE_ITEM_LABELS）
+NOTIFY_ITEM_NAMES = {"core": "mihomo 内核", "ui": "Dashboard", "panel": "管理面板"}
 EXIT_BUSY = 3
 
 
@@ -253,9 +255,15 @@ def write_log(rt, item, message):
     return line
 
 
-def make_result(item, result, message, current="", latest="", from_version="", to_version=""):
-    return {"item": item, "result": result, "message": message, "current": current, "latest": latest,
-            "from": from_version, "to": to_version}
+def make_result(item, result, message, current="", latest="", from_version="", to_version="", reason="", detail_lines=None):
+    """message 写日志/状态页（可以很细）；reason / detail_lines 是给通知用的一两句人话。"""
+    report = {"item": item, "result": result, "message": message, "current": current, "latest": latest,
+              "from": from_version, "to": to_version}
+    if reason:
+        report["reason"] = reason
+    if detail_lines:
+        report["detail_lines"] = list(detail_lines)
+    return report
 
 
 def record(rt, state, report, dry_run):
@@ -279,16 +287,45 @@ def record(rt, state, report, dry_run):
             item[key] = report[key]
 
 
+def vlabel(version):
+    version = str(version or "").strip()
+    return ("v" + version.lstrip("v")) if version else ""
+
+
+def short_text(text, limit=60):
+    text = " ".join(str(text or "").split())
+    return text if len(text) <= limit else text[:limit - 1] + "…"
+
+
+def subject_of(name, suffix):
+    """英文名后面空一格（"Dashboard 已更新"），中文名直接接（"mihomo 内核已更新"）。"""
+    return f"{name} {suffix}" if name[-1:].isascii() else f"{name}{suffix}"
+
+
+def notice_for(report):
+    """把一项结果翻译成 (level, 主题, 正文行)。不需要通知时返回 None。"""
+    result = report["result"]
+    if result not in NOTIFY_RESULTS:
+        return None
+    name = NOTIFY_ITEM_NAMES.get(report["item"], report["item"])
+    old, new = vlabel(report.get("from")), vlabel(report.get("to"))
+    change = [f"{old} → {new}"] if old and new else []
+    details = list(report.get("detail_lines") or [])
+    reason = report.get("reason") or short_text(report.get("message"))
+    if result == "updated":
+        return "ok", subject_of(name, "已更新"), change + details
+    if result == "rolled_back":
+        return "fail", subject_of(name, "更新失败，已回滚"), change + [reason] + details
+    keep = [f"未做任何改动，继续运行 {old}"] if old else []
+    return "warn", subject_of(name, "更新失败"), change + [reason] + (details or keep)
+
+
 def notify_result(rt, report):
-    if report["result"] not in NOTIFY_RESULTS:
+    notice = notice_for(report)
+    if notice is None:
         return
-    labels = rt.panel.AUTO_UPDATE_ITEM_LABELS
-    results = rt.panel.AUTO_UPDATE_RESULT_LABELS
-    change = f" {report['from']} → {report['to']}" if report.get("from") or report.get("to") else ""
-    title = f"Mihomo 自动更新（{socket.gethostname()}）"
-    content = f"{labels.get(report['item'], report['item'])}：{results.get(report['result'], report['result'])}{change}\n{report['message']}"
     try:
-        rt.notify(title, content)
+        rt.panel.notify_event(*notice, send=rt.notify)
     except Exception as e:
         write_log(rt, report["item"], f"发送通知失败：{e}")
 
@@ -450,34 +487,50 @@ def parse_listen(value):
     return (host, port)
 
 
+def health_summary(targets):
+    """通知里的“健康检查通过：服务、DNS、入口端口”——只列真正检查了的项。"""
+    parts = ["服务"]
+    if targets.get("dns"):
+        parts.append("DNS")
+    if targets.get("ports"):
+        parts.append("入口端口")
+    return "、".join(parts)
+
+
 def health_check(rt, expected_version, targets):
-    """在 health_timeout 秒内反复检查，全部通过返回 (True, [])，否则返回最后一次的失败项。"""
+    """在 health_timeout 秒内反复检查，全部通过返回 (True, [], [])，
+    否则返回最后一次的 (False, 失败详情[写日志], 失败简述[发通知])。"""
     deadline = rt.now() + rt.health_timeout
-    failures = []
     while True:
-        failures = []
+        failures, labels = [], []
         if not rt.service_active("mihomo"):
             failures.append("systemctl is-active mihomo 不是 active")
+            labels.append("服务没有运行")
         else:
             reported = version_text(rt.controller_version())
             if not reported:
                 failures.append("控制器 /version 没有响应")
+                labels.append("控制器无响应")
             elif reported != version_text(expected_version):
                 failures.append(f"控制器报告版本 {reported}，期望 {version_text(expected_version)}")
+                labels.append(f"运行的版本是 {reported}，不是 {version_text(expected_version)}")
             if targets.get("dns"):
                 host, port = targets["dns"]
                 ok, detail = rt.dns_probe(host, port, DNS_TEST_NAME)
                 if not ok:
                     failures.append(detail)
+                    labels.append("DNS 无法解析")
             required = set(targets.get("ports") or ())
             if required:
                 missing = sorted(required - set(rt.listening_ports() or ()))
                 if missing:
-                    failures.append("入站端口没有在监听：" + ", ".join(str(p) for p in missing))
+                    ports = ", ".join(str(p) for p in missing)
+                    failures.append("入站端口没有在监听：" + ports)
+                    labels.append(f"入口端口 {ports} 没有监听")
         if not failures:
-            return True, []
+            return True, [], []
         if rt.now() >= deadline:
-            return False, failures
+            return False, failures, labels
         rt.sleep(rt.health_interval)
 
 
@@ -544,7 +597,8 @@ def update_core(rt, settings, dry_run):
         return make_result("core", "up_to_date", message + (f"；{note}" if note else ""), current=current, latest=tag)
     asset_name, url = core_asset(tag, rt.machine())
     if not url:
-        return make_result("core", "failed", f"不支持的架构：{rt.machine()}", current=current, latest=tag)
+        return make_result("core", "failed", f"不支持的架构：{rt.machine()}", current=current, latest=tag,
+                           reason=f"不支持这台设备的 CPU 架构（{rt.machine()}）")
     if dry_run:
         return make_result("core", "available", f"可以从 {current} 更新到 {tag}（{asset_name}）" + (f"；{note}" if note else ""),
                            current=current, latest=tag, from_version=current, to_version=tag)
@@ -556,17 +610,21 @@ def update_core(rt, settings, dry_run):
         new_bin = os.path.join(workdir, "mihomo-core")
         ok, detail = rt.download(rt.panel.github_candidate_urls(url), gz_path)
         if not ok:
-            return make_result("core", "failed", f"下载 {asset_name} 失败：{detail}", current, tag, current, tag)
+            return make_result("core", "failed", f"下载 {asset_name} 失败：{detail}", current, tag, current, tag,
+                               reason="新版本下载失败（GitHub 或下载代理连不上）")
         try:
             decompress_core(gz_path, new_bin)
         except Exception as e:
-            return make_result("core", "failed", f"压缩包校验失败：{e}", current, tag, current, tag)
+            return make_result("core", "failed", f"压缩包校验失败：{e}", current, tag, current, tag,
+                               reason="下载的新版本文件已损坏")
         reported = binary_version(rt, new_bin)
         if reported != tag:
-            return make_result("core", "failed", f"新内核 -v 报告 {reported or '无法执行'}，期望 {tag}，未做改动", current, tag, current, tag)
+            return make_result("core", "failed", f"新内核 -v 报告 {reported or '无法执行'}，期望 {tag}，未做改动", current, tag, current, tag,
+                               reason="新版本无法运行或版本号不对")
         rc, output = rt.run([new_bin, "-t", "-d", rt.mihomo_dir, "-f", rt.config_file], timeout=60)
         if rc != 0:
-            return make_result("core", "failed", f"新内核 {tag} 校验当前配置失败，未做改动：\n{output.strip()[-1500:]}", current, tag, current, tag)
+            return make_result("core", "failed", f"新内核 {tag} 校验当前配置失败，未做改动：\n{output.strip()[-1500:]}", current, tag, current, tag,
+                               reason=f"新版本不认当前配置（{tag} 校验 config.yaml 未通过）")
 
         os.makedirs(rt.backup_dir, exist_ok=True)
         stamp = time.strftime("%Y%m%d%H%M%S", time.localtime(rt.now()))
@@ -579,31 +637,36 @@ def update_core(rt, settings, dry_run):
         try:
             replace_core(rt, new_bin)
             rt.run(["systemctl", "restart", "mihomo"], timeout=60)
-            healthy, failures = health_check(rt, tag, targets)
+            healthy, failures, labels = health_check(rt, tag, targets)
         except Exception as e:
-            healthy, failures = False, [f"替换/重启出错：{e}"]
+            healthy, failures, labels = False, [f"替换/重启出错：{e}"], ["替换或重启时出错"]
         if healthy:
             return make_result("core", "updated", f"已从 {current} 更新到 {tag}，健康检查通过", current=tag, latest=tag,
-                               from_version=current, to_version=tag)
-        return rollback_core(rt, backup, current, tag, targets, failures)
+                               from_version=current, to_version=tag,
+                               detail_lines=[f"健康检查通过：{health_summary(targets)}"])
+        return rollback_core(rt, backup, current, tag, targets, failures, labels)
     finally:
         shutil.rmtree(workdir, ignore_errors=True)
 
 
-def rollback_core(rt, backup, current, tag, targets, failures):
+def rollback_core(rt, backup, current, tag, targets, failures, labels=None):
     write_log(rt, "core", f"{tag} 健康检查失败：{'；'.join(failures)}，回滚到 {current}")
     try:
         replace_core(rt, backup)
         rt.run(["systemctl", "restart", "mihomo"], timeout=60)
-        healthy, after = health_check(rt, current, targets)
+        healthy, after, after_labels = health_check(rt, current, targets)
     except Exception as e:
-        healthy, after = False, [f"回滚出错：{e}"]
+        healthy, after, after_labels = False, [f"回滚出错：{e}"], ["换回旧版本时出错"]
     message = f"{tag} 健康检查失败（{'；'.join(failures)}），已回滚到 {current}"
+    reason = f"新版本没通过健康检查：{'、'.join(labels or failures)}"
     if healthy:
         message += "，回滚后检查通过"
+        details = [f"已换回 {current}，服务恢复正常"]
     else:
         message += f"。回滚后检查仍未通过（{'；'.join(after)}），需要人工处理！"
-    return make_result("core", "rolled_back", message, current=current, latest=tag, from_version=current, to_version=tag)
+        details = [f"已换回 {current}，但仍不正常：{'、'.join(after_labels or after)}", "需要尽快人工处理"]
+    return make_result("core", "rolled_back", message, current=current, latest=tag, from_version=current, to_version=tag,
+                       reason=reason, detail_lines=details)
 
 
 # ------------------------------------------------------------------
@@ -641,21 +704,26 @@ def update_ui(rt, settings, state, dry_run):
         problems = []
         if status not in (200, 204):
             problems.append(f"POST /upgrade/ui 返回 {status or '无响应'} {detail}".strip())
+            reason = f"下载新版本失败（mihomo 返回 HTTP {status}）" if status else "下载新版本失败（mihomo 控制器无响应）"
         else:
             check_status, check_detail = rt.controller_request("GET", "/ui/", timeout=15)
             if check_status != 200:
                 problems.append(f"GET /ui/ 返回 {check_status or '无响应'} {check_detail}".strip())
             if not os.path.isfile(os.path.join(target, "index.html")):
                 problems.append("更新后 index.html 不存在")
+            reason = "新版本下载后页面打不开"
         if not problems:
-            report = make_result("ui", "updated", "面板 UI 已重新下载，/ui/ 可以访问")
+            report = make_result("ui", "updated", "面板 UI 已重新下载，/ui/ 可以访问",
+                                 detail_lines=["已重新下载最新版本", "检查通过：页面可以正常打开"])
             report["last_success"] = int(rt.now())
             return report
         if had_ui:
             shutil.rmtree(target, ignore_errors=True)
             shutil.move(backup, target)
-            return make_result("ui", "rolled_back", "面板 UI 更新失败，已恢复原文件：" + "；".join(problems))
-        return make_result("ui", "failed", "面板 UI 更新失败：" + "；".join(problems))
+            return make_result("ui", "rolled_back", "面板 UI 更新失败，已恢复原文件：" + "；".join(problems),
+                               reason=reason, detail_lines=["已恢复原来的 Dashboard，可以继续使用"])
+        return make_result("ui", "failed", "面板 UI 更新失败：" + "；".join(problems),
+                           reason=reason, detail_lines=["之前没有安装 Dashboard，代理不受影响"])
     finally:
         shutil.rmtree(workdir, ignore_errors=True)
 
@@ -703,7 +771,10 @@ def run_panel_upgrade(rt, state, settings):
         return started  # 状态保持 started，由新面板启动时改成最终结果并发通知
     if ok:
         return make_result("panel", "up_to_date", message.splitlines()[0], current=current, latest=latest)
-    return make_result("panel", "failed", message, current=current, latest=latest, from_version=current, to_version=latest)
+    first_line = next((line for line in str(message or "").splitlines() if line.strip()), "")
+    return make_result("panel", "failed", message, current=current, latest=latest, from_version=current, to_version=latest,
+                       reason=f"升级没有完成：{short_text(first_line, 50)}" if first_line else "升级没有完成",
+                       detail_lines=[f"继续运行 v{current}"])
 
 
 # ------------------------------------------------------------------
@@ -750,7 +821,7 @@ def run_updates(rt, dry_run=False, only=None):
             else:
                 handle(run_panel_upgrade(rt, state, settings))
         except Exception as e:
-            handle(make_result(item, "failed", f"出错：{e}"))
+            handle(make_result(item, "failed", f"出错：{e}", reason=f"更新过程出错：{short_text(e, 50)}"))
     state["last_finished"] = int(rt.now())
     save_state(rt, state)
     success = all(r["result"] not in ("failed", "rolled_back") for r in reports)

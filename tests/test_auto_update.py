@@ -521,7 +521,9 @@ class RunOrchestrationTest(AutoUpdateTestBase):
         self.assertFalse(report["success"])
         self.assertEqual(self.upgrade_calls, [])
         self.assertEqual(len(self.sys.notifications), 1)
-        self.assertIn("已回滚", self.sys.notifications[0][1])
+        title, body = self.sys.notifications[0]
+        self.assertEqual(title, "❌ mihomo 网关 · mihomo 内核更新失败，已回滚")
+        self.assertEqual(body, "v1.19.30 → v1.19.35\n新版本没通过健康检查：DNS 无法解析\n已换回 v1.19.30，服务恢复正常")
         state = self.state()
         self.assertEqual(state["items"]["core"]["last_result"], "rolled_back")
         log_text = Path(self.app.AUTO_UPDATE_LOG).read_text()

@@ -163,7 +163,7 @@ while true; do
         4) view_log ;;
         5) crontab -l 2>/dev/null | grep -E "mihomo|JOB_SUB|JOB_GEO|MIHOMO_AUTOMATION|MIHOMO_AUTO_UPDATE"; read -n 1 -s -r -p "按键返回..." ;;
         6) bash "${SCRIPT_DIR}/update_geo.sh"; read -n 1 -s -r -p "按键返回..." ;;
-        7) bash "${SCRIPT_DIR}/notify.sh" "测试" "CLI消息"; read -n 1 -s -r -p "按键返回..." ;;
+        7) bash "${SCRIPT_DIR}/notify.sh" --event info "通知测试" "通知通道正常"; read -n 1 -s -r -p "按键返回..." ;;
         8) bash "${SCRIPT_DIR}/gateway_init.sh"; read -n 1 -s -r -p "按键返回..." ;;
         9) show_info; read -n 1 -s -r -p "按键返回..." ;;
         10) uninstall_toolbox ;;

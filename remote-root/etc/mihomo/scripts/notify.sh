@@ -1,14 +1,66 @@
 #!/bin/bash
-# scripts/notify.sh
+# scripts/notify.sh - 发通知（Webhook / Telegram）
+#
+#   notify.sh "<标题>" "<正文>"                                     旧用法：原样发送
+#   notify.sh --event <ok|warn|fail|info> [--key <K>] "<主题>" "<行1>" ["<行2>" ...]
+#       标题自动生成为 "{图标} {SITE_NAME} · {主题}"，正文一行一个事实（纯文本，微信不渲染 Markdown）。
+#       带 --key 时对重复失败去重：首次失败发、仍失败满 3 天提醒一次、恢复（ok 同 key）发一次“已恢复”。
+#       格式和去重的唯一实现在 manager/notify_format.py（面板 app.notify_event 也用它）。
+# 正文末尾统一追加一个空行和 "📅 时间"。
+
+MIHOMO_DIR="${MIHOMO_DIR:-/etc/mihomo}"
+ENV_FILE="${MIHOMO_DIR}/.env"
+NOTIFY_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # 1. 引入环境变量
-if [ -f "/etc/mihomo/.env" ]; then source /etc/mihomo/.env; fi
+if [ -f "$ENV_FILE" ]; then source "$ENV_FILE"; fi
 
-TITLE="$1"
-CONTENT="$2"
+if [ "$1" = "--event" ]; then
+    EVENT_LEVEL="$2"
+    shift 2
+    EVENT_KEY=""
+    if [ "$1" = "--key" ]; then
+        EVENT_KEY="$2"
+        shift 2
+    fi
+    case "$EVENT_LEVEL" in
+        ok|warn|fail|info) ;;
+        *) echo "用法: notify.sh --event <ok|warn|fail|info> [--key K] \"主题\" \"行1\" [\"行2\" ...]" >&2; exit 2 ;;
+    esac
+    [ -n "$1" ] || { echo "notify.sh --event 缺少主题" >&2; exit 2; }
+    EVENT_SUBJECT="$1"
+    shift
+    # 站点名只按 KEY=VALUE 解析，不执行 .env
+    SITE_NAME_VALUE=""
+    if [ -f "${NOTIFY_SCRIPT_DIR}/envutil.sh" ]; then
+        source "${NOTIFY_SCRIPT_DIR}/envutil.sh"
+        SITE_NAME_VALUE="$(get_env SITE_NAME 2>/dev/null)"
+    fi
+    FORMATTER="${MIHOMO_DIR}/manager/notify_format.py"
+    EVENT_ARGS=(--level "$EVENT_LEVEL" --site "$SITE_NAME_VALUE")
+    [ -n "$EVENT_KEY" ] && EVENT_ARGS+=(--key "$EVENT_KEY")
+    if [ -f "$FORMATTER" ] && EVENT_OUT="$(python3 "$FORMATTER" "${EVENT_ARGS[@]}" -- "$EVENT_SUBJECT" "$@")"; then
+        EVENT_STATUS="${EVENT_OUT%%$'\n'*}"
+        if [ "$EVENT_STATUS" = "skip" ]; then
+            echo "同类问题已通知过，本次不重复发送（${EVENT_KEY}）。"
+            exit 0
+        fi
+        EVENT_REST="${EVENT_OUT#*$'\n'}"
+        TITLE="${EVENT_REST%%$'\n'*}"
+        CONTENT=""
+        [ "$EVENT_REST" != "$TITLE" ] && CONTENT="${EVENT_REST#*$'\n'}"
+    else
+        # 格式化脚本不可用时也要把消息发出去：主题当标题，各行原样拼接
+        TITLE="$EVENT_SUBJECT"
+        CONTENT="$(printf '%s\n' "$@")"
+    fi
+else
+    TITLE="$1"
+    CONTENT="$2"
+fi
 # 获取当前时间
 TIME_STR=$(TZ=Asia/Shanghai date "+%Y-%m-%d %H:%M:%S")
-LOG_FILE="/var/log/mihomo-notify.log"
+LOG_FILE="${NOTIFY_LOG_FILE:-/var/log/mihomo-notify.log}"
 TMP_DIR="$(mktemp -d)"
 TG_OUT="${TMP_DIR}/mihomo_notify_tg.out"
 API_OUT="${TMP_DIR}/mihomo_notify_api.out"

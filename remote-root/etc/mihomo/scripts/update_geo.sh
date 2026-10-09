@@ -10,7 +10,8 @@
 #      MetaCubeX/meta-rules-dat 的 latest release：GEOSITE 用 geosite.dat，GEOIP 用 geoip.metadb（geodata-mode: false，
 #      默认）或 geoip.dat（geodata-mode: true）。这里把这三个文件下载到临时目录，只有内容真的变了才替换，
 #      并且只有替换了至少一个文件才重启内核（这些文件内核只在启动时加载）。
-#   3. 三个文件全部下载失败：发通知并以非 0 退出，不重启。
+#   3. 三个文件全部下载失败：发通知并以非 0 退出，不重启；部分失败也发通知（保留旧文件）。
+#      通知带 --key geo 去重：首次失败发、仍失败每 3 天提醒一次、恢复时发一次“已恢复”。
 
 MIHOMO_DIR="${MIHOMO_DIR:-/etc/mihomo}"
 GEO_DIR="${MIHOMO_DIR}"
@@ -36,9 +37,10 @@ fi
 GEO_BASE_URL="https://github.com/MetaCubeX/meta-rules-dat/releases/download/latest"
 GEO_FILES=(geoip.dat geosite.dat geoip.metadb)
 
-notify() {
+# 统一格式：notify_event <ok|warn|fail|info> [--key K] "主题" "行1" ["行2" ...]
+notify_event() {
     [ -x "$NOTIFY_SCRIPT" ] || [ -f "$NOTIFY_SCRIPT" ] || return 0
-    bash "$NOTIFY_SCRIPT" "$1" "$2" >/dev/null 2>&1 || true
+    bash "$NOTIFY_SCRIPT" --event "$@" >/dev/null 2>&1 || true
 }
 
 echo "⬇️  开始更新 Geo 数据..."
@@ -48,6 +50,7 @@ echo "⬇️  开始更新 Geo 数据..."
 # ==========================================
 replaced=0
 failed=0
+failed_names=()
 for name in "${GEO_FILES[@]}"; do
     tmp_file="${TMP_DIR}/${name}"
     target="${GEO_DIR}/${name}"
@@ -62,12 +65,13 @@ for name in "${GEO_FILES[@]}"; do
     else
         echo "❌ ${name} 下载失败"
         failed=$((failed + 1))
+        failed_names+=("$name")
     fi
 done
 
 if [ "$failed" -eq "${#GEO_FILES[@]}" ]; then
     echo "❌ 所有 Geo 数据文件都下载失败，未改动任何文件，也不重启内核。"
-    notify "❌ Geo 更新失败" "geoip.dat / geosite.dat / geoip.metadb 全部下载失败，请检查网络或 GH 代理。"
+    notify_event warn --key geo "Geo 数据更新失败" "geoip.dat、geosite.dat、geoip.metadb 都没下载成功" "可能是 GitHub 或下载代理连不上" "继续使用旧的 Geo 数据，代理不受影响"
     exit 1
 fi
 
@@ -151,5 +155,10 @@ else
 fi
 if [ "$failed" -gt 0 ]; then
     echo "⚠️  有 ${failed} 个文件下载失败，已保留旧文件。"
+    failed_list=""
+    for name in "${failed_names[@]}"; do failed_list="${failed_list:+${failed_list}、}${name}"; done
+    notify_event warn --key geo "Geo 数据部分更新失败" "${failed_list} 下载失败，其余文件已是最新" "失败的文件继续使用旧版本"
+else
+    notify_event ok --key geo "Geo 数据更新已恢复" "三个 Geo 数据文件都已下载成功"
 fi
 echo "🏁 Geo 更新任务结束"

@@ -1368,6 +1368,9 @@
                 <div class="card">
                     <div class="card-header"><i class="bi bi-megaphone-fill"></i> Webhook 通知</div>
                     <div class="card-body">
+                        <label class="form-label fw-bold" for="site_name">站点名称</label>
+                        <input type="text" class="form-control mb-1" id="site_name" maxlength="20" placeholder="例如：联通（留空显示“mihomo 网关”）">
+                        <div class="form-text mb-3">显示在每条通知的标题里，例如“✅ 联通 · mihomo 内核已更新”。最多 20 个字，不能有换行和引号。</div>
                         <div class="form-check form-switch mb-3">
                             <input class="form-check-input" type="checkbox" id="notify_api">
                             <label class="form-check-label fw-bold">Webhook API</label>
@@ -2593,6 +2596,12 @@
             if (document.getElementById('account_user')) document.getElementById('account_user').value = res.web_user || 'admin';
             document.getElementById('notify_api').checked = isTrue(res.notify_api);
             document.getElementById('api_url').value = res.api_url || '';
+            const siteNameField = document.getElementById('site_name');
+            if (siteNameField) {
+                siteNameField.value = res.site_name || '';
+                siteNameField.placeholder = `例如：联通（留空显示“${res.site_name_default || 'mihomo 网关'}”）`;
+                siteNameField.dataset.loaded = '1';
+            }
             cachedUrlRaw = (res.sub_url_raw || '').replace(/\|/g, '\n');
             cachedUrlAirport = (res.sub_url_airport || '').replace(/\|/g, '\n');
             const mode = res.config_mode || 'airport';
@@ -2869,9 +2878,16 @@
         else cachedUrlRaw = document.getElementById('sub_url').value;
         updateScheduleHint('sub', '订阅');
         updateScheduleHint('geo', ' Geo 数据库');
+        const siteNameInput = document.getElementById('site_name');
+        // 设置还没读回来时不提交站点名，免得把已保存的名字清空
+        const siteName = siteNameInput && siteNameInput.dataset.loaded === '1' ? siteNameInput.value.trim() : null;
+        if (siteName !== null && (siteName.length > 20 || /[\r\n\t"'`\\$]/.test(siteName))) {
+            showToast('站点名称最多 20 个字，不能包含换行、引号、反斜杠或 $ 符号', 'error');
+            return { success: false };
+        }
         setActionBusy(trigger, true);
         try {
-            const res = await api('/settings', {
+            const payload = {
                 notify_api: String(document.getElementById('notify_api').checked),
                 api_url: document.getElementById('api_url').value,
                 config_mode: currentMode,
@@ -2886,7 +2902,9 @@
                 cron_geo_mode: document.getElementById('cron_geo_mode') ? document.getElementById('cron_geo_mode').value : 'daily',
                 cron_geo_time: document.getElementById('cron_geo_time') ? document.getElementById('cron_geo_time').value : '04:00',
                 cron_geo_sched: document.getElementById('cron_geo_sched') ? document.getElementById('cron_geo_sched').value : ''
-            });
+            };
+            if (siteName !== null) payload.site_name = siteName;
+            const res = await api('/settings', payload);
             if (!silent) showToast(res.message, res.success ? 'success' : 'error');
             loadOverview();
             return res;
