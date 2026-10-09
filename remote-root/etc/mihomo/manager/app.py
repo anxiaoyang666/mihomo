@@ -50,7 +50,7 @@ SUBSCRIPTION_STATE_FILE = f"{MIHOMO_DIR}/.last_subscription"
 SUBSCRIPTION_LOG = "/var/log/mihomo-subscription.log"
 GEO_LOG = "/var/log/mihomo-geo.log"
 MANAGER_DIR = f"{MIHOMO_DIR}/manager"
-PANEL_VERSION = "0.1.46"
+PANEL_VERSION = "0.1.47"
 DEFAULT_PANEL_REPO_URL = "https://github.com/anxiaoyang666/mihomo.git"
 DEFAULT_PANEL_BRANCH = "main"
 PANEL_BACKUP_KEEP_COUNT = 3
@@ -3677,6 +3677,30 @@ def get_status():
 def api_overview():
     return jsonify(collect_overview())
 
+NOTIFY_LOG_FILE = "/var/log/mihomo-notify.log"
+NOTIFY_LOG_LINE_RE = re.compile(r"^\[(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\] (Webhook|Telegram) (sent|failed) title=(.*?) (?:exit=(\d+) )?http=(\d+)(.*)$")
+
+def recent_notifications(limit=15, path=None):
+    """通知中心的“最近通知”：解析 notify.sh 写的日志，最新的在前。时间是 notify.sh 写的北京时间。"""
+    text = read_recent_log_lines(path or NOTIFY_LOG_FILE, 400, tail_bytes=64 * 1024) if os.path.exists(path or NOTIFY_LOG_FILE) else ""
+    items = []
+    for line in text.splitlines():
+        match = NOTIFY_LOG_LINE_RE.match(line.strip())
+        if not match:
+            continue
+        stamp, channel, state, title, exit_code, http, rest = match.groups()
+        error = ""
+        if state == "failed":
+            detail = re.search(r"error=(.*?)(?: response=|$)", rest or "")
+            error = (detail.group(1).strip() if detail else "") or f"exit={exit_code or '?'} http={http}"
+        items.append({"at": stamp, "channel": channel, "ok": state == "sent", "title": title[:200], "http": http, "error": error[:200]})
+    return items[-limit:][::-1]
+
+@app.route('/api/notify-log')
+@login_required
+def api_notify_log():
+    return jsonify({"items": recent_notifications()})
+
 @app.route('/api/devices')
 @login_required
 def api_devices():
@@ -3804,6 +3828,9 @@ def control_service():
             ok, message, should_reload = upgrade_panel()
             return jsonify({"success": ok, "message": message, "reload_after": 5 if should_reload else 0})
         s, m = run_args(control_actions[action], timeout=180)
+        if action == 'test_notify':
+            # notify.sh 发送失败或没开任何渠道时也是退出码 0，按它的输出判断
+            s = s and "已发送" in m and "发送失败" not in m
         return jsonify({"success": s, "message": m})
     finally:
         CONFIG_LOCK.release()

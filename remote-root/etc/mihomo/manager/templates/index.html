@@ -567,6 +567,15 @@
         .log-level strong { display: block; margin-top: 7px; font-size: 22px; line-height: 1; }
         .log-level.warn strong { color: var(--warning); }
         .log-level.error strong { color: var(--danger); }
+        .notify-events summary { cursor: pointer; font-size: 13px; color: var(--text-muted); }
+        .notify-events ul { margin: 8px 0 4px; padding-left: 18px; font-size: 13px; }
+        .notify-log { display: grid; gap: 6px; }
+        .notify-log-row { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: 10px; align-items: baseline; padding: 8px 10px; border-radius: 8px; background: var(--bg-card-soft); border-left: 3px solid var(--accent); font-size: 13px; }
+        .notify-log-row.failed { border-left-color: var(--danger); }
+        .notify-log-row time { color: var(--text-muted); font-size: 12px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+        .notify-log-row .title { overflow-wrap: anywhere; }
+        .notify-log-row .err { display: block; color: var(--danger); font-size: 12px; margin-top: 2px; }
+        .notify-log-row .state { font-size: 12px; color: var(--text-muted); white-space: nowrap; }
         .log-recent-list { margin-top: 12px; display: grid; gap: 6px; }
         .log-recent-title, .log-recent-empty { font-size: 12px; color: var(--text-muted); }
         .log-recent { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 8px; align-items: baseline; padding: 8px 10px; border-radius: 8px; background: var(--bg-card-soft); border-left: 3px solid var(--warning); font-size: 12px; }
@@ -982,7 +991,7 @@
             <button class="nav-link" id="tab-devices-btn" data-bs-toggle="pill" data-bs-target="#tab-devices" onclick="closeSidebar()"><i class="bi bi-pc-display"></i> 设备</button>
             <button class="nav-link" id="tab-tasks-btn" data-bs-toggle="pill" data-bs-target="#tab-tasks" onclick="loadConfig(); closeSidebar()"><i class="bi bi-sliders"></i> 订阅与任务</button>
             <button class="nav-link" id="tab-rules-btn" data-bs-toggle="pill" data-bs-target="#tab-rules" onclick="loadRulesPage(); closeSidebar()"><i class="bi bi-signpost-split"></i> 分流同步</button>
-            <button class="nav-link" id="tab-notify-btn" data-bs-toggle="pill" data-bs-target="#tab-notify" onclick="loadSettings(); closeSidebar()"><i class="bi bi-bell"></i> 通知中心</button>
+            <button class="nav-link" id="tab-notify-btn" data-bs-toggle="pill" data-bs-target="#tab-notify" onclick="loadSettings(); loadNotifyLog(); closeSidebar()"><i class="bi bi-bell"></i> 通知中心</button>
             <button class="nav-link" id="tab-logs-btn" data-bs-toggle="pill" data-bs-target="#tab-logs" onclick="closeSidebar()"><i class="bi bi-terminal"></i> 运行日志</button>
         </div>
 
@@ -1410,7 +1419,7 @@
                         <div class="eyebrow">Notification</div>
                         <h1 class="page-title">通知中心</h1>
                     </div>
-                    <button class="action-button primary" onclick="control('test_notify', this)"><i class="bi bi-send-fill"></i> 发送测试</button>
+                    <button class="action-button primary" onclick="testNotify(this)"><i class="bi bi-send-fill"></i> 发送测试</button>
                 </div>
 
                 <div class="card">
@@ -1424,8 +1433,28 @@
                             <label class="form-check-label fw-bold">Webhook API</label>
                         </div>
                         <input type="text" class="form-control" id="api_url" placeholder="http://...">
-                        <div class="form-text">支持发送 JSON 通知的 Webhook 地址</div>
+                        <div class="form-text">以 POST JSON 发送 <code>{"title": …, "content": …}</code>；正文是纯文本，末尾附北京时间</div>
                         <button class="action-button primary mt-3" data-requires-settings disabled onclick="saveSettings(false, this)"><i class="bi bi-save"></i> 保存所有设置</button>
+                        <details class="notify-events mt-3">
+                            <summary>哪些情况会发通知</summary>
+                            <ul>
+                                <li>订阅：配置已更新、下载失败、校验或启动失败（已回滚）、节点刷新失败与恢复</li>
+                                <li>Geo 数据：更新失败、部分失败与恢复</li>
+                                <li>自动更新：内核 / 面板 / Dashboard 已更新、更新失败、失败已回滚</li>
+                            </ul>
+                            <div class="form-text">同一个问题持续存在时只在第一次发，之后最多每 3 天提醒一次，恢复时再发一条。</div>
+                        </details>
+                    </div>
+                </div>
+
+                <div class="card">
+                    <div class="card-header d-flex justify-content-between align-items-center">
+                        <span><i class="bi bi-clock-history"></i> 最近通知</span>
+                        <button class="soft-button" type="button" onclick="loadNotifyLog()"><i class="bi bi-arrow-clockwise"></i> 刷新</button>
+                    </div>
+                    <div class="card-body">
+                        <div class="notify-log" id="notifyLogList"><div class="text-muted small">加载中…</div></div>
+                        <div class="form-text mt-2">来自 /var/log/mihomo-notify.log，最近 15 条，时间为北京时间</div>
                     </div>
                 </div>
 
@@ -2879,6 +2908,7 @@
             if (document.getElementById('cron_geo_time')) document.getElementById('cron_geo_time').value = serverToLocalHHMM(res.cron_geo_time || cronToDailyTime(res.cron_geo_sched, '04:00'));
             updateScheduleVisibility('sub', '订阅');
             updateScheduleVisibility('geo', ' Geo 数据库');
+            rememberNotifyFields();
             settingsLoaded = true;
             setSettingsButtonsEnabled(true);
         });
@@ -3179,6 +3209,56 @@
         } finally {
             setActionBusy(trigger, false);
         }
+    }
+
+    // ===== 通知中心 =====
+    const NOTIFY_FIELDS = ['notify_api', 'api_url', 'site_name'];
+
+    function notifyFieldValue(id) {
+        const el = document.getElementById(id);
+        if (!el) return '';
+        return el.type === 'checkbox' ? String(el.checked) : el.value.trim();
+    }
+
+    function rememberNotifyFields() {
+        NOTIFY_FIELDS.forEach(id => {
+            const el = document.getElementById(id);
+            if (el) el.dataset.saved = notifyFieldValue(id);
+        });
+    }
+
+    function notifyFieldsDirty() {
+        return NOTIFY_FIELDS.some(id => {
+            const el = document.getElementById(id);
+            return el && el.dataset.saved !== undefined && el.dataset.saved !== notifyFieldValue(id);
+        });
+    }
+
+    // 测试走的是已保存的设置（notify.sh 读 .env）；框里改了还没保存就先保存，免得测的是旧地址
+    async function testNotify(trigger = null) {
+        if (trigger?.classList?.contains('is-busy')) return;
+        if (notifyFieldsDirty()) {
+            if (!await askConfirm('通知设置有改动还没保存。先保存再发送测试？')) return;
+            const saved = await saveSettings(true);
+            if (!saved?.success) {
+                showToast(saved?.message || '设置保存失败，未发送测试', 'error');
+                return;
+            }
+        }
+        await control('test_notify', trigger);
+        loadNotifyLog();
+    }
+
+    async function loadNotifyLog() {
+        const box = document.getElementById('notifyLogList');
+        if (!box) return;
+        const res = await api('/notify-log');
+        const items = Array.isArray(res?.items) ? res.items : [];
+        box.innerHTML = items.length ? items.map(item => `<div class="notify-log-row${item.ok ? '' : ' failed'}">
+                <time>${escapeHtml(item.at)}</time>
+                <div class="title">${escapeHtml(item.title)}${item.ok ? '' : `<span class="err">${escapeHtml(item.error)}</span>`}</div>
+                <span class="state">${item.ok ? '已送达' : '发送失败'}</span>
+            </div>`).join('') : '<div class="text-muted small">还没有发送记录</div>';
     }
 
     // ===== 自动更新 =====
@@ -3599,7 +3679,7 @@
             new bootstrap.Tab(tabTrigger).show();
             if (activeTabId === 'tab-tasks-btn') loadConfig();
             if (activeTabId === 'tab-rules-btn') loadRulesPage();
-            if (activeTabId === 'tab-notify-btn') loadSettings();
+            if (activeTabId === 'tab-notify-btn') { loadSettings(); loadNotifyLog(); }
             if (activeTabId === 'tab-logs-btn') startLogPolling();
             if (activeTabId === 'tab-devices-btn') startDevicePolling();
         }
