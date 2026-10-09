@@ -51,3 +51,17 @@ class LogViewTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class LogMessageFormatTest(unittest.TestCase):
+    def test_connection_lines_are_split_into_parts(self):
+        from test_auto_update_card import extract, run_node
+        html = INDEX.read_text(encoding="utf-8")
+        js = extract(html, r"(?m)^    const LOG_CONN_RE = .*$", r"(?m)^    const LOG_DIAL_RE = .*$")
+        out = run_node(self, js, "[LOG_CONN_RE.exec(c)?.slice(1), LOG_DIAL_RE.exec(c)?.slice(1)]", [
+            "[TCP] 10.10.10.253:51768 --> api.anthropic.com:443 match DomainSuffix(anthropic.com) using AI[DMIT-Verizon]",
+            "[TCP] dial DIRECT (match RuleSet/private) 192.168.10.1:62270 --> disabled.invalid:80 error: dns resolve failed",
+        ])
+        self.assertEqual(out[0][0], ["TCP", "10.10.10.253:51768", "api.anthropic.com:443", "DomainSuffix(anthropic.com)", "AI[DMIT-Verizon]"])
+        self.assertEqual(out[1][1], ["TCP", "DIRECT", "RuleSet/private", "192.168.10.1:62270", "disabled.invalid:80", "dns resolve failed"])
+        self.assertIn("renderLogMessage(msgEl,", html)
