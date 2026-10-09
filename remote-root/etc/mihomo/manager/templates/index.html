@@ -1361,7 +1361,7 @@
                         <div class="card">
                             <div class="card-header"><i class="bi bi-check2-circle"></i> 强制直连</div>
                             <div class="card-body">
-                                <div class="form-text mb-2">每行一个域名。保存后写入 mihomo 顶部规则，动作为 DIRECT，并同步到 mosctl 的强制国内。</div>
+                                <div class="form-text mb-2">每行一个域名（同时匹配它的所有子域名），可在行尾用 # 写注释。保存后写入 mihomo 顶部规则，动作为 DIRECT，并同步到 mosctl 的强制国内。</div>
                                 <textarea class="form-control" id="rule_force_cn" rows="8" placeholder="ippure.com"></textarea>
                                 <button class="action-button primary mt-3" onclick="saveRule('force-cn', this)"><i class="bi bi-save"></i> 保存强制直连</button>
                             </div>
@@ -1369,7 +1369,7 @@
                         <div class="card">
                             <div class="card-header"><i class="bi bi-send"></i> 强制代理</div>
                             <div class="card-body">
-                                <div class="form-text mb-2">每行一个域名。保存后写入 mihomo 顶部规则，默认走 ♻️ 自动选择，并同步到 mosctl 的强制国外。</div>
+                                <div class="form-text mb-2">每行一个域名（同时匹配它的所有子域名），可在行尾用 # 写注释。保存后写入 mihomo 顶部规则，默认走 ♻️ 自动选择，并同步到 mosctl 的强制国外。</div>
                                 <textarea class="form-control" id="rule_force_nocn" rows="8" placeholder="openai.com"></textarea>
                                 <button class="action-button primary mt-3" onclick="saveRule('force-nocn', this)"><i class="bi bi-save"></i> 保存强制代理</button>
                             </div>

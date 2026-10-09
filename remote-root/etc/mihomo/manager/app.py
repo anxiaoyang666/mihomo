@@ -50,7 +50,7 @@ SUBSCRIPTION_STATE_FILE = f"{MIHOMO_DIR}/.last_subscription"
 SUBSCRIPTION_LOG = "/var/log/mihomo-subscription.log"
 GEO_LOG = "/var/log/mihomo-geo.log"
 MANAGER_DIR = f"{MIHOMO_DIR}/manager"
-PANEL_VERSION = "0.1.45"
+PANEL_VERSION = "0.1.46"
 DEFAULT_PANEL_REPO_URL = "https://github.com/anxiaoyang666/mihomo.git"
 DEFAULT_PANEL_BRANCH = "main"
 PANEL_BACKUP_KEEP_COUNT = 3
@@ -600,17 +600,59 @@ def parse_peers(value):
         peers.append(peer)
     return list(dict.fromkeys(peers))
 
-def normalize_rule_domains(content):
-    domains = []
-    for line in str(content or "").replace("|", "\n").splitlines():
-        item = line.strip()
-        if not item or item.startswith("#"):
+RULE_DOMAIN_RE = re.compile(r"[A-Za-z0-9*_.-]+\.[A-Za-z0-9_.-]+")
+# mosctl（mosdns domain_set）的写法：domain:/full: 前缀、行尾 # 注释都合法；keyword:/regexp: mihomo 的域名规则集表达不了
+RULE_STRIP_PREFIXES = ("domain-suffix,", "domain,", "domain:", "full:")
+RULE_MOSDNS_ONLY_PREFIXES = ("keyword:", "regexp:")
+
+def parse_rule_domains(content):
+    """返回 (域名列表, 问题列表)。问题是 (行号, 原文, 类型)：类型 space / url / invalid 是写错了，
+    mosdns_only 是 keyword:/regexp:（mosdns 能用，mihomo 用不了）。"""
+    domains, problems = [], []
+    for number, line in enumerate(str(content or "").replace("|", "\n").splitlines(), 1):
+        item = line.split("#", 1)[0].strip()
+        if not item:
             continue
-        item = re.sub(r"^(DOMAIN-SUFFIX,|DOMAIN,|full:)", "", item, flags=re.IGNORECASE).strip()
+        if len(item.split()) != 1:
+            problems.append((number, item, "space"))
+            continue
+        lower = item.lower()
+        if lower.startswith(RULE_MOSDNS_ONLY_PREFIXES):
+            problems.append((number, item, "mosdns_only"))
+            continue
+        for prefix in RULE_STRIP_PREFIXES:
+            if lower.startswith(prefix):
+                item = item[len(prefix):]
+                break
+        if "://" in item or "/" in item:
+            problems.append((number, item, "url"))
+            continue
         item = item.lstrip(".")
-        if re.fullmatch(r"[A-Za-z0-9*_.-]+\.[A-Za-z0-9_.-]+", item):
+        if RULE_DOMAIN_RE.fullmatch(item):
             domains.append(item.lower())
-    return list(dict.fromkeys(domains))
+        else:
+            problems.append((number, item, "invalid"))
+    return list(dict.fromkeys(domains)), problems
+
+def normalize_rule_domains(content):
+    return parse_rule_domains(content)[0]
+
+def rule_content_problem(content):
+    """本机保存时的检查：写错的行直接报错（同步给 mosctl 也会被拒）；只 mosdns 能用的写法放行但提示。
+    返回 (错误, 提示)。"""
+    _, problems = parse_rule_domains(content)
+    for number, item, kind in problems:
+        shown = item if len(item) <= 60 else item[:60] + "…"
+        if kind == "space":
+            return f"第 {number} 行只能写一个域名，不能有空格（注释请用 # 开头）", ""
+        if kind == "url":
+            host = urlsplit(item if "://" in item else "http://" + item).hostname or ""
+            return f"第 {number} 行是网址，请只写域名" + (f"，例如 {host}" if host else "") + f"：{shown}", ""
+        if kind == "invalid":
+            return f"第 {number} 行不是合法域名：{shown}", ""
+    only = [str(number) for number, _item, kind in problems if kind == "mosdns_only"]
+    note = f"第 {'、'.join(only)} 行是 keyword:/regexp: 规则，mihomo 不支持，只在 mosdns 生效" if only else ""
+    return "", note
 
 def read_sync_settings():
     env = read_env()
@@ -1050,12 +1092,16 @@ def save_rule_content(rule_id, content):
         return False, "未知规则文件", None
     if not is_safe_text(content):
         return False, "规则内容不合法或过大", None
+    problem, note = rule_content_problem(content)
+    if problem:
+        return False, problem + "，未保存", None
     current = read_mihomo_sync_rules()
     new_contents = dict(current)
     new_contents[rule_id] = rule_content_text(normalize_rule_domains(content))
     if sync_rules_unchanged(current, new_contents):
-        return True, RULES_UNCHANGED_MESSAGE, "unchanged"
-    return update_mihomo_sync_block(new_contents)
+        return True, RULES_UNCHANGED_MESSAGE + (f"（{note}）" if note else ""), "unchanged"
+    ok, message, action = update_mihomo_sync_block(new_contents)
+    return ok, message + (f"（{note}）" if ok and note else ""), action
 
 def restart_mihomo():
     return run_args(["systemctl", "restart", "mihomo"], timeout=60)
