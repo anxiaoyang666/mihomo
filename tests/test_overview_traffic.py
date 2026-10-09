@@ -78,6 +78,18 @@ class TrafficSeriesTest(unittest.TestCase):
             record({"downloadTotal": 5050 + i, "uploadTotal": 10}, now=505 + 5 * i)
         self.assertEqual(len(self.app.traffic_series()), self.app.TRAFFIC_SERIES_POINTS)
 
+    def test_listener_inbound_is_swapped(self):
+        record = self.app.record_traffic_sample
+        def conn(cid, name, up, down):
+            return {"id": cid, "upload": up, "download": down, "metadata": {"inboundName": name}}
+        record({"downloadTotal": 0, "uploadTotal": 0, "connections": [conn("a", "ss-inbound", 0, 0)]}, now=100)
+        # 其他地点经隧道往本地推了 10000 字节（mihomo 记为上传），本机 TUN 客户端上传 500、下载 2000
+        record({"downloadTotal": 2010, "uploadTotal": 10500, "connections": [
+            conn("a", "ss-inbound", 10000, 10), conn("b", "DEFAULT-TUN", 500, 2000)]}, now=105)
+        self.assertEqual(self.app.traffic_series(), [{"t": 105, "down": 2400, "up": 102}])
+        self.assertFalse(self.app.is_listener_inbound({"metadata": {"inboundName": "DEFAULT-MIXED"}}))
+        self.assertFalse(self.app.is_listener_inbound({"metadata": {}}))
+
     def test_wired_into_overview_and_page(self):
         source = (ROOT / "remote-root" / "etc" / "mihomo" / "manager" / "app.py").read_text(encoding="utf-8")
         self.assertIn('"traffic_series": traffic_series(),', source)

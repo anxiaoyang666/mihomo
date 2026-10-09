@@ -50,7 +50,7 @@ SUBSCRIPTION_STATE_FILE = f"{MIHOMO_DIR}/.last_subscription"
 SUBSCRIPTION_LOG = "/var/log/mihomo-subscription.log"
 GEO_LOG = "/var/log/mihomo-geo.log"
 MANAGER_DIR = f"{MIHOMO_DIR}/manager"
-PANEL_VERSION = "0.1.41"
+PANEL_VERSION = "0.1.42"
 DEFAULT_PANEL_REPO_URL = "https://github.com/anxiaoyang666/mihomo.git"
 DEFAULT_PANEL_BRANCH = "main"
 PANEL_BACKUP_KEEP_COUNT = 3
@@ -1882,22 +1882,44 @@ TRAFFIC_SERIES = []
 TRAFFIC_PREV = {}
 TRAFFIC_LOCK = threading.Lock()
 
+def is_listener_inbound(connection):
+    """连接是不是从 listeners（其他地点经隧道连进来）进来的。本机的 TUN / mixed / socks 等入站叫 DEFAULT-*。"""
+    meta = connection.get("metadata") if isinstance(connection, dict) else None
+    name = str((meta or {}).get("inboundName") or "")
+    return bool(name) and not name.startswith("DEFAULT-")
+
 def record_traffic_sample(data, now=None):
+    """mihomo 的上传/下载按“发起连接的一方”算。其他地点经 listeners 连进来的连接，
+    对方发来的数据在 mihomo 里算上传，对本地点来说其实是下载，所以这部分要对调。"""
     now = time.time() if now is None else now
-    down = first_number(data.get("downloadTotal")) if isinstance(data, dict) else 0
-    up = first_number(data.get("uploadTotal")) if isinstance(data, dict) else 0
+    data = data if isinstance(data, dict) else {}
+    down = first_number(data.get("downloadTotal"))
+    up = first_number(data.get("uploadTotal"))
+    connections = data.get("connections") if isinstance(data.get("connections"), list) else []
+    inbound = {}
+    for conn in connections:
+        if is_listener_inbound(conn) and conn.get("id"):
+            inbound[conn["id"]] = (first_number(conn.get("upload")), first_number(conn.get("download")))
     with TRAFFIC_LOCK:
         prev_at = TRAFFIC_PREV.get("at")
         elapsed = now - prev_at if prev_at else 0
         # 累计值变小说明 mihomo 重启过；间隔太长（控制器断过）也不算，只更新基准
         if 0 < elapsed <= DEVICE_SAMPLE_INTERVAL * 6 and down >= TRAFFIC_PREV["down"] and up >= TRAFFIC_PREV["up"]:
+            prev_inbound = TRAFFIC_PREV.get("inbound") or {}
+            in_up = in_down = 0
+            for conn_id, (c_up, c_down) in inbound.items():
+                p_up, p_down = prev_inbound.get(conn_id, (0, 0))
+                in_up += max(0, c_up - p_up)
+                in_down += max(0, c_down - p_down)
+            d_up = up - TRAFFIC_PREV["up"]
+            d_down = down - TRAFFIC_PREV["down"]
             TRAFFIC_SERIES.append({
                 "t": int(now),
-                "down": int((down - TRAFFIC_PREV["down"]) / elapsed),
-                "up": int((up - TRAFFIC_PREV["up"]) / elapsed),
+                "down": int(max(0, d_down - in_down + in_up) / elapsed),
+                "up": int(max(0, d_up - in_up + in_down) / elapsed),
             })
             del TRAFFIC_SERIES[:-TRAFFIC_SERIES_POINTS]
-        TRAFFIC_PREV.update({"at": now, "down": down, "up": up})
+        TRAFFIC_PREV.update({"at": now, "down": down, "up": up, "inbound": inbound})
 
 def traffic_series():
     with TRAFFIC_LOCK:
