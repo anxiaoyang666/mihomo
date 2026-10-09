@@ -90,9 +90,44 @@ class TrafficSeriesTest(unittest.TestCase):
         self.assertFalse(self.app.is_listener_inbound({"metadata": {"inboundName": "DEFAULT-MIXED"}}))
         self.assertFalse(self.app.is_listener_inbound({"metadata": {}}))
 
+    def test_daily_totals_restart_and_rollover(self):
+        app = self.app
+        record = app.record_traffic_sample
+        day1 = 1791504000 - app.TRAFFIC_DAY_OFFSET + 3600   # 北京时间 10-09 01:00
+        def conn(cid, up, down):
+            return {"id": cid, "upload": up, "download": down, "metadata": {"inboundName": "ss-inbound"}}
+        record({"downloadTotal": 100, "uploadTotal": 100, "connections": []}, now=day1)
+        record({"downloadTotal": 1100, "uploadTotal": 5100, "connections": [conn("a", 4000, 0)]}, now=day1 + 5)
+        today = app.traffic_daily_summary(now=day1 + 5)["today"]
+        self.assertEqual((today["date"], today["down"], today["up"]), ("2026-10-09", 5000, 1000), "隧道进来的 4000 算下载")
+        # mihomo 重启：计数器从 0 开始，重启后的量照样算进今天
+        record({"downloadTotal": 300, "uploadTotal": 50, "connections": []}, now=day1 + 10)
+        self.assertEqual(app.traffic_daily_summary(now=day1 + 10)["today"]["down"], 5300)
+        # 第二天
+        summary = app.traffic_daily_summary(now=day1 + 86400)
+        self.assertEqual(summary["today"], {"date": "2026-10-10", "down": 0, "up": 0})
+        self.assertEqual(summary["yesterday"], {"date": "2026-10-09", "down": 5300, "up": 1050})
+        # 隔了不止一天：没有昨天的数据
+        self.assertIsNone(app.traffic_daily_summary(now=day1 + 3 * 86400)["yesterday"])
+
+    def test_daily_persistence(self):
+        app = self.app
+        app.TRAFFIC_DAILY.update({"date": "2026-10-09", "down": 7, "up": 8, "yesterday": {"date": "2026-10-08", "down": 1, "up": 2}})
+        path = self.tmp.name + "/traffic_daily.json"
+        self.assertTrue(app.save_traffic_daily(path))
+        fresh = load_app(self.tmp.name)
+        self.assertTrue(fresh.load_traffic_daily(path))
+        self.assertEqual((fresh.TRAFFIC_DAILY["down"], fresh.TRAFFIC_DAILY["yesterday"]["up"]), (7, 2))
+        with open(path, "w") as f:
+            f.write("{bad")
+        self.assertFalse(fresh.load_traffic_daily(path))
+
     def test_wired_into_overview_and_page(self):
         source = (ROOT / "remote-root" / "etc" / "mihomo" / "manager" / "app.py").read_text(encoding="utf-8")
         self.assertIn('"traffic_series": traffic_series(),', source)
+        self.assertIn('"traffic_daily": traffic_daily_summary(),', source)
+        self.assertIn("load_traffic_daily()", source)
+        self.assertIn("save_traffic_daily()", source)
         self.assertIn("record_traffic_sample(data)", source)
         page = INDEX.read_text(encoding="utf-8")
         self.assertIn("renderTrafficChart(data.traffic_series);", page)

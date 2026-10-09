@@ -50,7 +50,7 @@ SUBSCRIPTION_STATE_FILE = f"{MIHOMO_DIR}/.last_subscription"
 SUBSCRIPTION_LOG = "/var/log/mihomo-subscription.log"
 GEO_LOG = "/var/log/mihomo-geo.log"
 MANAGER_DIR = f"{MIHOMO_DIR}/manager"
-PANEL_VERSION = "0.1.42"
+PANEL_VERSION = "0.1.43"
 DEFAULT_PANEL_REPO_URL = "https://github.com/anxiaoyang666/mihomo.git"
 DEFAULT_PANEL_BRANCH = "main"
 PANEL_BACKUP_KEEP_COUNT = 3
@@ -1888,6 +1888,79 @@ def is_listener_inbound(connection):
     name = str((meta or {}).get("inboundName") or "")
     return bool(name) and not name.startswith("DEFAULT-")
 
+# 今日 / 昨日流量（按本地点方向）。mihomo 自己的累计值重启就清零、也不分方向，所以由面板按采样累加，
+# 每天按北京时间 0 点换日（四个地点都在国内；容器是 UTC，不能用本地时间），存到 traffic_daily.json
+TRAFFIC_DAILY_FILE = f"{MIHOMO_DIR}/traffic_daily.json"
+TRAFFIC_DAY_OFFSET = 8 * 3600
+TRAFFIC_DAILY = {"date": "", "down": 0, "up": 0, "yesterday": None, "dirty": False}
+
+def traffic_day(now):
+    return time.strftime("%Y-%m-%d", time.gmtime(now + TRAFFIC_DAY_OFFSET))
+
+def add_daily_traffic(now, d_down, d_up):
+    """调用方持有 TRAFFIC_LOCK。跨天时把今天的数挪到昨天；隔了不止一天就没有昨天的数据。"""
+    day = traffic_day(now)
+    if TRAFFIC_DAILY["date"] != day:
+        if TRAFFIC_DAILY["date"] and TRAFFIC_DAILY["date"] == traffic_day(now - 86400):
+            TRAFFIC_DAILY["yesterday"] = {"date": TRAFFIC_DAILY["date"], "down": TRAFFIC_DAILY["down"], "up": TRAFFIC_DAILY["up"]}
+        elif TRAFFIC_DAILY["date"]:
+            TRAFFIC_DAILY["yesterday"] = None
+        TRAFFIC_DAILY.update({"date": day, "down": 0, "up": 0})
+    TRAFFIC_DAILY["down"] += max(0, int(d_down))
+    TRAFFIC_DAILY["up"] += max(0, int(d_up))
+    TRAFFIC_DAILY["dirty"] = True
+
+def traffic_daily_summary(now=None):
+    now = time.time() if now is None else now
+    with TRAFFIC_LOCK:
+        add_daily_traffic(now, 0, 0)  # 过了 0 点还没有新采样时也要换日
+        today = {"date": TRAFFIC_DAILY["date"], "down": TRAFFIC_DAILY["down"], "up": TRAFFIC_DAILY["up"]}
+        yesterday = dict(TRAFFIC_DAILY["yesterday"]) if TRAFFIC_DAILY["yesterday"] else None
+    return {"today": today, "yesterday": yesterday}
+
+def load_traffic_daily(path=None):
+    try:
+        with open(path or TRAFFIC_DAILY_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return False
+    if not isinstance(data, dict) or not re.fullmatch(r"\d{4}-\d{2}-\d{2}", str(data.get("date") or "")):
+        return False
+    yesterday = data.get("yesterday")
+    if isinstance(yesterday, dict) and re.fullmatch(r"\d{4}-\d{2}-\d{2}", str(yesterday.get("date") or "")):
+        yesterday = {"date": yesterday["date"], "down": first_number(yesterday.get("down")), "up": first_number(yesterday.get("up"))}
+    else:
+        yesterday = None
+    with TRAFFIC_LOCK:
+        TRAFFIC_DAILY.update({"date": data["date"], "down": first_number(data.get("down")), "up": first_number(data.get("up")),
+                              "yesterday": yesterday, "dirty": False})
+    return True
+
+def save_traffic_daily(path=None):
+    path = path or TRAFFIC_DAILY_FILE
+    with TRAFFIC_LOCK:
+        if not TRAFFIC_DAILY["date"]:
+            return False
+        text = json.dumps({k: TRAFFIC_DAILY[k] for k in ("date", "down", "up", "yesterday")}, separators=(",", ":"))
+        TRAFFIC_DAILY["dirty"] = False
+    directory = os.path.dirname(path) or "."
+    os.makedirs(directory, exist_ok=True)
+    tmp_path = os.path.join(directory, f".traffic_daily.{os.getpid()}.{secrets.token_hex(4)}.tmp")
+    try:
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            f.write(text)
+        os.replace(tmp_path, path)
+    except Exception:
+        remove_quietly(tmp_path)
+        raise
+    return True
+
+def is_listener_inbound(connection):
+    """连接是不是从 listeners（其他地点经隧道连进来）进来的。本机的 TUN / mixed / socks 等入站叫 DEFAULT-*。"""
+    meta = connection.get("metadata") if isinstance(connection, dict) else None
+    name = str((meta or {}).get("inboundName") or "")
+    return bool(name) and not name.startswith("DEFAULT-")
+
 def record_traffic_sample(data, now=None):
     """mihomo 的上传/下载按“发起连接的一方”算。其他地点经 listeners 连进来的连接，
     对方发来的数据在 mihomo 里算上传，对本地点来说其实是下载，所以这部分要对调。"""
@@ -1903,22 +1976,23 @@ def record_traffic_sample(data, now=None):
     with TRAFFIC_LOCK:
         prev_at = TRAFFIC_PREV.get("at")
         elapsed = now - prev_at if prev_at else 0
-        # 累计值变小说明 mihomo 重启过；间隔太长（控制器断过）也不算，只更新基准
-        if 0 < elapsed <= DEVICE_SAMPLE_INTERVAL * 6 and down >= TRAFFIC_PREV["down"] and up >= TRAFFIC_PREV["up"]:
-            prev_inbound = TRAFFIC_PREV.get("inbound") or {}
+        if prev_at:
+            # 累计值变小说明 mihomo 重启过，计数器从 0 重新开始，连接也都是新的
+            restarted = down < TRAFFIC_PREV["down"] or up < TRAFFIC_PREV["up"]
+            base_down, base_up = (0, 0) if restarted else (TRAFFIC_PREV["down"], TRAFFIC_PREV["up"])
+            prev_inbound = {} if restarted else (TRAFFIC_PREV.get("inbound") or {})
             in_up = in_down = 0
             for conn_id, (c_up, c_down) in inbound.items():
                 p_up, p_down = prev_inbound.get(conn_id, (0, 0))
                 in_up += max(0, c_up - p_up)
                 in_down += max(0, c_down - p_down)
-            d_up = up - TRAFFIC_PREV["up"]
-            d_down = down - TRAFFIC_PREV["down"]
-            TRAFFIC_SERIES.append({
-                "t": int(now),
-                "down": int(max(0, d_down - in_down + in_up) / elapsed),
-                "up": int(max(0, d_up - in_up + in_down) / elapsed),
-            })
-            del TRAFFIC_SERIES[:-TRAFFIC_SERIES_POINTS]
+            site_down = max(0, down - base_down - in_down + in_up)
+            site_up = max(0, up - base_up - in_up + in_down)
+            add_daily_traffic(now, site_down, site_up)
+            # 曲线只画正常间隔的点；重启或控制器断过的那一段速率算不准，不画
+            if not restarted and 0 < elapsed <= DEVICE_SAMPLE_INTERVAL * 6:
+                TRAFFIC_SERIES.append({"t": int(now), "down": int(site_down / elapsed), "up": int(site_up / elapsed)})
+                del TRAFFIC_SERIES[:-TRAFFIC_SERIES_POINTS]
         TRAFFIC_PREV.update({"at": now, "down": down, "up": up, "inbound": inbound})
 
 def traffic_series():
@@ -1961,6 +2035,10 @@ def device_sampler_loop():
                     dirty = DEVICE_STATE["dirty"]
                 if dirty:
                     save_device_state()
+                with TRAFFIC_LOCK:
+                    traffic_dirty = TRAFFIC_DAILY["dirty"]
+                if traffic_dirty:
+                    save_traffic_daily()
                 last_persist = now
         except Exception as e:
             log.warning("设备采样失败：%s", e)
@@ -1972,6 +2050,10 @@ def stop_device_sampler():
         save_device_state()
     except Exception as e:
         log.warning("退出时保存设备统计失败：%s", e)
+    try:
+        save_traffic_daily()
+    except Exception as e:
+        log.warning("退出时保存今日流量失败：%s", e)
 
 def start_device_sampler():
     """只在 app.py 作为 __main__ 运行时调用（mihomo-manager.service 就是这么启动的）；
@@ -1981,6 +2063,7 @@ def start_device_sampler():
         return False
     DEVICE_SAMPLER_STARTED = True
     load_device_state()
+    load_traffic_daily()
     thread = threading.Thread(target=device_sampler_loop, name="device-sampler", daemon=True)
     thread.start()
     atexit.register(stop_device_sampler)
@@ -2785,6 +2868,7 @@ def collect_overview():
         "memory": first_number(connections.get("memory")),
         "proxy_groups": proxy_groups,
         "traffic_series": traffic_series(),
+        "traffic_daily": traffic_daily_summary(),
         "devices": devices_summary(),
         "log_levels": log_level_summary(),
         "settings": {

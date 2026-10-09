@@ -1029,14 +1029,14 @@
                         <div class="metric-foot" id="metricController">控制器检测中</div>
                     </div>
                     <div class="metric-card">
-                        <div class="metric-label">累计下载 <small>mihomo 启动以来</small></div>
+                        <div class="metric-label">今日下载</div>
                         <div class="metric-value"><span id="metricDownload">--</span><span class="metric-unit" id="metricDownloadUnit">B</span></div>
-                        <div class="metric-foot" id="metricCore">Core --</div>
+                        <div class="metric-foot" id="metricDownloadYesterday">昨日 --</div>
                     </div>
                     <div class="metric-card">
-                        <div class="metric-label">累计上传 <small>mihomo 启动以来</small></div>
+                        <div class="metric-label">今日上传</div>
                         <div class="metric-value"><span id="metricUpload">--</span><span class="metric-unit" id="metricUploadUnit">B</span></div>
-                        <div class="metric-foot" id="metricUpdated">等待刷新</div>
+                        <div class="metric-foot" id="metricUploadYesterday">昨日 --</div>
                     </div>
                 </div>
 
@@ -1692,15 +1692,19 @@
         setText('metricServiceState', running ? '运行中' : '已停止');
         setText('status-text', running ? 'Mihomo 服务正在运行' : 'Mihomo 服务未运行');
         setText('metricConnections', data.connections_count ?? '--');
-        const down = formatBytes(data.download_total);
-        const up = formatBytes(data.upload_total);
+        // 今日流量按本地点方向统计（北京时间 0 点换日），由面板后台累加
+        const daily = data.traffic_daily || {};
+        const today = daily.today || {};
+        const yesterday = daily.yesterday;
+        const down = formatBytes(today.down);
+        const up = formatBytes(today.up);
         setText('metricDownload', down.value);
         setText('metricDownloadUnit', down.unit);
         setText('metricUpload', up.value);
         setText('metricUploadUnit', up.unit);
-        setText('metricController', data.controller?.reachable ? data.controller.base_url : '控制器不可达');
-        setText('metricCore', data.core_version ? 'Core ' + data.core_version : 'Core 未连接');
-        setText('metricUpdated', data.updated_at ? new Date(data.updated_at * 1000).toLocaleTimeString() : '等待刷新');
+        setText('metricDownloadYesterday', yesterday ? '昨日 ' + formatBytesText(yesterday.down) : '昨日 暂无数据');
+        setText('metricUploadYesterday', yesterday ? '昨日 ' + formatBytesText(yesterday.up) : '昨日 暂无数据');
+        setText('metricController', data.controller?.reachable ? (data.core_version ? 'Core ' + data.core_version : '控制器在线') : '控制器不可达');
 
         const reach = document.getElementById('controllerReachable');
         if (reach) {
