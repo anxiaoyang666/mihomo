@@ -88,5 +88,35 @@ class TrafficSeriesTest(unittest.TestCase):
         self.assertIn("group.delay === 0 ? '超时'", page)
 
 
+class LogSummaryTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.app = load_app(self.tmp.name)
+        self.app.LOG_FILE = self.tmp.name + "/mihomo.log"
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_window_counts_and_recent(self):
+        lines = [
+            'time="2026-10-09T03:00:00.1Z" level=warning msg="old warning"',
+            'time="2026-10-09T05:40:16.5Z" level=warning msg="[TCP] dial DIRECT error: dns resolve failed"',
+            'time="2026-10-09T05:40:20.5Z" level=info msg="[TCP] a --> b"',
+            'time="2026-10-09T05:41:00.5Z" level=error msg="boom \\"x\\""',
+            'not a log line',
+        ]
+        with open(self.app.LOG_FILE, "w", encoding="utf-8") as f:
+            f.write("\n".join(lines) + "\n")
+        now = self.app.parse_log_epoch("2026-10-09T05:45:00")
+        summary = self.app.log_level_summary(now=now)
+        self.assertEqual((summary["error"], summary["warn"], summary["info"]), (1, 1, 1), "只算最近 1 小时")
+        self.assertEqual([r["level"] for r in summary["recent"]], ["error", "warn"], "最新的在前")
+        self.assertEqual(summary["recent"][0]["message"], 'boom "x"')
+
+    def test_missing_file(self):
+        summary = self.app.log_level_summary()
+        self.assertEqual((summary["error"], summary["recent"]), (0, []))
+
+
 if __name__ == "__main__":
     unittest.main()

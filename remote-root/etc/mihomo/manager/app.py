@@ -5,6 +5,7 @@ from collections import deque
 import subprocess
 import atexit
 import base64
+import calendar
 import fcntl
 import logging
 import os
@@ -49,7 +50,7 @@ SUBSCRIPTION_STATE_FILE = f"{MIHOMO_DIR}/.last_subscription"
 SUBSCRIPTION_LOG = "/var/log/mihomo-subscription.log"
 GEO_LOG = "/var/log/mihomo-geo.log"
 MANAGER_DIR = f"{MIHOMO_DIR}/manager"
-PANEL_VERSION = "0.1.40"
+PANEL_VERSION = "0.1.41"
 DEFAULT_PANEL_REPO_URL = "https://github.com/anxiaoyang666/mihomo.git"
 DEFAULT_PANEL_BRANCH = "main"
 PANEL_BACKUP_KEEP_COUNT = 3
@@ -1442,24 +1443,52 @@ def proxy_group_summary(proxies):
         })
     return groups
 
-def log_level_summary():
-    levels = {"error": 0, "warn": 0, "info": 0, "debug": 0}
-    if not os.path.exists(LOG_FILE):
-        return levels
+# 概览页的日志统计：只看最近 1 小时（按日志里的时间戳算），附最近几条警告/错误。
+# 概览每 5 秒刷新一次，结果缓存 30 秒，日志没变也直接复用
+LOG_SUMMARY_WINDOW = 3600
+LOG_SUMMARY_TAIL_BYTES = 4 * 1024 * 1024
+LOG_SUMMARY_CACHE_SECONDS = 30
+LOG_SUMMARY_RECENT = 5
+LOG_SUMMARY_CACHE = {}
+LOG_LINE_RE = re.compile(r'time="(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})[^"]*Z?" level=([a-zA-Z]+) msg="(.*)"\s*$')
+
+def parse_log_epoch(stamp):
     try:
-        lines = read_recent_log_lines(LOG_FILE, 200).splitlines()
-        for line in lines:
-            match = re.search(r"level=([a-zA-Z]+)", line)
-            if not match:
-                continue
-            level = match.group(1).lower()
-            if level in ("warning", "warn"):
-                levels["warn"] += 1
-            elif level in levels:
-                levels[level] += 1
-    except Exception:
-        pass
-    return levels
+        return int(calendar.timegm(time.strptime(stamp, "%Y-%m-%dT%H:%M:%S")))
+    except (ValueError, OverflowError):
+        return None
+
+def log_level_summary(now=None):
+    now = time.time() if now is None else now
+    try:
+        stat = os.stat(LOG_FILE)
+    except OSError:
+        return {"error": 0, "warn": 0, "info": 0, "debug": 0, "window": LOG_SUMMARY_WINDOW, "recent": []}
+    key = (stat.st_size, stat.st_mtime)
+    cached = LOG_SUMMARY_CACHE.get("value")
+    if cached and LOG_SUMMARY_CACHE.get("key") == key and now - LOG_SUMMARY_CACHE.get("at", 0) < LOG_SUMMARY_CACHE_SECONDS:
+        return cached
+    levels = {"error": 0, "warn": 0, "info": 0, "debug": 0}
+    recent = []
+    since = now - LOG_SUMMARY_WINDOW
+    text = read_recent_log_lines(LOG_FILE, 100000, tail_bytes=LOG_SUMMARY_TAIL_BYTES)
+    for line in text.splitlines():
+        match = LOG_LINE_RE.match(line)
+        if not match:
+            continue
+        at = parse_log_epoch(match.group(1))
+        if at is None or at < since:
+            continue
+        level = match.group(2).lower()
+        level = "warn" if level == "warning" else level
+        if level not in levels:
+            continue
+        levels[level] += 1
+        if level in ("warn", "error"):
+            recent.append({"at": at, "level": level, "message": match.group(3).replace('\\"', '"')[:300]})
+    value = dict(levels, window=LOG_SUMMARY_WINDOW, recent=recent[-LOG_SUMMARY_RECENT:][::-1])
+    LOG_SUMMARY_CACHE.update({"key": key, "at": now, "value": value})
+    return value
 
 def subscription_count(env):
     raw = [env.get("SUB_URL_RAW", "")]
@@ -2741,7 +2770,11 @@ def collect_overview():
             "subscription_count": subscription_count(env),
             "cron_sub_enabled": env.get("CRON_SUB_ENABLED") == "true",
             "cron_sub_sched": env.get("CRON_SUB_SCHED", ""),
+            "cron_sub_schedule": cron_to_mode(env.get("CRON_SUB_SCHED", ""), ""),
             "cron_geo_enabled": env.get("CRON_GEO_ENABLED") == "true",
+            "cron_geo_schedule": cron_to_mode(env.get("CRON_GEO_SCHED", ""), ""),
+            "auto_update": auto_update_settings(env),
+            "timezone": server_timezone_info(),
             "notify_api": env.get("NOTIFY_API") == "true",
             "local_cidr": env.get("LOCAL_CIDR", ""),
             "local_networks_effective": local_effective,

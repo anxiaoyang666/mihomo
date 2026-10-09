@@ -565,6 +565,14 @@
 
         .log-level span { display: block; color: var(--text-muted); font-size: 12px; }
         .log-level strong { display: block; margin-top: 7px; font-size: 22px; line-height: 1; }
+        .log-level.warn strong { color: var(--warning); }
+        .log-level.error strong { color: var(--danger); }
+        .log-recent-list { margin-top: 12px; display: grid; gap: 6px; }
+        .log-recent-title, .log-recent-empty { font-size: 12px; color: var(--text-muted); }
+        .log-recent { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 8px; align-items: baseline; padding: 8px 10px; border-radius: 8px; background: var(--bg-card-soft); border-left: 3px solid var(--warning); font-size: 12px; }
+        .log-recent.error { border-left-color: var(--danger); }
+        .log-recent span { color: var(--text-muted); font-variant-numeric: tabular-nums; }
+        .log-recent code { color: inherit; white-space: normal; overflow-wrap: anywhere; font-size: 12px; }
 
         .card { margin-bottom: 18px; }
         .card-header {
@@ -1021,12 +1029,12 @@
                         <div class="metric-foot" id="metricController">控制器检测中</div>
                     </div>
                     <div class="metric-card">
-                        <div class="metric-label">累计下行</div>
+                        <div class="metric-label">累计下载 <small>mihomo 启动以来</small></div>
                         <div class="metric-value"><span id="metricDownload">--</span><span class="metric-unit" id="metricDownloadUnit">B</span></div>
                         <div class="metric-foot" id="metricCore">Core --</div>
                     </div>
                     <div class="metric-card">
-                        <div class="metric-label">累计上行</div>
+                        <div class="metric-label">累计上传 <small>mihomo 启动以来</small></div>
                         <div class="metric-value"><span id="metricUpload">--</span><span class="metric-unit" id="metricUploadUnit">B</span></div>
                         <div class="metric-foot" id="metricUpdated">等待刷新</div>
                     </div>
@@ -1099,7 +1107,7 @@
                         <div class="panel-title-row">
                             <div>
                                 <h2 class="panel-title">日志级别</h2>
-                                <div class="text-muted small mt-1">最近 200 行日志统计</div>
+                                <div class="text-muted small mt-1">最近 1 小时 mihomo 内核日志</div>
                             </div>
                         </div>
                         <div class="log-strip" id="logLevelStrip">
@@ -1108,6 +1116,7 @@
                             <div class="log-level"><span>INFO</span><strong>--</strong></div>
                             <div class="log-level"><span>DEBUG</span><strong>--</strong></div>
                         </div>
+                        <div class="log-recent-list" id="logRecentList"></div>
                     </div>
                 </div>
             </section>
@@ -1719,26 +1728,46 @@
         const settings = data.settings || {};
         const settingsList = document.getElementById('settingsHealthList');
         if (settingsList) {
-            settingsList.innerHTML = [
-                ['配置模式', settings.config_mode || '--', 'small-pill'],
-                ['订阅源', `${settings.subscription_count || 0} 个`, settings.subscription_count ? 'small-pill' : 'small-pill warn'],
-                ['订阅任务', settings.cron_sub_enabled ? ('已开启 ' + (settings.cron_sub_sched || '')).trim() : '未开启', settings.cron_sub_enabled ? 'small-pill' : 'small-pill warn'],
-                ['上次订阅更新', formatLastSubscription(settings.last_subscription), !settings.last_subscription ? 'small-pill warn' : (settings.last_subscription.ok ? 'small-pill' : 'small-pill warn')],
-                ['Geo 任务', settings.cron_geo_enabled ? '已开启' : '未开启', settings.cron_geo_enabled ? 'small-pill' : 'small-pill warn'],
-                ['通知', settings.notify_api ? '已开启' : '未开启', settings.notify_api ? 'small-pill' : 'small-pill warn'],
-                ['直连网段', formatLocalNetworks(settings.local_networks_effective, settings.local_networks_auto), (settings.local_networks_effective || []).length ? 'small-pill' : 'small-pill warn']
-            ].map(item => `<div class="health-row"><div><strong>${item[0]}</strong><span>${escapeHtml(item[1])}</span></div><span class="${item[2]}">${escapeHtml(item[1])}</span></div>`).join('');
+            const tz = settings.timezone || null;
+            const last = settings.last_subscription;
+            const auto = settings.auto_update || {};
+            const nets = settings.local_networks_effective || [];
+            // 每行：名称、说明、右侧状态、状态样式
+            const rows = [
+                ['配置模式', settings.config_mode === 'raw' ? '订阅地址直接给出完整的 mihomo 配置' : '用节点订阅生成配置',
+                    settings.config_mode === 'raw' ? '配置托管' : '节点订阅', 'small-pill'],
+                ['订阅更新', settings.cron_sub_enabled ? overviewScheduleText(settings.cron_sub_schedule, settings.cron_sub_sched, tz) : `订阅源 ${settings.subscription_count || 0} 个，定时更新已关闭`,
+                    settings.cron_sub_enabled ? '已开启' : '未开启', settings.cron_sub_enabled ? 'small-pill' : 'small-pill warn'],
+                ['上次订阅更新', formatLastSubscription(last),
+                    !last ? '未运行' : (last.ok ? '成功' : '失败'), !last ? 'small-pill warn' : (last.ok ? 'small-pill' : 'small-pill danger')],
+                ['Geo 数据库', settings.cron_geo_enabled ? overviewScheduleText(settings.cron_geo_schedule, '', tz) : '定时更新已关闭',
+                    settings.cron_geo_enabled ? '已开启' : '未开启', settings.cron_geo_enabled ? 'small-pill' : 'small-pill warn'],
+                ['自动更新', auto.enabled ? overviewScheduleText({ mode: 'daily', time: auto.time }, '', tz).replace('自动更新', '检查内核、面板和 Dashboard 新版本') : '内核、面板和 Dashboard 不会自动更新',
+                    auto.enabled ? '已开启' : '未开启', auto.enabled ? 'small-pill' : 'small-pill warn'],
+                ['通知', settings.notify_api ? '更新结果和异常会推送到通知地址' : '不会推送任何通知',
+                    settings.notify_api ? '已开启' : '未开启', settings.notify_api ? 'small-pill' : 'small-pill warn'],
+                ['直连网段', formatLocalNetworks(nets, settings.local_networks_auto),
+                    nets.length ? (settings.local_networks_auto ? '自动' : '已设置') : '未设置', nets.length ? 'small-pill' : 'small-pill warn']
+            ];
+            settingsList.innerHTML = rows.map(item => `<div class="health-row"><div><strong>${item[0]}</strong><span>${escapeHtml(item[1])}</span></div><span class="${item[3]}">${escapeHtml(item[2])}</span></div>`).join('');
         }
 
         const levels = data.log_levels || {};
         const strip = document.getElementById('logLevelStrip');
         if (strip) {
             strip.innerHTML = [
-                ['ERROR', levels.error || 0],
-                ['WARN', levels.warn || 0],
-                ['INFO', levels.info || 0],
-                ['DEBUG', levels.debug || 0]
-            ].map(item => `<div class="log-level"><span>${item[0]}</span><strong>${item[1]}</strong></div>`).join('');
+                ['ERROR', levels.error || 0, levels.error ? 'error' : ''],
+                ['WARN', levels.warn || 0, levels.warn ? 'warn' : ''],
+                ['INFO', levels.info || 0, ''],
+                ['DEBUG', levels.debug || 0, '']
+            ].map(item => `<div class="log-level ${item[2]}"><span>${item[0]}</span><strong>${item[1]}</strong></div>`).join('');
+        }
+        const recentBox = document.getElementById('logRecentList');
+        if (recentBox) {
+            const recent = Array.isArray(levels.recent) ? levels.recent : [];
+            recentBox.innerHTML = recent.length
+                ? '<div class="log-recent-title">最近的警告和错误</div>' + recent.map(item => `<div class="log-recent ${item.level}"><span>${formatClock(item.at)}</span><code>${escapeHtml(item.message)}</code></div>`).join('')
+                : '<div class="log-recent-empty">最近 1 小时没有警告或错误</div>';
         }
 
         panelCurrentVersion = data.panel_version || panelCurrentVersion;
@@ -1748,13 +1777,29 @@
         renderVersionPopover();
     }
 
+    function formatClock(epoch) {
+        const date = new Date(Number(epoch) * 1000);
+        return `${pad2(date.getHours())}:${pad2(date.getMinutes())}:${pad2(date.getSeconds())}`;
+    }
+
+    // 定时任务的时间写在服务器时区（容器一般是 UTC），概览页换算成浏览器本地时间再显示
+    function overviewScheduleText(schedule, rawCron, tz) {
+        const mode = schedule?.mode || 'advanced';
+        const time = schedule?.time || '';
+        const local = tz && /^\d{2}:\d{2}$/.test(time) ? serverTimeToBrowserLocal(time, tz.offset_minutes) : time;
+        if (mode === 'daily') return `每天 ${local || time} 自动更新`;
+        if (mode === 'every6h') return `每 6 小时自动更新（从 ${local || time} 起）`;
+        if (mode === 'every12h') return `每 12 小时自动更新（从 ${local || time} 起）`;
+        return rawCron ? `Cron：${rawCron}（服务器时间）` : '自定义 Cron';
+    }
+
     // .last_subscription 里的时间 + 结果，概览页显示用
     function formatLastSubscription(state) {
         if (!state || !state.at) return '还没运行过';
         const when = new Date(state.at * 1000);
         const pad = n => String(n).padStart(2, '0');
         const stamp = `${pad(when.getMonth() + 1)}-${pad(when.getDate())} ${pad(when.getHours())}:${pad(when.getMinutes())}`;
-        return `${stamp} ${state.ok ? '✓' : '✗'} ${state.message || ''}`.trim();
+        return `${stamp} ${state.message || ''}`.trim();
     }
 
     async function loadOverview() {
@@ -2550,7 +2595,15 @@
         if (!modeInput || !timeInput || !schedInput || !hint) return;
         const mode = modeInput.value || 'daily';
         schedInput.value = scheduleToCron(mode, timeInput.value, schedInput.value, schedInput.value || '0 5 * * *');
-        hint.textContent = scheduleLabel(mode, timeInput.value, label);
+        hint.textContent = scheduleLabel(mode, timeInput.value, label) + scheduleLocalNote(mode, timeInput.value);
+    }
+
+    // 时间按服务器时区执行（容器多为 UTC）；和浏览器时区不同时注明换算后的本地时间
+    function scheduleLocalNote(mode, timeValue) {
+        if (mode === 'advanced' || !autoUpdateTz) return '';
+        if (-new Date().getTimezoneOffset() === Number(autoUpdateTz.offset_minutes)) return '';
+        const local = serverTimeToBrowserLocal(timeValue, autoUpdateTz.offset_minutes);
+        return local ? `（服务器时间，相当于你本地 ${local}）` : '';
     }
 
     function updateScheduleVisibility(kind, label) {
@@ -3130,6 +3183,8 @@
         const hint = document.getElementById('auto_update_tz_hint');
         if (!hint || !tz) return;
         autoUpdateTz = tz;
+        updateScheduleHint('sub', '订阅');
+        updateScheduleHint('geo', ' Geo 数据库');
         const value = document.getElementById('auto_update_time').value;
         const local = serverTimeToBrowserLocal(value, tz.offset_minutes);
         const browserOffset = -new Date().getTimezoneOffset();

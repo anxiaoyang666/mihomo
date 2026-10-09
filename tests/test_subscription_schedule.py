@@ -78,7 +78,7 @@ class SubscriptionScheduleContractTest(unittest.TestCase):
         self.assertIn("\nmigrate_cron_commands()\n", text)
 
     def test_ui_and_logrotate_cover_the_new_state_and_logs(self):
-        self.assertIn("formatLastSubscription(settings.last_subscription)", INDEX.read_text(encoding="utf-8"))
+        self.assertIn("formatLastSubscription(last)", INDEX.read_text(encoding="utf-8"))
         rotate = LOGROTATE.read_text(encoding="utf-8")
         self.assertIn("/var/log/mihomo-subscription.log", rotate)
         self.assertIn("/var/log/mihomo-geo.log", rotate)

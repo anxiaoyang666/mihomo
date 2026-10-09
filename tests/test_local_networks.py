@@ -323,7 +323,7 @@ class LocalNetworksUiContractTest(unittest.TestCase):
         self.assertNotIn("留空则不启用", self.html)
 
     def test_overview_pill_shows_effective_and_auto(self):
-        self.assertIn("['直连网段', formatLocalNetworks(settings.local_networks_effective, settings.local_networks_auto)", self.html)
+        self.assertIn("['直连网段', formatLocalNetworks(nets, settings.local_networks_auto)", self.html)
         self.assertIn("(auto ? '（自动）' : '')", self.html)
 
     def test_save_validates_locally_and_aborts(self):

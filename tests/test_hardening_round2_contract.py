@@ -169,7 +169,7 @@ class LogHandlingContractTest(unittest.TestCase):
         self.assertIn("LOG_TAIL_BYTES = 256 * 1024", app)
         self.assertIn("f.seek(0, os.SEEK_END)", app)
         self.assertIn("start = max(0, size - tail_bytes)", app)
-        self.assertIn('lines = read_recent_log_lines(LOG_FILE, 200).splitlines()', app)
+        self.assertIn('text = read_recent_log_lines(LOG_FILE, 100000, tail_bytes=LOG_SUMMARY_TAIL_BYTES)', app)
         self.assertNotIn("f.readlines()[-200:]", app)
 
     def test_logrotate_snippet_is_installed_and_managed(self):
