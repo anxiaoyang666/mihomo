@@ -733,6 +733,13 @@
         .device-app-value { color: var(--muted); white-space: nowrap; }
 
         /* ===== 通知 / 同步 / 自动更新 ===== */
+        .notify-grid { display: grid; grid-template-columns: minmax(340px, 1fr) minmax(0, 1.5fr); gap: 16px; align-items: start; }
+        .notify-grid > .card { margin-bottom: 0; min-width: 0; }
+        .notify-preview { margin-top: 16px; padding: 12px 14px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface-2); }
+        .notify-preview.off { opacity: .5; }
+        .notify-preview-label { color: var(--faint); font-size: 11.5px; margin-bottom: 6px; }
+        .notify-preview-title { font-weight: 600; font-size: 13.5px; }
+        .notify-preview-body { margin-top: 4px; color: var(--muted); font-size: 12.5px; line-height: 1.6; }
         .notify-events summary { cursor: pointer; font-size: 12.5px; color: var(--muted); }
         .notify-events ul { margin: 8px 0 4px; padding-left: 18px; font-size: 12.5px; color: var(--muted); }
         .notify-log { display: grid; }
@@ -814,6 +821,7 @@
             .kpi:nth-child(-n+2) { border-top: 0; }
             .kpi:nth-child(even) { border-left: 1px solid var(--line); }
             .kpi:last-child:nth-child(odd) { grid-column: 1 / -1; }
+            .notify-grid { grid-template-columns: 1fr; }
             .dash-row, .devices-strip, .device-details-grid, .ikuai-form, .log-toolbar { grid-template-columns: 1fr; }
             .device-head { display: none; }
             .device-main { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px 12px; }
@@ -1343,48 +1351,62 @@
 
             <section class="tab-pane fade" id="tab-notify">
                 <div class="topline">
-                    <div>
+                    <div class="topline-title">
                         <h1 class="page-title">通知中心</h1>
+                        <span class="page-sub">更新结果和异常推送到微信等 Webhook</span>
                     </div>
-                    <button class="action-button primary" onclick="testNotify(this)"><i class="bi bi-send-fill"></i> 发送测试</button>
                 </div>
 
-                <div class="card">
-                    <div class="card-header"><i class="bi bi-megaphone-fill"></i> Webhook 通知</div>
-                    <div class="card-body">
-                        <label class="form-label fw-bold" for="site_name">站点名称</label>
-                        <input type="text" class="form-control mb-1" id="site_name" maxlength="20" placeholder="例如：联通（留空显示“mihomo 网关”）">
-                        <div class="form-text mb-3">显示在每条通知的标题里，例如“✅ 联通 · mihomo 内核已更新”。最多 20 个字，不能有换行和引号。</div>
-                        <div class="form-check form-switch mb-3">
-                            <input class="form-check-input" type="checkbox" id="notify_api">
-                            <label class="form-check-label fw-bold">Webhook API</label>
+                <div class="notify-grid">
+                    <div class="card">
+                        <div class="card-header"><i class="bi bi-megaphone-fill"></i> 通知设置</div>
+                        <div class="card-body">
+                            <label class="form-label fw-bold" for="site_name">站点名称</label>
+                            <input type="text" class="form-control" id="site_name" maxlength="20" placeholder="例如：联通（留空显示“mihomo 网关”）" oninput="updateNotifyPreview()">
+                            <div class="form-text mb-3">显示在每条通知的标题里，最多 20 个字，不能有换行和引号。</div>
+
+                            <div class="task-head">
+                                <label class="form-label fw-bold mb-0" for="notify_api">推送到 Webhook</label>
+                                <div class="form-check form-switch m-0">
+                                    <input class="form-check-input" type="checkbox" id="notify_api" onchange="updateNotifyPreview()" aria-label="开启 Webhook 推送">
+                                </div>
+                            </div>
+                            <input type="text" class="form-control font-monospace" id="api_url" placeholder="https://…" spellcheck="false" oninput="updateNotifyPreview()">
+                            <div class="form-text">以 POST JSON 发送 <code>{"title": …, "content": …}</code>；正文是纯文本，末尾附北京时间。</div>
+
+                            <div class="notify-preview" id="notifyPreview">
+                                <div class="notify-preview-label">通知标题预览</div>
+                                <div class="notify-preview-title" id="notifyPreviewTitle">✅ mihomo 网关 · mihomo 内核已更新</div>
+                                <div class="notify-preview-body">当前 v1.19.31 → v1.19.32<br>📅 2026-10-09 03:30:12</div>
+                            </div>
+
+                            <div class="d-flex flex-wrap gap-2 mt-3">
+                                <button class="action-button primary" data-requires-settings disabled onclick="saveSettings(false, this)"><i class="bi bi-save"></i> 保存</button>
+                                <button class="soft-button" onclick="testNotify(this)"><i class="bi bi-send"></i> 发送测试</button>
+                            </div>
+                            <details class="notify-events mt-3">
+                                <summary>哪些情况会发通知</summary>
+                                <ul>
+                                    <li>订阅：配置已更新、下载失败、校验或启动失败（已回滚）、节点刷新失败与恢复</li>
+                                    <li>Geo 数据：更新失败、部分失败与恢复</li>
+                                    <li>自动更新：内核 / 面板 / Dashboard 已更新、更新失败、失败已回滚</li>
+                                </ul>
+                                <div class="form-text">同一个问题持续存在时只在第一次发，之后最多每 3 天提醒一次，恢复时再发一条。</div>
+                            </details>
                         </div>
-                        <input type="text" class="form-control" id="api_url" placeholder="http://...">
-                        <div class="form-text">以 POST JSON 发送 <code>{"title": …, "content": …}</code>；正文是纯文本，末尾附北京时间</div>
-                        <button class="action-button primary mt-3" data-requires-settings disabled onclick="saveSettings(false, this)"><i class="bi bi-save"></i> 保存所有设置</button>
-                        <details class="notify-events mt-3">
-                            <summary>哪些情况会发通知</summary>
-                            <ul>
-                                <li>订阅：配置已更新、下载失败、校验或启动失败（已回滚）、节点刷新失败与恢复</li>
-                                <li>Geo 数据：更新失败、部分失败与恢复</li>
-                                <li>自动更新：内核 / 面板 / Dashboard 已更新、更新失败、失败已回滚</li>
-                            </ul>
-                            <div class="form-text">同一个问题持续存在时只在第一次发，之后最多每 3 天提醒一次，恢复时再发一条。</div>
-                        </details>
+                    </div>
+
+                    <div class="card">
+                        <div class="card-header d-flex justify-content-between align-items-center">
+                            <span><i class="bi bi-clock-history"></i> 最近通知 <span class="small-pill" id="notifyLogStats" hidden></span></span>
+                            <button class="soft-button" type="button" onclick="loadNotifyLog()"><i class="bi bi-arrow-clockwise"></i> 刷新</button>
+                        </div>
+                        <div class="card-body">
+                            <div class="notify-log" id="notifyLogList"><div class="text-muted small">加载中…</div></div>
+                            <div class="form-text mt-2">来自 /var/log/mihomo-notify.log，最近 15 条，时间为北京时间</div>
+                        </div>
                     </div>
                 </div>
-
-                <div class="card">
-                    <div class="card-header d-flex justify-content-between align-items-center">
-                        <span><i class="bi bi-clock-history"></i> 最近通知</span>
-                        <button class="soft-button" type="button" onclick="loadNotifyLog()"><i class="bi bi-arrow-clockwise"></i> 刷新</button>
-                    </div>
-                    <div class="card-body">
-                        <div class="notify-log" id="notifyLogList"><div class="text-muted small">加载中…</div></div>
-                        <div class="form-text mt-2">来自 /var/log/mihomo-notify.log，最近 15 条，时间为北京时间</div>
-                    </div>
-                </div>
-
             </section>
 
             <section class="tab-pane fade" id="tab-logs">
@@ -2983,6 +3005,7 @@
             updateScheduleVisibility('sub', '订阅');
             updateScheduleVisibility('geo', ' Geo 数据库');
             rememberNotifyFields();
+            updateNotifyPreview();
             settingsLoaded = true;
             setSettingsButtonsEnabled(true);
         });
@@ -3403,11 +3426,28 @@
         loadNotifyLog();
     }
 
+    // 标题格式和 notify_format.py 一致：图标 站点名 · 主题；关掉推送时地址框变灰
+    function updateNotifyPreview() {
+        const site = (document.getElementById('site_name')?.value || '').trim() || 'mihomo 网关';
+        setText('notifyPreviewTitle', `✅ ${site} · mihomo 内核已更新`);
+        const on = Boolean(document.getElementById('notify_api')?.checked);
+        const url = document.getElementById('api_url');
+        if (url) url.disabled = !on;
+        document.getElementById('notifyPreview')?.classList.toggle('off', !on);
+    }
+
     async function loadNotifyLog() {
         const box = document.getElementById('notifyLogList');
         if (!box) return;
         const res = await api('/notify-log');
         const items = Array.isArray(res?.items) ? res.items : [];
+        const failed = items.filter(item => !item.ok).length;
+        const stats = document.getElementById('notifyLogStats');
+        if (stats) {
+            stats.hidden = !items.length;
+            stats.textContent = failed ? `${failed} 条失败` : '全部送达';
+            stats.className = 'small-pill' + (failed ? ' warn' : '');
+        }
         box.innerHTML = items.length ? items.map(item => `<div class="notify-log-row${item.ok ? '' : ' failed'}">
                 <time>${escapeHtml(item.at)}</time>
                 <div class="title">${escapeHtml(item.title)}${item.ok ? '' : `<span class="err">${escapeHtml(item.error)}</span>`}</div>
