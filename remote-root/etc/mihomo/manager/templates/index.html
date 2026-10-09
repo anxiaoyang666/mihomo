@@ -567,6 +567,12 @@
             box-shadow: none;
         }
 
+        .task-block { padding: 2px 0 16px; margin-bottom: 16px; border-bottom: 1px solid var(--line); }
+        .task-block:last-of-type { border-bottom: 0; margin-bottom: 0; padding-bottom: 0; }
+        .task-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 10px; }
+        .task-fields { display: grid; grid-template-columns: minmax(0, 1fr) 132px; gap: 8px; }
+        .number-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; align-items: end; }
+        .number-grid .form-label { line-height: 1.35; }
         .section-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(320px, .62fr); gap: 16px; align-items: start; }
         .section-grid > div { min-width: 0; }
 
@@ -667,6 +673,15 @@
         .device-row .device-details summary::before { content: '\25B8'; font-size: 10px; transition: transform .15s; }
         .device-row .device-details[open] summary::before { transform: rotate(90deg); }
         .device-note-field { display: grid; gap: 6px; }
+        .device-edit {
+            width: 24px; height: 24px; margin-left: 4px;
+            display: inline-grid; place-items: center; vertical-align: middle;
+            border: 0; border-radius: 6px; background: transparent; color: var(--faint);
+            font-size: 12px; opacity: 0; cursor: pointer; transition: opacity .15s, background .15s;
+        }
+        .device-row:hover .device-edit, .device-edit:focus-visible { opacity: 1; }
+        .device-edit:hover { background: var(--surface-3); color: var(--text); }
+        @media (hover: none) { .device-edit { opacity: 1; } }
         .device-row:hover { background: color-mix(in srgb, var(--surface-2) 60%, transparent); }
         .device-row.offline { opacity: .66; }
         .device-row.neighbour { opacity: .55; }
@@ -1156,43 +1171,51 @@
 
                     <div>
                         <div class="card">
-                            <div class="card-header"><i class="bi bi-clock-history"></i> 自动化任务</div>
+                            <div class="card-header"><i class="bi bi-clock-history"></i> 定时任务</div>
                             <div class="card-body">
-                                <div class="mb-4">
-                                    <h6 class="fw-bold">自动更新订阅</h6>
-                                    <div class="form-check form-switch my-2">
-                                        <input class="form-check-input" type="checkbox" id="cron_sub_enabled">
-                                        <label class="form-check-label">开启</label>
+                                <div class="task-block">
+                                    <div class="task-head">
+                                        <h6 class="mb-0">自动更新订阅</h6>
+                                        <div class="form-check form-switch m-0">
+                                            <input class="form-check-input" type="checkbox" id="cron_sub_enabled" aria-label="开启自动更新订阅">
+                                        </div>
                                     </div>
-                                    <select class="form-select mb-2" id="cron_sub_mode" onchange="updateScheduleVisibility('sub', '订阅')">
-                                        <option value="daily">每天一次</option>
-                                        <option value="every6h">每 6 小时</option>
-                                        <option value="every12h">每 12 小时</option>
-                                        <option value="advanced">高级 Cron</option>
-                                    </select>
-                                    <input type="time" class="form-control" id="cron_sub_time" value="05:00">
-                                    <input type="text" class="form-control font-monospace mt-2 d-none" id="cron_sub_sched" value="0 5 * * *">
+                                    <div class="task-fields">
+                                        <select class="form-select" id="cron_sub_mode" onchange="updateScheduleVisibility('sub', '订阅')" aria-label="订阅更新频率">
+                                            <option value="daily">每天一次</option>
+                                            <option value="every6h">每 6 小时</option>
+                                            <option value="every12h">每 12 小时</option>
+                                            <option value="advanced">高级 Cron</option>
+                                        </select>
+                                        <input type="time" class="form-control" id="cron_sub_time" value="05:00" aria-label="订阅更新时间">
+                                    </div>
+                                    <input type="text" class="form-control font-monospace mt-2 d-none" id="cron_sub_sched" value="0 5 * * *" aria-label="订阅更新 Cron">
                                     <div class="form-text" id="cron_sub_hint">每天 05:00 自动更新订阅</div>
                                 </div>
 
-                                <div>
-                                    <h6 class="fw-bold">自动更新 Geo</h6>
-                                    <div class="form-check form-switch my-2">
-                                        <input class="form-check-input" type="checkbox" id="cron_geo_enabled">
-                                        <label class="form-check-label">开启</label>
+                                <div class="task-block">
+                                    <div class="task-head">
+                                        <h6 class="mb-0">自动更新 Geo</h6>
+                                        <div class="form-check form-switch m-0">
+                                            <input class="form-check-input" type="checkbox" id="cron_geo_enabled" aria-label="开启自动更新 Geo">
+                                        </div>
                                     </div>
-                                    <select class="form-select mb-2" id="cron_geo_mode" onchange="updateScheduleVisibility('geo', ' Geo 数据库')">
-                                        <option value="daily">每天一次</option>
-                                        <option value="every6h">每 6 小时</option>
-                                        <option value="every12h">每 12 小时</option>
-                                        <option value="advanced">高级 Cron</option>
-                                    </select>
-                                    <input type="time" class="form-control" id="cron_geo_time" value="04:00">
-                                    <input type="text" class="form-control font-monospace mt-2 d-none" id="cron_geo_sched" value="0 4 * * *">
+                                    <div class="task-fields">
+                                        <select class="form-select" id="cron_geo_mode" onchange="updateScheduleVisibility('geo', ' Geo 数据库')" aria-label="Geo 更新频率">
+                                            <option value="daily">每天一次</option>
+                                            <option value="every6h">每 6 小时</option>
+                                            <option value="every12h">每 12 小时</option>
+                                            <option value="advanced">高级 Cron</option>
+                                        </select>
+                                        <input type="time" class="form-control" id="cron_geo_time" value="04:00" aria-label="Geo 更新时间">
+                                    </div>
+                                    <input type="text" class="form-control font-monospace mt-2 d-none" id="cron_geo_sched" value="0 4 * * *" aria-label="Geo 更新 Cron">
                                     <div class="form-text" id="cron_geo_hint">每天 04:00 自动更新 Geo 数据库</div>
                                 </div>
 
-                                <button class="action-button primary w-100 mt-4" data-requires-settings disabled onclick="saveSettings(false, this)"><i class="bi bi-save"></i> 仅保存设置</button>
+                                <div class="d-flex justify-content-end mt-3">
+                                    <button class="action-button primary" data-requires-settings disabled onclick="saveSettings(false, this)"><i class="bi bi-save"></i> 保存</button>
+                                </div>
                             </div>
                         </div>
 
@@ -1210,21 +1233,21 @@
                                 <input type="time" class="form-control" id="auto_update_time" value="04:00">
                                 <div class="form-text mb-3" id="auto_update_tz_hint">服务器时区加载中…</div>
 
-                                <div class="row g-2">
-                                    <div class="col-12 col-md-4">
-                                        <label class="form-label small fw-bold" for="auto_update_core_min_age">内核发布满几天才更新</label>
+                                <div class="number-grid">
+                                    <div>
+                                        <label class="form-label" for="auto_update_core_min_age">内核发布满几天才更新</label>
                                         <input type="number" class="form-control" id="auto_update_core_min_age" min="0" max="90" step="1" value="3">
                                     </div>
-                                    <div class="col-12 col-md-4">
-                                        <label class="form-label small fw-bold" for="auto_update_panel_min_age">面板发布满几天才更新</label>
+                                    <div>
+                                        <label class="form-label" for="auto_update_panel_min_age">面板发布满几天才更新</label>
                                         <input type="number" class="form-control" id="auto_update_panel_min_age" min="0" max="90" step="1" value="0">
-                                        <div class="form-text">新版面板发布后等几天再更新，0 表示有新版就更新</div>
                                     </div>
-                                    <div class="col-12 col-md-4">
-                                        <label class="form-label small fw-bold" for="auto_update_ui_interval">Dashboard 每隔几天更新</label>
+                                    <div>
+                                        <label class="form-label" for="auto_update_ui_interval">Dashboard 每隔几天更新</label>
                                         <input type="number" class="form-control" id="auto_update_ui_interval" min="1" max="365" step="1" value="7">
                                     </div>
                                 </div>
+                                <div class="form-text">内核、面板要发布满上面的天数才更新（0 表示有新版就更新）；Dashboard 每隔这么多天检查一次。</div>
                                 <div class="form-text">内核只装发布已满指定天数的稳定版，绝不降级；更新后 30 秒内检查服务、控制器、DNS 和所有入站端口，不通过自动回滚旧内核。顺序：Dashboard → 内核 → 管理面板。</div>
 
                                 <div class="update-table-wrap mt-3">
@@ -1919,7 +1942,7 @@
                 <div class="device-identity">
                     <span class="state-dot ${online ? 'running' : 'stopped'}" title="${online ? '在线' : '离线'}"></span>
                     <div class="min-w-0">
-                        <strong class="device-ip">${escapeHtml(device.name || device.ip)}${ikuaiDeviceTags(device)}</strong>
+                        <strong class="device-ip">${escapeHtml(device.name || device.ip)}${deviceEditButton()}${ikuaiDeviceTags(device)}</strong>
                         <span class="device-meta">${escapeHtml(meta.join(' · '))}</span>
                     </div>
                 </div>
@@ -1938,6 +1961,11 @@
                     ${proxy ? proxyLists(proxy) : ''}
                 </div>
             </details>`;
+    }
+
+    // 名字旁的铅笔：展开这一行并把光标放进备注框
+    function deviceEditButton() {
+        return '<button type="button" class="device-edit" title="改备注（作为名称显示）" aria-label="编辑设备备注"><i class="bi bi-pencil"></i></button>';
     }
 
     // 设备表的数字列：手机上没有表头，靠 data-label 显示列名；为 0 时淡一点
@@ -2009,7 +2037,7 @@
                 <div class="device-identity">
                     ${dot}
                     <div class="min-w-0">
-                        <strong class="device-ip">${escapeHtml(device.note || device.ip)}${deviceTags(device)}</strong>
+                        <strong class="device-ip">${escapeHtml(device.note || device.ip)}${device.is_gateway ? '' : deviceEditButton()}${deviceTags(device)}</strong>
                         <span class="device-meta">${escapeHtml(meta.join(' · '))}</span>
                     </div>
                 </div>
@@ -2212,6 +2240,15 @@
     function bindDeviceListEvents() {
         const list = document.getElementById('deviceList');
         if (!list) return;
+        list.addEventListener('click', event => {
+            const button = event.target.closest('.device-edit');
+            if (!button) return;
+            const row = button.closest('.device-row');
+            const details = row?.querySelector('.device-details');
+            if (!details) return;
+            details.open = true;
+            requestAnimationFrame(() => row.querySelector('.device-note-input:not([disabled])')?.focus());
+        });
         // toggle 不冒泡，用捕获阶段接
         list.addEventListener('toggle', event => {
             const ip = event.target.closest?.('.device-row')?.dataset.ip;

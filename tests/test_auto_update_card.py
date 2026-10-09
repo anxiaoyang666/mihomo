@@ -70,7 +70,7 @@ class AutoUpdateCardMarkupTest(unittest.TestCase):
     def test_labels_are_plain_language(self):
         card = self.card()
         for label in ("内核发布满几天才更新", "面板发布满几天才更新", "Dashboard 每隔几天更新",
-                      "新版面板发布后等几天再更新，0 表示有新版就更新"):
+                      "0 表示有新版就更新"):
             self.assertIn(label, card)
         for jargon in ("提交", "UI 间隔", "zashboard", "面板 UI", "最新可用"):
             self.assertNotIn(jargon, card)
