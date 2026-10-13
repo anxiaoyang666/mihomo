@@ -221,7 +221,7 @@ class PanelUpgradeIntegrityTest(unittest.TestCase):
         self.assertEqual(self.downloads[0][0], f"https://github.com/anxiaoyang666/mihomo/archive/{COMMIT}.zip")
 
     def test_same_version_does_not_download(self):
-        app_bytes = b'PANEL_VERSION = "0.1.61"\n'
+        app_bytes = b'PANEL_VERSION = "0.1.62"\n'
         files = {"remote-root/etc/mihomo/manager/app.py": app_bytes}
         self._install_fakes(files, self._zip(files), app_bytes)
         work = self.dir / "work"
@@ -229,7 +229,7 @@ class PanelUpgradeIntegrityTest(unittest.TestCase):
         ok, _source, root, settings = self.app.download_panel_source(str(work))
         self.assertTrue(ok)
         self.assertIsNone(root)
-        self.assertEqual(settings["remote_version"], "0.1.61")
+        self.assertEqual(settings["remote_version"], "0.1.62")
         self.assertEqual(self.downloads, [])
 
     def test_tampered_archive_is_refused(self):
