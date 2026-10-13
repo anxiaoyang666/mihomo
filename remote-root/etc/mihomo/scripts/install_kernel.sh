@@ -35,28 +35,45 @@ else
     fail "不支持的架构: $ARCH"
 fi
 
-# GitHub 地址候选：先直连，失败再走 .env 里的 GH_PROXY（为空就只直连）
-github_candidates() {
-    local url="$1"
-    echo "$url"
-    if [ -n "$GH_PROXY" ]; then
-        echo "${GH_PROXY%/}/${url}"
-    fi
+# 二进制走代理必须单独打开。GH_PROXY 仍可用于 version.txt 这类元数据。
+proxy_binaries_enabled() {
+    case "$(printf '%s' "${GH_PROXY_BINARIES:-}" | tr '[:upper:]' '[:lower:]')" in
+        1|true|yes|on) return 0 ;;
+        *) return 1 ;;
+    esac
 }
 
-# 依次尝试候选地址下载到指定文件，全部失败返回 1
+# GitHub 地址候选：先直连。kind=meta（默认）失败后再走 GH_PROXY；
+# kind=binary 只有 GH_PROXY_BINARIES=true 才把代理加进来，并且之后必须对上 GitHub 的 sha256。
+github_candidates() {
+    local url="$1"
+    local kind="${2:-meta}"
+    printf '%s\n' "$url"
+    if [ -z "${GH_PROXY:-}" ]; then
+        return 0
+    fi
+    if [ "$kind" = "binary" ] && ! proxy_binaries_enabled; then
+        return 0
+    fi
+    printf '%s\n' "${GH_PROXY%/}/${url}"
+}
+
+# 依次尝试候选地址下载到指定文件，全部失败返回 1。成功时 FETCHED_URL 是实际命中的地址。
+FETCHED_URL=""
 fetch_first() {
     local output="$1"
     local url="$2"
+    local kind="${3:-meta}"
     local candidate
     while read -r candidate; do
         [ -n "$candidate" ] || continue
         if curl -fL --max-time "$CURL_MAX_TIME" --retry 2 --retry-delay 2 -o "$output" "$candidate"; then
+            FETCHED_URL="$candidate"
             return 0
         fi
         echo "⚠️  下载失败: $candidate" >&2
         rm -f "$output"
-    done < <(github_candidates "$url")
+    done < <(github_candidates "$url" "$kind")
     return 1
 }
 
@@ -124,14 +141,31 @@ fi
 # ==========================================
 # 下载、校验、安装（任一步失败都非零退出）
 # ==========================================
-DOWNLOAD_URL="https://github.com/MetaCubeX/mihomo/releases/download/${TAG}/mihomo-${PLATFORM}-${TAG}.gz"
+ASSET_NAME="mihomo-${PLATFORM}-${TAG}.gz"
+DOWNLOAD_URL="https://github.com/MetaCubeX/mihomo/releases/download/${TAG}/${ASSET_NAME}"
+META_JSON="${TMP_DIR}/release.json"
+# 资产的 size/digest 只从 api.github.com 直连读取。代理可以改写摘要，所以这里不走 GH_PROXY。
+if ! curl -fsSL --max-time 20 -H "Accept: application/vnd.github+json" -H "User-Agent: mihomo-toolbox" \
+    -o "$META_JSON" "https://api.github.com/repos/MetaCubeX/mihomo/releases/tags/${TAG}"; then
+    echo "⚠️  无法直接访问 GitHub API 读取 ${TAG} 的资产摘要（不会改走代理）。" >&2
+    rm -f "$META_JSON"
+fi
 
 echo "⬇️  正在下载内核 ${TAG} (${PLATFORM})..."
-fetch_first "$GZ_FILE" "$DOWNLOAD_URL" || fail "内核下载失败！请检查网络或 .env 里的 GH_PROXY 设置。"
+fetch_first "$GZ_FILE" "$DOWNLOAD_URL" binary || fail "内核下载失败！请检查网络。二进制走代理需要在 .env 里设置 GH_PROXY_BINARIES=true。"
 [ -s "$GZ_FILE" ] || fail "下载到的文件为空。"
 
-# MetaCubeX/mihomo 的 release 只附带 version.txt，没有 sha256 校验文件，
-# 这里只能用 gzip 完整性校验 + 安装后执行 -v 来确认二进制可用。
+VIA_PROXY=0
+case "$FETCHED_URL" in
+    https://github.com/*) VIA_PROXY=0 ;;
+    *) VIA_PROXY=1 ;;
+esac
+# 有 GitHub digest/size 就核对；直连且 API 没给 sha256 时，下面仍用 gzip -t 和 -v。
+# 走代理却没有 sha256 则拒绝安装。校验实现在 verify_github_asset.py，自动更新走同一套规则。
+VERIFY_PY="$(cd "$(dirname "$0")" && pwd)/verify_github_asset.py"
+python3 "$VERIFY_PY" "$GZ_FILE" "${META_JSON:-/dev/null}" "$ASSET_NAME" "$VIA_PROXY" \
+    || fail "内核校验未通过，已中止，未替换 ${CORE_BIN}。"
+
 echo "🔎 正在校验压缩包..."
 gzip -t "$GZ_FILE" || fail "压缩包损坏（gzip 校验失败），已中止。"
 

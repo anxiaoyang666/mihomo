@@ -39,7 +39,9 @@ class SecurityStatusTest(unittest.TestCase):
 
     def test_account_update_uses_constant_time_compare(self):
         source = APP.read_text(encoding="utf-8")
-        self.assertIn('secrets.compare_digest(current_password.encode("utf-8"), valid_pass.encode("utf-8"))', source)
+        self.assertIn("check_password_value(valid_pass, current_password)", source)
+        self.assertIn("secrets.compare_digest(provided.encode(\"utf-8\"), stored.encode(\"utf-8\"))", source)
+        self.assertIn("check_password_hash", source)
         self.assertIn("@app.route(\"/api/security-status\")\n@login_required", source)
 
 

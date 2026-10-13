@@ -637,10 +637,29 @@ def _update_core(rt, settings, dry_run, seen):
     try:
         gz_path = os.path.join(workdir, asset_name)
         new_bin = os.path.join(workdir, "mihomo-core")
-        ok, detail = rt.download(rt.panel.github_candidate_urls(url), gz_path)
+        # 摘要只认 api.github.com 直连。发布列表可以走代理，但那里的 digest 不能用来校验代理下载的二进制。
+        meta_document = None
+        meta_url = f"https://api.github.com/repos/{CORE_REPO}/releases/tags/{quote(tag, safe='')}"
+        meta_ok, meta_text, meta_source = rt.fetch_text([meta_url], timeout=20)
+        if meta_ok and meta_source == meta_url:
+            try:
+                parsed = json.loads(meta_text)
+            except ValueError:
+                parsed = None
+            if isinstance(parsed, (dict, list)):
+                meta_document = parsed
+        urls = rt.panel.github_binary_candidate_urls(url)
+        ok, detail = rt.download(urls, gz_path)
         if not ok:
             return make_result("core", "failed", f"下载 {asset_name} 失败：{detail}", current, tag, current, tag,
                                reason="新版本下载失败（GitHub 或下载代理连不上）")
+        via_proxy = not str(detail or "").startswith("https://github.com/")
+        verified, why = rt.panel.verify_core_download(gz_path, meta_document, asset_name, via_proxy)
+        if not verified:
+            return make_result("core", "failed", f"内核校验失败：{why}", current, tag, current, tag,
+                               reason="下载的内核和 GitHub 发布的摘要不一致")
+        if why:
+            write_log(rt, "core", why)
         try:
             decompress_core(gz_path, new_bin)
         except Exception as e:

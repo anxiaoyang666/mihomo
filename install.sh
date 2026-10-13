@@ -212,6 +212,9 @@ write_env_file() {
     write_env_line "WEB_USER" "$user"
     write_env_line "WEB_SECRET" "$pass"
     write_env_line "WEB_PORT" "$WEB_PORT"
+    write_env_line "WEB_HOST" "${WEB_HOST:-0.0.0.0}"
+    write_env_line "WEB_COOKIE_SECURE" "${WEB_COOKIE_SECURE:-false}"
+    write_env_line "GH_PROXY_BINARIES" "${GH_PROXY_BINARIES:-false}"
     write_env_line "MIHOMO_PANEL_REPO_URL" "$REPO_URL"
     write_env_line "MIHOMO_PANEL_BRANCH" "$BRANCH"
     write_env_line "MIHOMO_PATH" "$INSTALL_DIR"
@@ -334,6 +337,11 @@ print_summary() {
   [ -n "$ip" ] || ip="服务器IP"
   user="$(env_get WEB_USER)"
   pass="$(env_get WEB_SECRET)"
+  case "$pass" in
+    scrypt:*|pbkdf2:*|argon2:*)
+      pass="(已保存为密码哈希，请使用安装时设置的密码)"
+      ;;
+  esac
   api_secret="$(env_get MIHOMO_API_SECRET)"
   green "$PROJECT_NAME 安装完成"
   printf '\n'
@@ -362,9 +370,10 @@ main() {
   sync_controller_secret
   install_cron_jobs
   install_core_if_missing
+  # 先打印密码再启动面板：面板起来后会把明文 WEB_SECRET 换成哈希，再读 .env 就不是原密码了。
+  print_summary
   yellow "启动服务..."
   enable_services
-  print_summary
 }
 
 main "$@"

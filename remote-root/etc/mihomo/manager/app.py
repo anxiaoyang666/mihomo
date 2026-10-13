@@ -12,7 +12,10 @@ import os
 import re
 import secrets
 import shlex
+import hashlib
+import hmac
 import glob
+import importlib.util
 import ipaddress
 import json
 import shutil
@@ -90,9 +93,12 @@ app = Flask(__name__)
 # 登录态 30 天：有登录限流和改密后轮换密钥兜底，不需要再签发一年期 cookie
 app.permanent_session_lifetime = timedelta(days=30)
 # Cookie 只走同站请求且脚本不可读；请求体限制 1 MiB，/api/rule-sync 等接口不需要更大
+# SESSION_COOKIE_SECURE 先按明文 HTTP 关掉。apply_session_cookie_secure() 会在读到
+# WEB_COOKIE_SECURE=true 时打开。面板自己不终止 TLS，见 README 的 TLS 说明。
 app.config.update(
     SESSION_COOKIE_SAMESITE="Lax",
     SESSION_COOKIE_HTTPONLY=True,
+    SESSION_COOKIE_SECURE=False,
     MAX_CONTENT_LENGTH=1 * 1024 * 1024,
 )
 
@@ -318,15 +324,195 @@ def web_credentials():
     password = os.environ.get('WEB_SECRET') or env.get('WEB_SECRET') or ''
     return user, password
 
+def password_is_hashed(value):
+    """Werkzeug 哈希形如 method$salt$hex。普通口令对不上这个形状，避免把明文误判成哈希。"""
+    parts = str(value or "").split("$")
+    if len(parts) != 3:
+        return False
+    method, salt, digest = parts
+    if not salt or not re.fullmatch(r"[0-9a-f]{32,256}", digest):
+        return False
+    return method.startswith("scrypt:") or method.startswith("pbkdf2:")
+
+def password_is_strong(password):
+    password = str(password or "")
+    return len(password) >= 10 and not password.isdigit()
+
+def _stdlib_hash_with_method(method, salt, password):
+    """和 werkzeug.security._hash_internal 同一套 scrypt / pbkdf2 编码，werkzeug 缺失时还能校验。"""
+    name, *args = method.split(":")
+    password_bytes = str(password).encode("utf-8")
+    salt_bytes = str(salt).encode("utf-8")
+    if name == "scrypt":
+        n, r, p = (int(args[0]), int(args[1]), int(args[2])) if len(args) == 3 else (2 ** 15, 8, 1)
+        maxmem = 132 * n * r * p
+        return hashlib.scrypt(password_bytes, salt=salt_bytes, n=n, r=r, p=p, maxmem=maxmem).hex()
+    if name == "pbkdf2":
+        hash_name = args[0] if args else "sha256"
+        iterations = int(args[1]) if len(args) > 1 else 600000
+        return hashlib.pbkdf2_hmac(hash_name, password_bytes, salt_bytes, iterations).hex()
+    raise ValueError("unsupported password hash method")
+
+def _stdlib_password_hash(password):
+    n, r, p = 2 ** 15, 8, 1
+    salt = secrets.token_urlsafe(12)
+    digest = _stdlib_hash_with_method(f"scrypt:{n}:{r}:{p}", salt, password)
+    return f"scrypt:{n}:{r}:{p}${salt}${digest}"
+
+def _stdlib_check_password_hash(stored, password):
+    method, salt, hashval = str(stored).split("$", 2)
+    actual = _stdlib_hash_with_method(method, salt, password)
+    return hmac.compare_digest(actual, hashval)
+
+def hash_password(password):
+    """优先用 werkzeug.generate_password_hash。失败时退回标准库 scrypt，格式仍可被 werkzeug 校验。"""
+    try:
+        from werkzeug.security import generate_password_hash
+        return generate_password_hash(str(password))
+    except Exception as exc:
+        log.warning("werkzeug 不可用，改用标准库 scrypt 保存密码哈希：%s", exc)
+        return _stdlib_password_hash(password)
+
+def check_password_value(stored, provided):
+    """恒定时间比较。哈希走 werkzeug.check_password_hash（内部 hmac.compare_digest），明文走 secrets.compare_digest。"""
+    stored = str(stored or "")
+    provided = str(provided or "")
+    if password_is_hashed(stored):
+        try:
+            from werkzeug.security import check_password_hash
+            return bool(check_password_hash(stored, provided))
+        except Exception as exc:
+            log.warning("werkzeug 校验密码失败，改用内置实现：%s", exc)
+            try:
+                return _stdlib_check_password_hash(stored, provided)
+            except Exception as fallback_exc:
+                log.warning("内置密码校验失败：%s", fallback_exc)
+                return False
+    return secrets.compare_digest(provided.encode("utf-8"), stored.encode("utf-8"))
+
+def ensure_web_secret_hashed():
+    """把 .env 里的明文 WEB_SECRET 换成加盐哈希。任何失败都保留原文，避免把人锁在面板外面。"""
+    try:
+        env = read_env()
+    except Exception as exc:
+        log.warning("读取 .env 失败，跳过密码哈希迁移：%s", exc)
+        return False
+    stored = env.get("WEB_SECRET") or ""
+    if not stored or password_is_hashed(stored):
+        if stored and password_is_hashed(stored):
+            _drop_matching_plaintext_from_environ(stored)
+        return False
+    try:
+        hashed = hash_password(stored)
+        if not password_is_hashed(hashed):
+            raise ValueError("password hash format was not recognized")
+        updates = {
+            "WEB_SECRET": hashed,
+            "WEB_PASSWORD_STRONG": "true" if password_is_strong(stored) else "false",
+        }
+        write_env(updates)
+    except Exception as exc:
+        log.warning("WEB_SECRET 哈希迁移失败，继续按明文校验，登录不受影响：%s", exc)
+        return False
+    if os.environ.get("WEB_SECRET") == stored:
+        os.environ["WEB_SECRET"] = hashed
+    log.info("已将 .env 中的 WEB_SECRET 迁移为加盐密码哈希")
+    return True
+
+def _drop_matching_plaintext_from_environ(stored_hash):
+    """进程环境里如果还留着和哈希对应的明文，换成哈希，避免明文一直躺在 environ 里。"""
+    plain = os.environ.get("WEB_SECRET")
+    if not plain or password_is_hashed(plain):
+        return
+    try:
+        if check_password_value(stored_hash, plain):
+            os.environ["WEB_SECRET"] = stored_hash
+    except Exception:
+        pass
+
 def check_creds(username, password):
     # 没有配置账号就拒绝登录，绝不退回 admin/admin 这种默认口令
+    ensure_web_secret_hashed()
     valid_user, valid_pass = web_credentials()
     if not valid_user or not valid_pass:
         log.error("登录被拒绝：%s 缺少 WEB_USER / WEB_SECRET，请先在 .env 里配置账号。", ENV_FILE)
         return False
     username = str(username or "")
     password = str(password or "")
-    return secrets.compare_digest(username.encode(), valid_user.encode()) and secrets.compare_digest(password.encode(), valid_pass.encode())
+    user_ok = secrets.compare_digest(username.encode("utf-8"), valid_user.encode("utf-8"))
+    pass_ok = check_password_value(valid_pass, password)
+    return user_ok and pass_ok
+
+def env_flag(value, default=False):
+    text = str(value if value is not None else "").strip().lower()
+    if text in ("1", "true", "yes", "on"):
+        return True
+    if text in ("0", "false", "no", "off"):
+        return False
+    return default
+
+def normalize_web_host(value):
+    """非法地址退回 0.0.0.0，避免写错 WEB_HOST 让面板起不来。"""
+    host = str(value or "").strip()
+    if host.startswith("[") and host.endswith("]"):
+        host = host[1:-1]
+    if not host:
+        return "0.0.0.0"
+    try:
+        ipaddress.ip_address(host)
+        return host
+    except ValueError:
+        pass
+    if re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*", host):
+        return host
+    log.warning("WEB_HOST 无效（%s），改用 0.0.0.0", host)
+    return "0.0.0.0"
+
+def web_bind_host(env=None):
+    """监听地址。未配置时保持原来的 0.0.0.0，已有局域网安装不会突然只听本机。"""
+    env = read_env() if env is None else env
+    raw = os.environ.get("WEB_HOST")
+    if raw is None or str(raw).strip() == "":
+        raw = env.get("WEB_HOST", "")
+    return normalize_web_host(raw)
+
+def cookie_secure_enabled(env=None):
+    """默认关闭。面板是明文 HTTP，打开 Secure 后浏览器不会保存会话。"""
+    env = read_env() if env is None else env
+    raw = os.environ.get("WEB_COOKIE_SECURE")
+    if raw is None or str(raw).strip() == "":
+        raw = env.get("WEB_COOKIE_SECURE", "")
+    return env_flag(raw, default=False)
+
+def apply_session_cookie_secure():
+    app.config["SESSION_COOKIE_SECURE"] = cookie_secure_enabled()
+
+def web_port(env=None):
+    env = read_env() if env is None else env
+    try:
+        port = int(str(env.get("WEB_PORT", 7838)).strip())
+    except (TypeError, ValueError):
+        log.warning("WEB_PORT 不是整数，改用 7838")
+        return 7838
+    if not 0 < port < 65536:
+        log.warning("WEB_PORT %s 超出范围，改用 7838", port)
+        return 7838
+    return port
+
+def bracket_host(host):
+    if ":" in str(host) and not str(host).startswith("["):
+        return f"[{host}]"
+    return str(host)
+
+def panel_probe_url(env=None):
+    env = read_env() if env is None else env
+    host = web_bind_host(env)
+    if host in ("0.0.0.0", "::"):
+        host = "127.0.0.1"
+    return f"http://{bracket_host(host)}:{web_port(env)}/login"
+
+ensure_web_secret_hashed()
+apply_session_cookie_secure()
 
 LOGIN_FAILURES = {}
 LOGIN_FAILURES_LOCK = threading.Lock()
@@ -3139,6 +3325,53 @@ def github_candidate_urls(url):
         urls.append(prefix + url)
     return urls
 
+def github_proxy_binaries_enabled(env=None):
+    """内核二进制走代理必须显式打开。GH_PROXY 单独设置不再自动代理二进制。"""
+    env = read_env() if env is None else env
+    raw = os.environ.get("GH_PROXY_BINARIES")
+    if raw is None or str(raw).strip() == "":
+        raw = env.get("GH_PROXY_BINARIES", "")
+    return env_flag(raw, default=False)
+
+def github_binary_candidate_urls(url, env=None):
+    """内核压缩包：始终先直连。只有 GH_PROXY_BINARIES 打开才把 GH_PROXY 加到后面。"""
+    if not url:
+        return []
+    urls = [url]
+    if github_proxy_binaries_enabled(env):
+        prefix = github_proxy_prefix()
+        if prefix and url.startswith("https://github.com/"):
+            urls.append(prefix + url)
+    return urls
+
+_ASSET_VERIFIER = None
+
+def load_asset_verifier():
+    """scripts/verify_github_asset.py。按 app.py 所在目录找，不依赖正在被升级替换的安装路径。"""
+    global _ASSET_VERIFIER
+    if _ASSET_VERIFIER is not None:
+        return _ASSET_VERIFIER
+    path = os.path.abspath(os.path.join(_APP_DIR, "..", "scripts", "verify_github_asset.py"))
+    spec = importlib.util.spec_from_file_location("mihomo_verify_github_asset", path)
+    if spec is None or spec.loader is None:
+        raise ImportError(path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    _ASSET_VERIFIER = module
+    return module
+
+def verify_core_download(path, document, asset_name, via_proxy):
+    """用 GitHub 发布资产的 size/digest 校验内核压缩包。代理下载没有 sha256 则拒绝。"""
+    try:
+        verifier = load_asset_verifier()
+    except Exception as exc:
+        if via_proxy:
+            return False, f"无法加载内核校验程序，已拒绝代理下载：{exc}"
+        log.warning("无法加载内核校验程序，直连下载仅做 gzip 校验：%s", exc)
+        return True, ""
+    meta = verifier.asset_metadata(document, asset_name) if document is not None else {"size": None, "digest": ""}
+    return verifier.verify_file(path, meta, via_proxy)
+
 def read_url_text(urls, timeout=15, max_bytes=DOWNLOAD_MAX_BYTES):
     last_error = ""
     for url in urls:
@@ -3177,13 +3410,150 @@ def download_file(urls, output, timeout=30, max_bytes=DOWNLOAD_MAX_BYTES):
             remove_quietly(output)
     return False, last_error
 
+def zip_external_mode(member):
+    return (member.external_attr >> 16) & 0o170000
+
 def safe_extract_zip(archive, destination):
     dest_root = os.path.abspath(destination)
     for member in archive.infolist():
-        target = os.path.abspath(os.path.join(destination, member.filename))
+        name = member.filename
+        if name.startswith("/") or ".." in name.split("/"):
+            raise ValueError("Unsafe path in zip archive: " + name)
+        target = os.path.abspath(os.path.join(destination, name))
         if target != dest_root and not target.startswith(dest_root + os.sep):
-            raise ValueError("Unsafe path in zip archive: " + member.filename)
+            raise ValueError("Unsafe path in zip archive: " + name)
+        if zip_external_mode(member) == 0o120000:
+            raise ValueError("Refusing symlink in zip archive: " + name)
         archive.extract(member, destination)
+
+def git_blob_sha1(data):
+    if isinstance(data, str):
+        data = data.encode("utf-8")
+    header = f"blob {len(data)}\0".encode("ascii")
+    return hashlib.sha1(header + data).hexdigest()
+
+def read_github_api_json(url, timeout=20):
+    """只请求这一条 api.github.com 地址，不走 GH_PROXY。校验信息必须来自 GitHub 自己。"""
+    if not str(url).startswith("https://api.github.com/"):
+        return None, "只接受 api.github.com"
+    ok, text, source = read_url_text([url], timeout=timeout)
+    if not ok:
+        return None, text
+    if source != url:
+        return None, "校验信息不是直接从 api.github.com 取得的"
+    try:
+        data = json.loads(text)
+    except ValueError:
+        return None, "GitHub API 返回的不是 JSON"
+    if not isinstance(data, dict):
+        return None, "GitHub API 返回格式无法识别"
+    return data, ""
+
+def panel_upgrade_pin(settings):
+    """把分支固定到一次提交，并取回该提交里 app.py 的 blob sha / sha256 / 版本号。"""
+    parts = github_repo_parts(settings.get("repo_url"))
+    if not parts:
+        return None, "当前只支持 GitHub 仓库地址。"
+    owner, name = parts
+    branch = str(settings.get("branch") or "").strip()
+    if not branch:
+        return None, "没有配置面板分支。"
+    commit_url = f"https://api.github.com/repos/{owner}/{name}/commits/{quote(branch, safe='')}"
+    commit_data, err = read_github_api_json(commit_url)
+    if commit_data is None:
+        return None, "无法从 GitHub API 直接读取提交号，已取消升级（不会安装未经校验的压缩包）。\n" + err
+    commit = str(commit_data.get("sha") or "")
+    try:
+        tree_sha = str(commit_data["commit"]["tree"]["sha"])
+    except (KeyError, TypeError):
+        tree_sha = ""
+    if not re.fullmatch(r"[0-9a-f]{40}", commit) or not re.fullmatch(r"[0-9a-f]{40}", tree_sha):
+        return None, "GitHub 返回的提交号无效，已取消升级。"
+    contents_url = github_contents_app_url(settings["repo_url"], commit)
+    contents, err = read_github_api_json(contents_url)
+    if contents is None:
+        return None, "无法从 GitHub API 读取 app.py 校验信息，已取消升级。\n" + err
+    blob_sha = str(contents.get("sha") or "")
+    if contents.get("encoding") != "base64" or not re.fullmatch(r"[0-9a-f]{40}", blob_sha):
+        return None, "GitHub 返回的 app.py 校验信息无效，已取消升级。"
+    try:
+        raw = base64.b64decode(str(contents.get("content") or "").replace("\n", ""), validate=False)
+    except Exception:
+        return None, "无法解码 GitHub 上的 app.py，已取消升级。"
+    if not hmac.compare_digest(git_blob_sha1(raw), blob_sha):
+        return None, "GitHub 返回的 app.py 内容与 blob sha 不一致，已取消升级。"
+    version = parse_panel_version(raw.decode("utf-8", "replace"))
+    if not version:
+        return None, "远端 app.py 没有声明 PANEL_VERSION，已取消升级以避免降级。"
+    return {
+        "owner": owner,
+        "name": name,
+        "commit": commit,
+        "tree_sha": tree_sha,
+        "blob_sha": blob_sha,
+        "sha256": hashlib.sha256(raw).hexdigest(),
+        "version": version,
+        "archive_url": f"https://github.com/{owner}/{name}/archive/{commit}.zip",
+    }, ""
+
+def commit_archive_dirname(repo_name, commit):
+    return f"{repo_name}-{commit}"
+
+def zip_names_match_commit(zip_path, repo_name, commit):
+    prefix = commit_archive_dirname(repo_name, commit) + "/"
+    try:
+        with zipfile.ZipFile(zip_path) as archive:
+            names = archive.namelist()
+            for info in archive.infolist():
+                name = info.filename
+                if name.startswith("/") or ".." in name.split("/"):
+                    return False, "压缩包路径非法"
+                if zip_external_mode(info) == 0o120000:
+                    return False, "压缩包包含符号链接"
+    except zipfile.BadZipFile:
+        return False, "下载到的文件不是有效的 zip 压缩包。"
+    if not names or not all(name.startswith(prefix) for name in names):
+        return False, "压缩包不是该提交的 GitHub 归档"
+    return True, ""
+
+def verify_commit_tree(root, entries):
+    """解压结果必须和 GitHub 返回的文件树逐个 blob 一致，多一个或少一个都拒绝。"""
+    if not os.path.isdir(root):
+        return False, "解压目录不存在"
+    expected = {}
+    for entry in entries or []:
+        if not isinstance(entry, dict):
+            return False, "Git 树格式无法识别"
+        if entry.get("type") != "blob":
+            continue
+        path = str(entry.get("path") or "")
+        sha = str(entry.get("sha") or "")
+        if not path or path.startswith("/") or ".." in path.split("/"):
+            return False, "Git 树包含非法路径"
+        if not re.fullmatch(r"[0-9a-f]{40}", sha):
+            return False, f"Git 树缺少 blob sha：{path}"
+        expected[path] = sha
+    if not expected:
+        return False, "Git 树里没有文件"
+    seen = set()
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [item for item in dirnames if item != ".git"]
+        for filename in filenames:
+            full = os.path.join(dirpath, filename)
+            rel = os.path.relpath(full, root).replace(os.sep, "/")
+            if os.path.islink(full):
+                return False, f"压缩包包含符号链接：{rel}"
+            if rel not in expected:
+                return False, f"压缩包含有该提交之外的文件：{rel}"
+            with open(full, "rb") as handle:
+                actual = git_blob_sha1(handle.read())
+            if not hmac.compare_digest(actual, expected[rel]):
+                return False, f"文件与提交不一致：{rel}"
+            seen.add(rel)
+    missing = [path for path in expected if path not in seen]
+    if missing:
+        return False, f"压缩包缺少文件：{missing[0]}"
+    return True, ""
 
 def panel_version_tuple(value):
     match = re.search(r"v?(\d+)\.(\d+)\.(\d+)", str(value or ""))
@@ -3243,38 +3613,76 @@ def panel_managed_targets():
         ("/etc/logrotate.d/mihomo", "etc/logrotate.d/mihomo", "file", 0o644),
     ]
 
+PANEL_APP_REL = "remote-root/etc/mihomo/manager/app.py"
+
+def load_panel_healthcheck_source():
+    path = os.path.join(_APP_DIR, "panel_healthcheck.py")
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            return handle.read()
+    except OSError as exc:
+        log.warning("读取面板健康检查脚本失败：%s", exc)
+        return ""
+
+# 启动时就读进内存。升级会替换磁盘上的 manager/，回滚脚本必须用这次进程里的这份。
+PANEL_HEALTHCHECK_SOURCE = load_panel_healthcheck_source()
+
 def download_panel_source(tmpdir):
     settings = panel_repo_settings()
-    archive_url = github_archive_url(settings["repo_url"], settings["branch"])
-    if not archive_url:
-        return False, "当前只支持 GitHub 仓库地址。", None, settings
+    pin, pin_error = panel_upgrade_pin(settings)
+    if not pin:
+        return False, pin_error, None, settings
+    settings["remote_version"] = pin["version"]
+    settings["commit"] = pin["commit"]
+    current_tuple = panel_version_tuple(PANEL_VERSION)
+    remote_tuple = panel_version_tuple(pin["version"])
+    if remote_tuple and current_tuple and remote_tuple <= current_tuple:
+        return True, "https://api.github.com/", None, settings
+    tree_url = f"https://api.github.com/repos/{pin['owner']}/{pin['name']}/git/trees/{pin['tree_sha']}?recursive=1"
+    tree, err = read_github_api_json(tree_url)
+    if tree is None:
+        return False, "无法从 GitHub API 读取提交文件树，已取消升级。\n" + err, None, settings
+    if tree.get("truncated"):
+        return False, "GitHub 文件树被截断，无法完整校验，已取消升级。", None, settings
+    entries = tree.get("tree")
+    if not isinstance(entries, list):
+        return False, "GitHub 文件树格式无法识别，已取消升级。", None, settings
+    matched = [entry for entry in entries if isinstance(entry, dict) and entry.get("path") == PANEL_APP_REL]
+    if not matched or not hmac.compare_digest(str(matched[0].get("sha") or ""), pin["blob_sha"]):
+        return False, "提交文件树里的 app.py 与已固定的 blob sha 不一致，已取消升级。", None, settings
+    archive_url = pin["archive_url"]
     zip_path = os.path.join(tmpdir, "mihomo-panel.zip")
     ok, source = download_file(github_candidate_urls(archive_url), zip_path)
     if not ok:
         return False, "下载升级包失败：\n" + source, None, settings
+    names_ok, names_error = zip_names_match_commit(zip_path, pin["name"], pin["commit"])
+    if not names_ok:
+        return False, names_error + " 已取消升级。", None, settings
     try:
         with zipfile.ZipFile(zip_path) as archive:
             safe_extract_zip(archive, tmpdir)
     except zipfile.BadZipFile:
         return False, "下载到的文件不是有效的 zip 压缩包。", None, settings
-    except ValueError as e:
-        return False, str(e), None, settings
-
-    for root, dirs, _ in os.walk(tmpdir):
-        if "remote-root" not in dirs:
-            continue
-        source_root = os.path.join(root, "remote-root")
-        app_path = os.path.join(source_root, "etc/mihomo/manager/app.py")
-        cli_path = os.path.join(source_root, "usr/bin/mihomo")
-        if not os.path.exists(app_path) or not os.path.exists(cli_path):
-            continue
-        ok, message = run_args(["python3", "-m", "py_compile", app_path], timeout=20)
-        if not ok:
-            return False, "新版 app.py 校验失败：\n" + message, None, settings
-        with open(app_path, "r", encoding="utf-8") as f:
-            settings["remote_version"] = parse_panel_version(f.read())
-        return True, source, source_root, settings
-    return False, "升级包里没有找到有效的 remote-root 目录。", None, settings
+    except ValueError as exc:
+        return False, str(exc), None, settings
+    commit_root = os.path.join(tmpdir, commit_archive_dirname(pin["name"], pin["commit"]))
+    tree_ok, tree_error = verify_commit_tree(commit_root, entries)
+    if not tree_ok:
+        return False, "升级包校验失败，已取消升级。\n" + tree_error, None, settings
+    app_path = os.path.join(commit_root, PANEL_APP_REL)
+    cli_path = os.path.join(commit_root, "remote-root/usr/bin/mihomo")
+    if not os.path.isfile(app_path) or not os.path.isfile(cli_path):
+        return False, "升级包里没有找到有效的 remote-root 目录。", None, settings
+    with open(app_path, "rb") as handle:
+        data = handle.read()
+    if not hmac.compare_digest(hashlib.sha256(data).hexdigest(), pin["sha256"]):
+        return False, "app.py 的 sha256 与 GitHub 上固定的内容不一致，已取消升级。", None, settings
+    if parse_panel_version(data.decode("utf-8", "replace")) != pin["version"]:
+        return False, "app.py 的版本号与已固定的提交不一致，已取消升级。", None, settings
+    ok, message = run_args(["python3", "-m", "py_compile", app_path], timeout=20)
+    if not ok:
+        return False, "新版 app.py 校验失败：\n" + message, None, settings
+    return True, source, os.path.join(commit_root, "remote-root"), settings
 
 def backup_panel_targets():
     os.makedirs(BACKUP_DIR, exist_ok=True)
@@ -3349,6 +3757,117 @@ def schedule_panel_restart():
         close_fds=True,
     )
 
+def panel_healthcheck_paths():
+    os.makedirs(BACKUP_DIR, exist_ok=True)
+    return {
+        "script": os.path.join(BACKUP_DIR, "panel-upgrade-healthcheck.py"),
+        "plan": os.path.join(BACKUP_DIR, "panel-upgrade-pending.json"),
+        "armed": os.path.join(BACKUP_DIR, "panel-upgrade-health.armed"),
+        "log": "/var/log/mihomo-panel-upgrade-health.log",
+    }
+
+def write_private_text(path, text, mode):
+    parent = os.path.dirname(path)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+    tmp_path = path + f".{os.getpid()}.{secrets.token_hex(3)}.tmp"
+    fd = os.open(tmp_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, mode)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chmod(tmp_path, mode)
+        os.replace(tmp_path, path)
+        os.chmod(path, mode)
+    except Exception:
+        try:
+            os.remove(tmp_path)
+        except OSError:
+            pass
+        raise
+
+def panel_healthcheck_plan(backup_root):
+    return {
+        "backup_root": backup_root,
+        "allowed_targets": [target for target, _, _, _ in panel_managed_targets()],
+        "old_pid": os.getpid(),
+        "url": panel_probe_url(),
+        "control_service": True,
+        "attempts": 12,
+        "interval": 2,
+        "initial_wait": 2,
+        "pid_wait": 25,
+        "pid_interval": 0.5,
+        "armed_path": panel_healthcheck_paths()["armed"],
+        "log_path": panel_healthcheck_paths()["log"],
+    }
+
+def stage_panel_healthcheck(backup_root):
+    """把当前进程里的健康检查脚本写到备份目录。升级替换 manager/ 之后跑的仍是这一份。"""
+    if not PANEL_HEALTHCHECK_SOURCE.strip():
+        return False, "健康检查脚本缺失，无法在重启失败时自动回滚"
+    paths = panel_healthcheck_paths()
+    for stale in (paths["armed"],):
+        try:
+            os.remove(stale)
+        except OSError:
+            pass
+    plan = panel_healthcheck_plan(backup_root)
+    try:
+        write_private_text(paths["script"], PANEL_HEALTHCHECK_SOURCE, 0o700)
+        write_private_text(paths["plan"], json.dumps(plan, ensure_ascii=False, indent=2) + "\n", 0o600)
+    except OSError as exc:
+        return False, f"无法写下健康检查计划：{exc}"
+    return True, paths
+
+def launch_panel_healthcheck(paths):
+    cmd = ["systemd-run", "--collect", "--unit", "mihomo-panel-health-" + secrets.token_hex(4),
+           sys.executable, paths["script"], paths["plan"]]
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=20)
+        if result.returncode == 0:
+            return True
+        detail = (result.stderr or result.stdout or "").strip()
+        log.warning("systemd-run 启动健康检查失败：%s", detail)
+    except Exception as exc:
+        log.warning("systemd-run 不可用：%s", exc)
+    try:
+        subprocess.Popen(
+            [sys.executable, paths["script"], paths["plan"]],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            close_fds=True,
+            start_new_session=True,
+        )
+        return True
+    except Exception as exc:
+        log.warning("无法启动健康检查进程：%s", exc)
+        return False
+
+def wait_healthcheck_armed(path, timeout=8):
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if os.path.exists(path):
+            return True
+        time.sleep(0.1)
+    return False
+
+def schedule_panel_upgrade_restart(backup_root):
+    """先让健康检查把计划读进内存，再重启。新版本若起不来，由检查进程回滚。"""
+    ok, staged = stage_panel_healthcheck(backup_root)
+    if not ok:
+        log.error("%s", staged)
+        schedule_panel_restart()
+        return staged
+    if not launch_panel_healthcheck(staged):
+        schedule_panel_restart()
+        return "健康检查进程没有启动。若新版本无法打开 /login，需要手动从备份恢复：" + backup_root
+    if not wait_healthcheck_armed(staged["armed"]):
+        log.warning("健康检查没有在超时内就绪，仍将重启面板")
+    schedule_panel_restart()
+    return "已安排重启后的健康检查：若 /login 无法连续打开，将自动回滚到本次备份。"
+
 def upgrade_panel():
     with tempfile.TemporaryDirectory() as tmpdir:
         ok, source, source_root, settings = download_panel_source(tmpdir)
@@ -3361,6 +3880,8 @@ def upgrade_panel():
             return False, "远端面板没有声明 PANEL_VERSION，已取消升级以避免降级。", False
         if current_tuple and remote_tuple <= current_tuple:
             return True, f"当前面板已经是最新版本。\n当前版本：v{PANEL_VERSION}\n远端版本：v{remote_version}", False
+        if not source_root:
+            return False, "升级包不完整，已取消升级。", False
         backup_root = backup_panel_targets()
         try:
             install_panel_payload(source_root)
@@ -3369,7 +3890,7 @@ def upgrade_panel():
             restore_panel_backup(backup_root)
             run_args(["systemctl", "daemon-reload"], timeout=30)
             return False, "面板升级失败，已自动回滚：\n" + str(e), False
-    schedule_panel_restart()
+    note = schedule_panel_upgrade_restart(backup_root)
     return True, (
         "Mihomo 面板升级完成，Web 服务将在 1 秒后重启。\n"
         f"升级源：{source}\n"
@@ -3377,7 +3898,9 @@ def upgrade_panel():
         f"分支：{settings['branch']}\n"
         f"旧版本：v{PANEL_VERSION}\n"
         f"新版本：v{remote_version}\n"
-        f"备份位置：{backup_root}"
+        f"提交：{settings.get('commit', '')}\n"
+        f"备份位置：{backup_root}\n"
+        f"{note}"
     ), True
 
 # ==========================================
@@ -4031,6 +4554,7 @@ def get_logs():
 @login_required
 def update_account_credentials():
     data = json_body()
+    ensure_web_secret_hashed()
     _, valid_pass = web_credentials()
     if not valid_pass:
         return jsonify({"success": False, "message": "服务端未配置 WEB_SECRET，请先在 .env 里设置账号。"})
@@ -4039,7 +4563,7 @@ def update_account_credentials():
     new_password = str(data.get('web_secret') or '')
     confirm_password = str(data.get('web_secret_confirm') or '')
 
-    if not secrets.compare_digest(current_password.encode("utf-8"), valid_pass.encode("utf-8")):
+    if not check_password_value(valid_pass, current_password):
         return jsonify({"success": False, "message": "当前密码不正确。"})
     if not is_valid_web_username(new_user):
         return jsonify({"success": False, "message": "用户名只能使用 3-32 位字母、数字、下划线、点或短横线。"})
@@ -4050,7 +4574,16 @@ def update_account_credentials():
             return jsonify({"success": False, "message": "新密码至少需要 6 位。"})
         if new_password != confirm_password:
             return jsonify({"success": False, "message": "两次输入的新密码不一致。"})
-        updates.update({"WEB_SECRET": new_password})
+        try:
+            hashed_password = hash_password(new_password)
+        except Exception:
+            return jsonify({"success": False, "message": "无法安全保存新密码，原密码未修改。"})
+        if not password_is_hashed(hashed_password):
+            return jsonify({"success": False, "message": "无法安全保存新密码，原密码未修改。"})
+        updates.update({
+            "WEB_SECRET": hashed_password,
+            "WEB_PASSWORD_STRONG": "true" if password_is_strong(new_password) else "false",
+        })
 
     write_env(updates)
     os.environ["WEB_USER"] = new_user
@@ -4061,6 +4594,17 @@ def update_account_credentials():
     session.clear()
     return jsonify({"success": True, "message": "账号已更新，请使用新凭据重新登录。", "reload_after": 1})
 
+def password_strength_reported(password):
+    """哈希本身看不出长度。迁移和改密时写下的 WEB_PASSWORD_STRONG 用来继续提示弱口令。"""
+    if password_is_hashed(password):
+        flag = str(read_env().get("WEB_PASSWORD_STRONG", "")).strip().lower()
+        if flag == "false":
+            return False
+        if flag == "true":
+            return True
+        return True
+    return password_is_strong(password)
+
 def security_status():
     """账户安全页的检查清单。只给结论（强 / 弱、是否对局域网开放），不返回任何密码或密钥本身。"""
     user, password = web_credentials()
@@ -4069,7 +4613,7 @@ def security_status():
     host = controller.rsplit(":", 1)[0] if ":" in controller else controller
     return {
         "web_user": user,
-        "password_strong": len(password) >= 10 and not password.isdigit(),
+        "password_strong": password_strength_reported(password),
         "controller": controller,
         "controller_exposed": bool(controller) and host not in ("127.0.0.1", "localhost", "[::1]"),
         "controller_secret_set": bool(secret),
@@ -4300,13 +4844,17 @@ def handle_settings():
 
 if __name__ == '__main__':
     env = read_env()
-    try:
-        port = int(env.get('WEB_PORT', 7838))
-    except Exception:
-        port = 7838
+    port = web_port(env)
+    host = web_bind_host(env)
+    apply_session_cookie_secure()
+    # 面板进程只说 HTTP。SESSION_COOKIE_SECURE 仅在前面有 HTTPS 反代、并且
+    # WEB_COOKIE_SECURE=true 时打开；明文访问时保持关闭，否则浏览器不保存登录态。
+    if app.config.get("SESSION_COOKIE_SECURE"):
+        log.info("SESSION_COOKIE_SECURE 已开启，请确认浏览器只通过 HTTPS 访问本面板")
+    log.info("管理面板监听 %s:%s", host, port)
     # systemd 停服务发 SIGTERM，默认处理是直接退出不跑 atexit；转成 SystemExit 让采样线程把统计落盘
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
     # 自动更新：补齐/修正 cron 行；上一次自动升级面板后在这里记录最终结果
     startup_auto_update_hooks()
     start_device_sampler()
-    app.run(host='0.0.0.0', port=port)
+    app.run(host=host, port=port)
