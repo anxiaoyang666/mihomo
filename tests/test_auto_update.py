@@ -130,6 +130,7 @@ class AutoUpdateTestBase(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.dir = Path(self.tmp.name)
+        os.environ.pop("GH_PROXY_BINARIES", None)
         self.app = load_app(self.tmp.name)
         self.app.AUTO_UPDATE_LOG = str(self.dir / "auto-update.log")
         (self.dir / "config.yaml").write_text(CONFIG)
@@ -235,8 +236,10 @@ class CoreUpdateTest(AutoUpdateTestBase):
         self.assertTrue(backups[0].startswith("mihomo-core.v1.19.30."))
         # DNS 监听 0.0.0.0:1053 → 查 127.0.0.1:1053
         self.assertEqual(self.sys.dns_args[:2], ("127.0.0.1", 1053))
-        # 下载走 github_candidate_urls（第一条是官方直连）
-        self.assertTrue(self.sys.downloads[0][0].startswith("https://github.com/MetaCubeX/mihomo/releases/download/v1.19.35/"))
+        # 下载走 github_binary_candidate_urls（第一条是官方直连；未打开 GH_PROXY_BINARIES 时没有代理）
+        self.assertEqual(self.sys.downloads[0], [
+            "https://github.com/MetaCubeX/mihomo/releases/download/v1.19.35/mihomo-linux-amd64-compatible-v1.19.35.gz",
+        ])
         self.assertFalse(any(name.startswith(".auto-update.") for name in os.listdir(self.dir)), "临时目录要清理")
 
     def test_never_downgrade(self):
@@ -333,6 +336,28 @@ class CoreUpdateTest(AutoUpdateTestBase):
         report = self.au.update_core(self.rt, self.settings(), dry_run=False)
         self.assertEqual(report["result"], "skipped")
         self.assertEqual(self.sys.downloads, [])
+
+    def test_core_binary_proxy_is_opt_in_and_digest_must_match(self):
+        asset = "mihomo-linux-amd64-compatible-v1.19.35.gz"
+        (self.dir / ".env").write_text("GH_PROXY=https://gh-proxy.example/\n")
+        self.au.update_core(self.rt, self.settings(), dry_run=False)
+        self.assertEqual(len(self.sys.downloads[0]), 1)
+
+        self.sys.core_bin.write_text("VERSION=v1.19.30")
+        self.sys.downloads.clear()
+        (self.dir / ".env").write_text("GH_PROXY=https://gh-proxy.example/\nGH_PROXY_BINARIES=true\n")
+        self.au.update_core(self.rt, self.settings(), dry_run=False)
+        self.assertEqual(self.sys.downloads[0][1], "https://gh-proxy.example/https://github.com/MetaCubeX/mihomo/releases/download/v1.19.35/" + asset)
+
+        self.sys.core_bin.write_text("VERSION=v1.19.30")
+        for item in self.sys.releases:
+            if item["tag_name"] == "v1.19.35":
+                item["assets"] = [{"name": asset, "digest": "sha256:" + "ab" * 32}]
+        report = self.au.update_core(self.rt, self.settings(), dry_run=False)
+        self.assertEqual(report["result"], "failed", report["message"])
+        self.assertIn("sha256", report["message"])
+        self.assertEqual(self.core_text(), "VERSION=v1.19.30")
+        self.assertEqual(self.sys.restarts, 2)
 
     def test_release_api_uses_direct_then_gh_proxy(self):
         (self.dir / ".env").write_text("GH_PROXY=https://gh-proxy.example/\n")

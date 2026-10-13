@@ -62,10 +62,14 @@ class KernelInstallContractTest(unittest.TestCase):
         self.assertIn("sort -V", source)
         self.assertIn('gzip -t "$GZ_FILE" || fail', source)
         self.assertIn('gunzip -f "$GZ_FILE" || fail', source)
-        self.assertIn("没有 sha256 校验文件", source)
+        self.assertIn("verify_github_asset.py", source)
+        self.assertIn("GH_PROXY_BINARIES", source)
+        self.assertIn('releases/tags/${TAG}', source)
         self.assertIn('releases/latest/download/version.txt', source)
-        # 直连在前，GH_PROXY 在后
-        self.assertIn('echo "$url"\n    if [ -n "$GH_PROXY" ]; then\n        echo "${GH_PROXY%/}/${url}"', source)
+        # 直连始终在前。元数据仍可回退 GH_PROXY；内核二进制要 GH_PROXY_BINARIES=true 才回退。
+        self.assertIn('printf \'%s\\n\' "$url"', source)
+        self.assertIn('if [ "$kind" = "binary" ] && ! proxy_binaries_enabled; then', source)
+        self.assertIn('printf \'%s\\n\' "${GH_PROXY%/}/${url}"', source)
         self.assertNotIn("v1.18.1", source)
         self.assertNotIn("grep -oP", source)
 
