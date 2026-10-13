@@ -68,7 +68,8 @@ apply_rules() {
     # A. 开启内核转发
     # --------------------------------------
     # 读取当前状态
-    local ip_fwd=$(sysctl -n net.ipv4.ip_forward 2>/dev/null)
+    local ip_fwd
+    ip_fwd=$(sysctl -n net.ipv4.ip_forward 2>/dev/null)
     if [ "$ip_fwd" != "1" ]; then
         sysctl -w net.ipv4.ip_forward=1 > /dev/null
         log "✅ 内核转发已开启"
