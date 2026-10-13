@@ -1,0 +1,18 @@
+# Development and CI dependencies for Mihomo Toolbox.
+#
+# Runtime (remote-root/etc/mihomo/manager/app.py):
+# install.sh installs these as distro packages and does not pin a version:
+#   apt: python3-flask, python3-yaml
+#   dnf: python3-flask, python3-pyyaml
+#   yum: python3-flask, PyYAML
+# app.py imports Flask unconditionally. PyYAML is optional at runtime
+# (config comparison falls back to "always restart" when it is missing)
+# but CI installs it so the YAML tests run instead of skipping.
+# Floors match the oldest packages still common on the installer's apt
+# targets (Ubuntu 22.04: Flask 2.0.1, PyYAML 5.4.1). The panel only needs
+# Flask's app / session / jsonify API and yaml.safe_load.
+Flask>=2.0.1
+PyYAML>=5.4.1
+
+# Test runner. tests/ is a unittest suite; pytest collects it.
+pytest>=7.0

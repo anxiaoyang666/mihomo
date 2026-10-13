@@ -1,0 +1,48 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  pytest:
+    name: pytest
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+
+      # Two frontend contract tests shell out to node and skip when it is missing.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install Python dependencies
+        run: python -m pip install -r requirements-dev.txt
+
+      - name: Run pytest
+        run: python -m pytest tests/
+
+  shellcheck:
+    name: shellcheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install ShellCheck
+        run: sudo apt-get update && sudo apt-get install -y shellcheck
+
+      # install.sh plus the scripts installed to /etc/mihomo/scripts.
+      # --severity=warning: info/style notes in the existing scripts stay
+      # visible locally but do not fail CI. SC1090/SC1091 are disabled in
+      # .shellcheckrc (runtime .env is not in the repo).
+      - name: Run ShellCheck
+        run: shellcheck --severity=warning install.sh remote-root/etc/mihomo/scripts/*.sh

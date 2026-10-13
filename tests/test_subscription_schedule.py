@@ -166,8 +166,11 @@ class UpdateSubscriptionScriptTest(unittest.TestCase):
             f"printf '{curl_code}'\n",
             encoding="utf-8",
         )
+        # 防回环注入会调用 ip 识别本机网段。GitHub Actions 的网卡是内网地址，
+        # 识别成功后会重写配置并多发一条“订阅配置已更新”通知。这里不看宿主机网卡。
+        (fake_bin / "ip").write_text("#!/bin/bash\nexit 0\n", encoding="utf-8")
         # 机场模式下模板生成需要 PyYAML；没有就让脚本走 raw 模式之外的分支前提前失败，测试据此跳过
-        for name in ("systemctl", "curl", "wget", "notify.sh"):
+        for name in ("systemctl", "curl", "wget", "ip", "notify.sh"):
             path = fake_bin / name if name != "notify.sh" else root / "scripts" / name
             path.chmod(path.stat().st_mode | stat.S_IEXEC)
         script = SCRIPT.read_text(encoding="utf-8").replace('MIHOMO_DIR="/etc/mihomo"', f'MIHOMO_DIR="{root}"')

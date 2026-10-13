@@ -1,0 +1,7 @@
+# Scripts source the live /etc/mihomo/.env (gitignored, not in CI) and a
+# sibling helper via a path computed at runtime. ShellCheck cannot follow
+# those sources here.
+#
+# .shellcheckrc cannot set severity (koalaman/shellcheck#2178). CI passes
+# --severity=warning so info/style notes do not fail the job.
+disable=SC1090,SC1091

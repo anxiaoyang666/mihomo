@@ -99,7 +99,7 @@ refresh_rule_providers() {
     local curl_opts=(-sS -m 60 -o /dev/null -w '%{http_code}' -X PUT)
     [ -n "$secret" ] && curl_opts+=(-H "Authorization: Bearer ${secret}")
 
-    local ok=0 bad=0 line name encoded code
+    local ok=0 bad=0 name encoded code
     # 不依赖 PyYAML：只扫顶层 rule-providers: 下第一层缩进的键名
     while IFS=$'\t' read -r name encoded; do
         [ -n "$name" ] || continue
