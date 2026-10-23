@@ -2254,12 +2254,6 @@ def save_traffic_daily(path=None):
         raise
     return True
 
-def is_listener_inbound(connection):
-    """连接是不是从 listeners（其他地点经隧道连进来）进来的。本机的 TUN / mixed / socks 等入站叫 DEFAULT-*。"""
-    meta = connection.get("metadata") if isinstance(connection, dict) else None
-    name = str((meta or {}).get("inboundName") or "")
-    return bool(name) and not name.startswith("DEFAULT-")
-
 def record_traffic_sample(data, now=None):
     """mihomo 的上传/下载按“发起连接的一方”算。其他地点经 listeners 连进来的连接，
     对方发来的数据在 mihomo 里算上传，对本地点来说其实是下载，所以这部分要对调。"""

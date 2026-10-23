@@ -268,7 +268,7 @@ python3 -m pytest tests/
 shellcheck --severity=warning install.sh remote-root/etc/mihomo/scripts/*.sh
 ```
 
-依赖下限写在 `requirements-dev.txt`（Flask ≥ 2.0.1，PyYAML ≥ 5.4.1，pytest ≥ 7）。部分前端契约测试会调用 `node`，没有 node 时跳过；CI 使用 Node 20。ShellCheck 的 `SC1090` / `SC1091` 在 `.shellcheckrc` 里关闭，因为脚本 source 的是运行时 `.env`。
+依赖下限写在 `requirements-dev.txt`（Flask ≥ 2.0.1，PyYAML ≥ 5.4.1，pytest ≥ 7）。部分前端契约测试会调用 `node`，没有 node 时跳过；CI 使用 Node 22。ShellCheck 的 `SC1090` / `SC1091` 在 `.shellcheckrc` 里关闭，因为脚本 source 的是运行时 `.env`。
 
 ## 延伸阅读
 
