@@ -46,7 +46,7 @@ Web 面板（`templates/index.html`）的页面对应这些能力：
 - **前端**：单页 `index.html`，静态资源在 `manager/static/`（含随仓库打包的 Bootstrap 与 Bootstrap Icons）。
 - **内核**：GitHub `MetaCubeX/mihomo` 的发布包，装到 `/usr/bin/mihomo-core`。支持 `x86_64`（资源名 `linux-amd64-compatible`）和 `aarch64`（`linux-arm64`）。
 - **系统**：systemd、cron（`cron` 或 `crond`）、iptables、iproute2、logrotate。脚本是 bash。
-- **仓库检查**：GitHub Actions 跑 pytest（Python 3.12）和 ShellCheck。见 `.github/workflows/ci.yml`。
+- **仓库检查**：GitHub Actions 跑 pytest（Python 3.12）和 ShellCheck，任务在飞牛自托管 runner（`self-hosted`, `xiguo`）上执行，runner 需预装 ShellCheck。见 `.github/workflows/ci.yml`。
 
 ## One-Click Install
 
