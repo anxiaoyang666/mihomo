@@ -4,7 +4,7 @@
 
 本仓库是 **mihomo 网关的 Web 面板和配套脚本**。维护文档以中文为主。当前部署形态是：装在 **Proxmox VE（PVE）的 LXC 容器**里，由容器内的 **systemd** 拉起，不用 Docker。
 
-面板版本号写在 `remote-root/etc/mihomo/manager/app.py` 的 `PANEL_VERSION`（仓库里现在是 `0.1.62`）。架构和排障细节见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)、[docs/MAINTENANCE.md](docs/MAINTENANCE.md)。
+面板版本号写在 `remote-root/etc/mihomo/manager/app.py` 的 `PANEL_VERSION`（仓库里现在是 `0.1.63`）。架构和排障细节见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)、[docs/MAINTENANCE.md](docs/MAINTENANCE.md)。
 
 English readers: the install commands are in [One-Click Install](#one-click-install). The rest of this file is the Chinese operator guide.
 
