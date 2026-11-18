@@ -229,7 +229,7 @@ systemctl restart mihomo-manager
 
 内核认的是 `config.yaml` 里的 `secret`，面板认的是 `MIHOMO_API_SECRET`（没有则再读配置）。两边要一致。只改 `.env` 不会改内核已经加载的密钥；改 `config.yaml` 的 `secret` 会触发重启（它在需要重启的键里）。外部 Dashboard 的密钥就是这个值。CLI 菜单第 9 项会打印 `MIHOMO_API_SECRET` 和 `WEB_SECRET`；密码变成哈希之后，菜单里看到的是哈希而不是原密码。
 
-`RULE_SYNC_TOKEN` 泄露就等于别人可以改强制直连 / 强制代理名单。在同步设置页重新生成并保存，然后把新值配到每个对端。
+`RULE_SYNC_TOKEN` 泄露就等于别人可以改强制直连 / 强制家宽 / 强制代理名单。在同步设置页重新生成并保存，然后把新值配到每个对端。
 
 ## 订阅和 Geo 失败时
 

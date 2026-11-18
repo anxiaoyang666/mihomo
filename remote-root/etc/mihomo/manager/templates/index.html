@@ -1353,6 +1353,14 @@
                             </div>
                         </div>
                         <div class="card">
+                            <div class="card-header"><i class="bi bi-house"></i> 强制家宽 <span class="small-pill" id="ruleCount_force-home">--</span><span class="small-pill warn" id="ruleDirty_force-home" hidden>未保存</span></div>
+                            <div class="card-body">
+                                <div class="form-text mb-2">每行一个域名（同时匹配它的所有子域名），可在行尾用 # 写注释。保存后写入 mihomo 顶部规则，走 🏠 家宽，适合要住宅 IP 才过得了验证的网站（如套了 Cloudflare 强制验证的 PT 站），并同步到 mosctl 的强制家宽。</div>
+                                <textarea class="form-control rule-editor" id="rule_force_home" rows="8" placeholder="ourbits.club" oninput="updateRuleMeta('force-home')"></textarea>
+                                <button class="action-button primary mt-3" onclick="saveRule('force-home', this)"><i class="bi bi-save"></i> 保存强制家宽</button>
+                            </div>
+                        </div>
+                        <div class="card">
                             <div class="card-header"><i class="bi bi-send"></i> 强制代理 <span class="small-pill" id="ruleCount_force-nocn">--</span><span class="small-pill warn" id="ruleDirty_force-nocn" hidden>未保存</span></div>
                             <div class="card-body">
                                 <div class="form-text mb-2">每行一个域名（同时匹配它的所有子域名），可在行尾用 # 写注释。保存后写入 mihomo 顶部规则，默认走 ♻️ 自动选择，并同步到 mosctl 的强制国外。</div>
@@ -2824,7 +2832,7 @@
         } else {
             label.innerHTML = "完整配置文件 URL";
             input.placeholder = "http://... (Sub-Store/Gist)";
-            hint.innerHTML = "下载完整配置后原样使用，只额外加入：本地直连网段、分流同步的强制直连/代理规则，并保留本机的控制器密钥。";
+            hint.innerHTML = "下载完整配置后原样使用，只额外加入：本地直连网段、分流同步的强制直连/家宽/代理规则，并保留本机的控制器密钥。";
             input.value = cachedUrlRaw;
         }
     }
@@ -3224,7 +3232,7 @@
     }
 
     function ruleElementId(ruleId) {
-        return ruleId === 'force-cn' ? 'rule_force_cn' : 'rule_force_nocn';
+        return 'rule_' + ruleId.replace(/-/g, '_');
     }
 
     async function loadRule(ruleId) {
@@ -3362,7 +3370,7 @@
     }
 
     async function loadRulesPage() {
-        await Promise.all([loadRule('force-cn'), loadRule('force-nocn'), loadSyncSettings()]);
+        await Promise.all([loadRule('force-cn'), loadRule('force-home'), loadRule('force-nocn'), loadSyncSettings()]);
     }
 
     function generateSyncToken() {

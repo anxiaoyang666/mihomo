@@ -53,13 +53,15 @@ SUBSCRIPTION_STATE_FILE = f"{MIHOMO_DIR}/.last_subscription"
 SUBSCRIPTION_LOG = "/var/log/mihomo-subscription.log"
 GEO_LOG = "/var/log/mihomo-geo.log"
 MANAGER_DIR = f"{MIHOMO_DIR}/manager"
-PANEL_VERSION = "0.1.63"
+PANEL_VERSION = "0.1.64"
 DEFAULT_PANEL_REPO_URL = "https://github.com/anxiaoyang666/mihomo.git"
 DEFAULT_PANEL_BRANCH = "main"
 PANEL_BACKUP_KEEP_COUNT = 3
 PANEL_UPGRADE_EXCLUDES = ("/etc/mihomo/.env", "/etc/mihomo/config.yaml", "/etc/mihomo/ui")
-SYNCABLE_RULE_IDS = {"force-cn", "force-nocn"}
-RULE_SYNC_ACTIONS = {"force-cn": "DIRECT", "force-nocn": "PROXY"}
+SYNCABLE_RULE_IDS = {"force-cn", "force-home", "force-nocn"}
+RULE_SYNC_ACTIONS = {"force-cn": "DIRECT", "force-home": "HOME", "force-nocn": "PROXY"}
+# 强制家宽指向的策略组：按顺序找第一个真实存在的组；都没有时不写这条规则（保存非空列表会报错）
+HOME_POLICY_CANDIDATES = ("🏠 家宽", "家宽")
 RULE_SYNC_BEGIN = "# MOSCTL_MIHOMO_RULE_SYNC_BEGIN"
 RULE_SYNC_END = "# MOSCTL_MIHOMO_RULE_SYNC_END"
 FAKE_IP_FILTER_BEGIN = "# MOSCTL_MIHOMO_FAKE_IP_FILTER_BEGIN"
@@ -69,11 +71,14 @@ RULE_PROVIDERS_END = "# MOSCTL_MIHOMO_RULE_PROVIDERS_END"
 # 同步规则的域名放在规则文件里，config.yaml 只通过 file 类型的 rule-provider 引用；
 # 改规则时写文件再 PUT /providers/rules/<name> 热刷新，不用重启 mihomo
 RULES_DIR = f"{MIHOMO_DIR}/rules"
-RULE_PROVIDER_NAMES = {"force-cn": "mosctl_force_cn", "force-nocn": "mosctl_force_nocn"}
+RULE_PROVIDER_NAMES = {"force-cn": "mosctl_force_cn", "force-home": "mosctl_force_home", "force-nocn": "mosctl_force_nocn"}
 RULE_PROVIDER_FILES = {
     "force-cn": f"{RULES_DIR}/mosctl-force-cn.yaml",
+    "force-home": f"{RULES_DIR}/mosctl-force-home.yaml",
     "force-nocn": f"{RULES_DIR}/mosctl-force-nocn.yaml",
 }
+# 规则文件里的顺序就是匹配优先级：强制直连 > 强制家宽 > 强制代理
+RULE_LABELS = {"force-cn": "强制直连", "force-home": "强制家宽", "force-nocn": "强制代理"}
 RULES_UNCHANGED_MESSAGE = "规则内容没有变化，未重启"
 # 日志只读文件尾部，避免把几百 MB 的日志整个读进内存
 LOG_TAIL_BYTES = 256 * 1024
@@ -925,6 +930,28 @@ def proxy_policy_name(text):
             return preferred
     return names[0] if names else "PROXY"
 
+def home_policy_name(text):
+    """强制家宽要指向的策略组。没有家宽组时返回空字符串：这时不写这条规则，而不是悄悄改指别的组。"""
+    names = proxy_group_names(text)
+    for preferred in HOME_POLICY_CANDIDATES:
+        if preferred in names:
+            return preferred
+    return ""
+
+HOME_POLICY_MISSING_MESSAGE = "当前配置里没有「🏠 家宽」策略组，强制家宽无处可走，未保存"
+
+def rule_conflict_problem(new_contents):
+    """强制家宽和强制直连/强制代理里写了同一个域名时返回提示；排在前面的规则会先命中，后面那条就白写了。"""
+    home = rule_domain_set(new_contents.get("force-home", ""))
+    if not home:
+        return ""
+    for other in ("force-cn", "force-nocn"):
+        both = sorted(home & rule_domain_set(new_contents.get(other, "")))
+        if both:
+            shown = "、".join(both[:5]) + ("等" if len(both) > 5 else "")
+            return f"{shown} 同时写在强制家宽和{RULE_LABELS[other]}里，请只留一处，未保存"
+    return ""
+
 def sync_blocks_mode(text):
     """config.yaml 里同步规则的形态：provider（规则集 + 规则文件）、legacy（域名直接内联）、none（还没有）。"""
     if RULE_PROVIDERS_BEGIN in text and f"RULE-SET,{RULE_PROVIDER_NAMES['force-cn']}," in text:
@@ -935,7 +962,7 @@ def sync_blocks_mode(text):
 
 def read_legacy_inline_sync_rules(text):
     """旧格式：域名以 - DOMAIN-SUFFIX,x,策略 的形式内联在 rules: 的标记块里。"""
-    rules = {"force-cn": [], "force-nocn": []}
+    rules = {"force-cn": [], "force-home": [], "force-nocn": []}
     in_block = False
     for line in text.splitlines():
         stripped = line.strip()
@@ -1037,13 +1064,18 @@ def rule_domain_set(content):
 def sync_rules_unchanged(current, new_contents):
     return all(rule_domain_set(current.get(rule_id, "")) == rule_domain_set(new_contents.get(rule_id, "")) for rule_id in SYNCABLE_RULE_IDS)
 
-def build_mihomo_sync_rule_lines(proxy_policy, item_indent=""):
-    return [
+def build_mihomo_sync_rule_lines(proxy_policy, item_indent="", home_policy=""):
+    lines = [
         f"{item_indent}{RULE_SYNC_BEGIN}\n",
         f"{item_indent}- RULE-SET,{RULE_PROVIDER_NAMES['force-cn']},DIRECT\n",
+    ]
+    if home_policy:
+        lines.append(f"{item_indent}- RULE-SET,{RULE_PROVIDER_NAMES['force-home']},{home_policy}\n")
+    lines += [
         f"{item_indent}- RULE-SET,{RULE_PROVIDER_NAMES['force-nocn']},{proxy_policy}\n",
         f"{item_indent}{RULE_SYNC_END}\n",
     ]
+    return lines
 
 def build_fake_ip_filter_lines(item_indent):
     # 只有强制直连需要拿真实 IP，强制代理继续走 fake-ip
@@ -1164,12 +1196,13 @@ def render_sync_blocks(text):
     if not lines:
         lines = ["rules:\n"]
     proxy_policy = proxy_policy_name(text)
+    home_policy = home_policy_name(text)
 
     start = next((idx for idx, line in enumerate(lines) if line.strip() == RULE_SYNC_BEGIN), -1)
     if start >= 0:
         end = next((idx for idx in range(start + 1, len(lines)) if lines[idx].strip() == RULE_SYNC_END), start)
         # 沿用已有标记行的缩进
-        block = build_mihomo_sync_rule_lines(proxy_policy, line_indent(lines[start]))
+        block = build_mihomo_sync_rule_lines(proxy_policy, line_indent(lines[start]), home_policy)
         lines[start:end + 1] = block
     else:
         rules_index = find_yaml_top_level_key(lines, "rules")
@@ -1180,7 +1213,7 @@ def render_sync_blocks(text):
             rules_index = len(lines) - 1
         # rules: 下的列表项可能是 0 格或 2 格缩进，必须和现有项保持一致，否则 YAML 无效
         item_indent = list_item_indent_after_key(lines, rules_index)
-        block = build_mihomo_sync_rule_lines(proxy_policy, item_indent)
+        block = build_mihomo_sync_rule_lines(proxy_policy, item_indent, home_policy)
         lines[rules_index + 1:rules_index + 1] = block
     lines = update_fake_ip_filter_block(lines)
     lines = update_rule_providers_block(lines)
@@ -1284,8 +1317,13 @@ def save_rule_content(rule_id, content):
     current = read_mihomo_sync_rules()
     new_contents = dict(current)
     new_contents[rule_id] = rule_content_text(normalize_rule_domains(content))
+    conflict = rule_conflict_problem(new_contents)
+    if conflict:
+        return False, conflict, None
     if sync_rules_unchanged(current, new_contents):
         return True, RULES_UNCHANGED_MESSAGE + (f"（{note}）" if note else ""), "unchanged"
+    if rule_id == "force-home" and new_contents[rule_id] and not home_policy_name(read_config_text()):
+        return False, HOME_POLICY_MISSING_MESSAGE, None
     ok, message, action = update_mihomo_sync_block(new_contents)
     return ok, message + (f"（{note}）" if ok and note else ""), action
 
@@ -1551,6 +1589,8 @@ def apply_synced_rules(rules):
             return False, "没有可同步的规则"
         if sync_rules_unchanged(current, new_contents):
             return True, RULES_UNCHANGED_MESSAGE
+        if "force-home" in applied and new_contents["force-home"] and not home_policy_name(read_config_text()):
+            return False, HOME_POLICY_MISSING_MESSAGE
         ok, message, action = update_mihomo_sync_block(new_contents)
         if not ok:
             return False, message
@@ -4662,9 +4702,10 @@ def api_rule_sync():
 def api_rules(rule_id):
     if rule_id not in SYNCABLE_RULE_IDS:
         return jsonify({"success": False, "message": "未知规则文件"}), 404
-    labels = {"force-cn": "强制直连", "force-nocn": "强制代理"}
+    labels = RULE_LABELS
     summaries = {
         "force-cn": "这些域名会写入 mihomo 规则顶部并强制 DIRECT。",
+        "force-home": "这些域名会写入 mihomo 规则顶部并强制走「🏠 家宽」策略组。",
         "force-nocn": "这些域名会写入 mihomo 规则顶部并强制走代理策略组。",
     }
     if request.method == "GET":

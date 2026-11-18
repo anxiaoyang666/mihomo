@@ -4,7 +4,7 @@
 
 本仓库是 **mihomo 网关的 Web 面板和配套脚本**。维护文档以中文为主。当前部署形态是：装在 **Proxmox VE（PVE）的 LXC 容器**里，由容器内的 **systemd** 拉起，不用 Docker。
 
-面板版本号写在 `remote-root/etc/mihomo/manager/app.py` 的 `PANEL_VERSION`（仓库里现在是 `0.1.63`）。架构和排障细节见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)、[docs/MAINTENANCE.md](docs/MAINTENANCE.md)。
+面板版本号写在 `remote-root/etc/mihomo/manager/app.py` 的 `PANEL_VERSION`（仓库里现在是 `0.1.64`）。架构和排障细节见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)、[docs/MAINTENANCE.md](docs/MAINTENANCE.md)。
 
 English readers: the install commands are in [One-Click Install](#one-click-install). The rest of this file is the Chinese operator guide.
 
@@ -33,7 +33,7 @@ Web 面板（`templates/index.html`）的页面对应这些能力：
 - **概览**：内核是否在跑、连接数、内存、上传下载、策略组、今日流量（按北京时间换日）、最近 10 分钟速率。按钮可启动 / 停止 / 重启内核、立即更新订阅、初始化网关、升级面板，并打开内核 Dashboard。
 - **设备**：每 5 秒从控制器 `/connections` 采样。可选爱快（iKuai）只读 API，用路由器上的终端名、MAC、速率和流量替换列表；没配爱快时用连接和邻居表。
 - **订阅与任务**：配置托管（整份 `config.yaml`）或节点订阅（套 `templates/default.yaml`）；编辑 `config.yaml`；订阅 / Geo 定时任务；自动更新 Dashboard、内核、面板。
-- **分流同步**：维护「强制直连」「强制代理」域名，写入规则文件并热刷新；可推到其他同样接了这套接口的 mihomo / mosctl 面板。
+- **分流同步**：维护「强制直连」「强制家宽」「强制代理」域名，写入规则文件并热刷新；可推到其他同样接了这套接口的 mihomo / mosctl 面板。
 - **通知中心**：Webhook（JSON `title` / `content`）。站点名出现在标题里。Telegram 只在 `.env` 里开，页面上没有表单。
 - **运行日志**：内核、订阅、Geo、自动更新、通知，只读文件尾部。
 - **账户安全**：改用户名和密码，并检查口令强度、控制器是否对局域网开放、`secret` 是否够长。
@@ -169,7 +169,7 @@ TLS：面板只说 HTTP。浏览器走明文 `http://` 时，Secure Cookie 会�
 | `MIHOMO_PANEL_BRANCH` | 分支，默认 `main` |
 | `GH_PROXY` | GitHub 代理前缀，只在直连失败后作回退。留空表示不用。只接受 `http://` 或 `https://`。安装默认 `https://gh-proxy.com/` |
 | `GH_PROXY_BINARIES` | `true` / `1` / `yes` / `on` 才允许内核压缩包走 `GH_PROXY`。默认 `false`。资产的 size / sha256 只从直连的 `api.github.com` 读取 |
-| `RULE_SYNC_ENABLED` | `true` 时保存强制直连 / 强制代理规则后推送到对端。默认 `false` |
+| `RULE_SYNC_ENABLED` | `true` 时保存强制直连 / 强制家宽 / 强制代理规则后推送到对端。默认 `false` |
 | `RULE_SYNC_TOKEN` | 同步共享密钥。对端请求头 `X-Mosdns-Sync-Token`（或 JSON 里的 `token`）必须一致。安装时随机生成 |
 | `RULE_SYNC_PEERS` | 对端面板 URL，用 `\|` 分隔。同步设置页会写这个键 |
 | `NOTIFY_API` / `NOTIFY_API_URL` | Webhook 开关和地址。POST JSON：`{"title","content"}` |
