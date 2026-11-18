@@ -22,7 +22,7 @@ ROOT = Path(__file__).resolve().parents[1]
 APP = ROOT / "remote-root" / "etc" / "mihomo" / "manager" / "app.py"
 TEMPLATE = ROOT / "remote-root" / "etc" / "mihomo" / "templates" / "default.yaml"
 
-RULES = {"force-cn": "a.cn\nb.cn\n", "force-nocn": "openai.com\n"}
+RULES = {"force-cn": "a.cn\nb.cn\n", "force-home": "", "force-nocn": "openai.com\n"}
 
 
 def load_app(tmp_dir):
@@ -180,7 +180,7 @@ class RuleSyncRenderTest(unittest.TestCase):
         body = lines_under_key(text, "rule-providers")
         ours = [l for l in body if l.lstrip().startswith("mosctl_force_")]
         theirs = [l for l in body if l.lstrip().startswith("google_domain:")]
-        self.assertEqual(len(ours), 2)
+        self.assertEqual(len(ours), 3)
         self.assertEqual({indent_of(l) for l in ours}, {indent_of(theirs[0])})
         self.assertEqual(text.count("\nrule-providers:"), 1, "不能再追加一个 rule-providers 键")
 
@@ -235,7 +235,7 @@ class RuleSyncRenderTest(unittest.TestCase):
         self.assertEqual(cn.read_text(encoding="utf-8"), "payload:\n  - '+.b.cn'\n  - '+.a.cn'\n  - '+.*.x.cn'\n")
         self.assertEqual(oct(cn.stat().st_mode & 0o777), "0o644")
         self.assertEqual(self.rule_file("force-nocn").read_text(encoding="utf-8"), "payload: []\n")
-        self.assertEqual(self.app.read_rule_provider_files(), {"force-cn": "b.cn\na.cn\n*.x.cn\n", "force-nocn": ""})
+        self.assertEqual(self.app.read_rule_provider_files(), {"force-cn": "b.cn\na.cn\n*.x.cn\n", "force-home": "", "force-nocn": ""})
         if yaml is not None:
             self.assertEqual(yaml.safe_load(cn.read_text(encoding="utf-8")), {"payload": ["+.b.cn", "+.a.cn", "+.*.x.cn"]})
         self.assertEqual([p.name for p in cn.parent.glob("*.tmp")], [])
@@ -252,7 +252,7 @@ class RuleSyncRenderTest(unittest.TestCase):
         self.assertEqual(self.restarts, [])
         config = self.config_path().read_text(encoding="utf-8")
         self.assertEqual(self.app.sync_blocks_mode(config), "provider")
-        self.assertEqual(self.app.read_mihomo_sync_rules(), {"force-cn": "a.cn\nb.cn\n", "force-nocn": "openai.com\nclaude.ai\n"})
+        self.assertEqual(self.app.read_mihomo_sync_rules(), {"force-cn": "a.cn\nb.cn\n", "force-home": "", "force-nocn": "openai.com\nclaude.ai\n"})
         self.assertTrue(list((self.dir / "backup").glob("config.before-rule-sync.*.yaml")))
         self.assert_yaml_valid(config)
 
@@ -283,7 +283,7 @@ class RuleSyncRenderTest(unittest.TestCase):
         self.assertIn("+.new.cn", self.rule_file("force-cn").read_text(encoding="utf-8"))
         self.assertEqual(
             [(m, u, t) for m, u, _h, t in self.puts],
-            [("PUT", "http://127.0.0.1:9090/providers/rules/mosctl_force_cn", 5), ("PUT", "http://127.0.0.1:9090/providers/rules/mosctl_force_nocn", 5)],
+            [("PUT", "http://127.0.0.1:9090/providers/rules/mosctl_force_cn", 5), ("PUT", "http://127.0.0.1:9090/providers/rules/mosctl_force_home", 5), ("PUT", "http://127.0.0.1:9090/providers/rules/mosctl_force_nocn", 5)],
         )
         self.assertEqual(self.puts[0][2].get("Authorization"), "Bearer s3cret")
         self.assertFalse((self.dir / "backup").exists())
@@ -292,7 +292,7 @@ class RuleSyncRenderTest(unittest.TestCase):
         self.puts.clear()
         ok, message = self.app.apply_synced_rules({"force-nocn": "openai.com\n"})
         self.assertTrue(ok, message)
-        self.assertEqual(len(self.puts), 2)
+        self.assertEqual(len(self.puts), 3)
         self.assertEqual(self.scheduled, [])
         self.assertEqual(self.app.read_mihomo_sync_rules()["force-nocn"], "openai.com\n")
 
@@ -381,8 +381,70 @@ class RuleSyncRenderTest(unittest.TestCase):
         old.write_text(self.legacy_config(), encoding="utf-8")
         new.write_text(self.template, encoding="utf-8")
         self.assertTrue(self.app.reapply_sync_blocks(str(old), str(new)))
-        self.assertEqual(self.app.read_rule_provider_files(), {"force-cn": "a.cn\nb.cn\n", "force-nocn": "openai.com\n"})
+        self.assertEqual(self.app.read_rule_provider_files(), {"force-cn": "a.cn\nb.cn\n", "force-home": "", "force-nocn": "openai.com\n"})
         self.assertEqual(self.app.sync_blocks_mode(new.read_text(encoding="utf-8")), "provider")
+
+    # --- 强制家宽 ---
+    def home_template(self):
+        return self.template.replace("proxy-groups:\n", "proxy-groups:\n  - {name: 🏠 家宽, type: select, proxies: [直连]}\n", 1)
+
+    def test_home_rule_sits_between_direct_and_proxy(self):
+        text = self.app.render_sync_blocks(self.home_template())
+        block = text[text.find(self.app.RULE_SYNC_BEGIN):text.find(self.app.RULE_SYNC_END)]
+        self.assertEqual(
+            [line.strip() for line in block.splitlines()[1:] if line.strip()],
+            ["- RULE-SET,mosctl_force_cn,DIRECT", "- RULE-SET,mosctl_force_home,🏠 家宽", "- RULE-SET,mosctl_force_nocn,♻️ 自动选择"],
+        )
+        # 强制家宽要进 mihomo，DNS 继续走 fake-ip，不能进 fake-ip-filter
+        fake = text[text.find(self.app.FAKE_IP_FILTER_BEGIN):text.find(self.app.FAKE_IP_FILTER_END)]
+        self.assertNotIn("force_home", fake)
+        if yaml is not None:
+            data = yaml.safe_load(text)
+            self.assertEqual(data["rule-providers"]["mosctl_force_home"]["path"], "./rules/mosctl-force-home.yaml")
+            self.assertEqual(data["rules"][:3], ["RULE-SET,mosctl_force_cn,DIRECT", "RULE-SET,mosctl_force_home,🏠 家宽", "RULE-SET,mosctl_force_nocn,♻️ 自动选择"])
+
+    def test_home_rule_is_skipped_without_home_group(self):
+        text = self.app.render_sync_blocks(self.template)
+        self.assertNotIn("RULE-SET,mosctl_force_home", text)
+        # 规则集照样声明，之后出现家宽组时只需再渲染一次
+        self.assertIn("mosctl_force_home: {type: file", text)
+        self.assert_yaml_valid(text)
+
+    def test_save_home_rule_needs_home_group(self):
+        self.config_path().write_text(self.app.render_sync_blocks(self.template), encoding="utf-8")
+        ok, message, action = self.app.save_rule_content("force-home", "ourbits.club\n")
+        self.assertFalse(ok)
+        self.assertIn("🏠 家宽", message)
+        self.assertEqual(self.app.read_mihomo_sync_rules()["force-home"], "")
+        ok, message = self.app.apply_synced_rules({"force-home": "ourbits.club\n"})
+        self.assertFalse(ok)
+        self.assertIn("🏠 家宽", message)
+        # 清空列表不需要家宽组
+        ok, message, action = self.app.save_rule_content("force-home", "")
+        self.assertTrue(ok, message)
+
+    def test_save_home_rule_writes_file_and_upgrades_config_once(self):
+        self.config_path().write_text(self.app.render_sync_blocks(self.home_template()).replace(
+            "  - RULE-SET,mosctl_force_home,🏠 家宽\n", ""), encoding="utf-8")
+        ok, message, action = self.app.save_rule_content("force-home", "ourbits.club\nHDSKY.me\n")
+        self.assertTrue(ok, message)
+        self.assertEqual(action, "reloaded", message)
+        self.assertEqual(self.rule_file("force-home").read_text(encoding="utf-8"), "payload:\n  - '+.ourbits.club'\n  - '+.hdsky.me'\n")
+        self.assertIn("  - RULE-SET,mosctl_force_home,🏠 家宽\n", self.config_path().read_text(encoding="utf-8"))
+        self.assertEqual(self.app.read_mihomo_sync_rules()["force-home"], "ourbits.club\nhdsky.me\n")
+
+    def test_home_rule_conflicts_are_rejected(self):
+        self.config_path().write_text(self.app.render_sync_blocks(self.home_template()), encoding="utf-8")
+        self.app.write_rule_provider_files({"force-cn": "a.cn\n", "force-home": "", "force-nocn": "openai.com\n"})
+        ok, message, _action = self.app.save_rule_content("force-home", "a.cn\nourbits.club\n")
+        self.assertFalse(ok)
+        self.assertIn("a.cn", message)
+        self.assertIn("强制直连", message)
+        self.app.write_rule_provider_files({"force-cn": "a.cn\n", "force-home": "ourbits.club\n", "force-nocn": "openai.com\n"})
+        ok, message, _action = self.app.save_rule_content("force-nocn", "openai.com\nourbits.club\n")
+        self.assertFalse(ok)
+        self.assertIn("强制代理", message)
+        self.assertEqual(self.app.read_mihomo_sync_rules()["force-nocn"], "openai.com\n")
 
 
 if __name__ == "__main__":

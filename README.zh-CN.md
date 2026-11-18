@@ -48,7 +48,7 @@ systemctl status mihomo-manager mihomo force-ip-forward
 - `BACKUP_KEEP_COUNT`：`config.yaml` 备份保留份数。新安装写成 `20`；键不存在或非法时，面板和订阅脚本回落到 `10`。
 - `ALLOW_INSECURE_TLS=true`：下载订阅 / Geo 时跳过 TLS 证书校验。不写则校验。
 - `GATEWAY_AUTOFIX=false`：每分钟一次的 `gateway_init.sh check` 不再改 ip_forward / rp_filter / FORWARD / MASQUERADE。手动执行脚本仍会应用。默认相当于 `true`。
-- `RULE_SYNC_ENABLED`：`true` 时把强制直连 / 强制代理规则推到其他 mihomo / mosctl 面板。默认 `false`。
+- `RULE_SYNC_ENABLED`：`true` 时把强制直连 / 强制家宽 / 强制代理规则推到其他 mihomo / mosctl 面板。默认 `false`。
 - `RULE_SYNC_TOKEN`：规则同步共享密钥，各节点必须一致。
 - `RULE_SYNC_PEERS`：对端面板地址，用 `|` 分隔。
 

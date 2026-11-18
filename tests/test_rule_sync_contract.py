@@ -20,8 +20,8 @@ class MihomoRuleSyncContractTest(unittest.TestCase):
     def test_backend_exposes_mosctl_compatible_rule_sync(self):
         text = app_source()
 
-        self.assertIn('SYNCABLE_RULE_IDS = {"force-cn", "force-nocn"}', text)
-        self.assertIn('RULE_SYNC_ACTIONS = {"force-cn": "DIRECT", "force-nocn": "PROXY"}', text)
+        self.assertIn('SYNCABLE_RULE_IDS = {"force-cn", "force-home", "force-nocn"}', text)
+        self.assertIn('RULE_SYNC_ACTIONS = {"force-cn": "DIRECT", "force-home": "HOME", "force-nocn": "PROXY"}', text)
         self.assertIn("RULE_SYNC_BEGIN", text)
         self.assertIn("RULE_SYNC_END", text)
         self.assertIn("def read_sync_settings", text)
@@ -58,7 +58,7 @@ class MihomoRuleSyncContractTest(unittest.TestCase):
     def test_rule_providers_are_file_based_and_hot_refreshed(self):
         text = app_source()
 
-        self.assertIn('RULE_PROVIDER_NAMES = {"force-cn": "mosctl_force_cn", "force-nocn": "mosctl_force_nocn"}', text)
+        self.assertIn('RULE_PROVIDER_NAMES = {"force-cn": "mosctl_force_cn", "force-home": "mosctl_force_home", "force-nocn": "mosctl_force_nocn"}', text)
         self.assertIn('"force-cn": f"{RULES_DIR}/mosctl-force-cn.yaml"', text)
         self.assertIn("type: file, behavior: domain, format: yaml", text)
         self.assertIn('"/providers/rules/" + quote(name)', text)
@@ -85,6 +85,10 @@ class MihomoRuleSyncContractTest(unittest.TestCase):
         self.assertIn("force-nocn", text)
         self.assertIn("强制直连", text)
         self.assertIn("强制代理", text)
+        self.assertIn("强制家宽", text)
+        self.assertIn("saveRule('force-home', this)", text)
+        self.assertIn("loadRule('force-home')", text)
+        self.assertIn('id="rule_force_home"', text)
         self.assertIn("mosctl / mihomo 面板地址", text)
         self.assertIn("loadSyncSettings", text)
         self.assertIn("saveSyncSettings", text)

@@ -53,7 +53,7 @@ mihomo.service
 
 1. 按 `LOCAL_CIDR`（空则用和面板相同的规则识别本机网段）注入直连，避免访问本机局域网时绕进「去其他站点」的隧道。最多 8 段，只接受 `10/8`、`172.16/12`、`192.168/16`、`100.64/10` 和 IPv6 `fc00::/7`。
 2. 用 `MIHOMO_API_SECRET`（没有则用旧 `config.yaml` 的 `secret`）回填 `secret`，避免托管配置把控制器密钥清空。
-3. 若面板能 import，调用 `reapply_sync_blocks()`，把强制直连 / 强制代理规则重新写进新配置。
+3. 若面板能 import，调用 `reapply_sync_blocks()`，把强制直连 / 强制家宽 / 强制代理规则重新写进新配置。
 4. 和旧配置做比较：不需要重启的差异走热加载，否则重启。应用失败或 3 秒后服务不是 active，就从本次备份拷回 `config.yaml` 再重启。
 
 面板里直接改文本框走 `POST /api/config`：先 `mihomo-core -t -d /etc/mihomo -f <临时文件>`，通过后才替换，并同样在热加载和重启之间选择。没装 `mihomo-core` 时跳过校验直接保存。
@@ -72,12 +72,23 @@ mihomo.service
 
 ## 规则同步
 
-可同步的只有两个 id：`force-cn`（DIRECT，强制直连）和 `force-nocn`（PROXY，走代理策略组）。域名存在：
+可同步的有三个 id，规则顶部也按这个顺序匹配：
+
+| id | 页面名称 | 去向 |
+| --- | --- | --- |
+| `force-cn` | 强制直连 | `DIRECT`，同时进 `fake-ip-filter`，拿真实 IP |
+| `force-home` | 强制家宽 | 「🏠 家宽」策略组（`HOME_POLICY_CANDIDATES` 里第一个存在的组）。给要住宅 IP 才过得了验证的站点用，比如套了 Cloudflare 强制验证的 PT 站 |
+| `force-nocn` | 强制代理 | `proxy_policy_name()` 选出的代理组，优先 `♻️ 自动选择` |
+
+配置里没有家宽组时，规则块里不写 `force-home` 那条 RULE-SET（rule-provider 照样声明）；这时保存或收到非空的强制家宽列表会报错，不会悄悄改指别的组。强制家宽和另外两个列表写了同一个域名时，本机保存会拒绝。
+
+域名存在：
 
 - `/etc/mihomo/rules/mosctl-force-cn.yaml`
+- `/etc/mihomo/rules/mosctl-force-home.yaml`
 - `/etc/mihomo/rules/mosctl-force-nocn.yaml`
 
-`config.yaml` 里用 file 类型的 rule-provider（名字 `mosctl_force_cn` / `mosctl_force_nocn`）引用它们，并在规则顶部、`fake-ip-filter`、`rule-providers` 三处打上 `MOSCTL_MIHOMO_*_BEGIN/END` 标记。改域名时写文件，再 `PUT /providers/rules/<name>`。标记块还不存在、热刷新失败时才重启内核。
+`config.yaml` 里用 file 类型的 rule-provider（名字 `mosctl_force_cn` / `mosctl_force_home` / `mosctl_force_nocn`）引用它们，并在规则顶部、`fake-ip-filter`、`rule-providers` 三处打上 `MOSCTL_MIHOMO_*_BEGIN/END` 标记。改域名时写文件，再 `PUT /providers/rules/<name>`。标记块还不存在、热刷新失败时才重启内核。
 
 `RULE_SYNC_ENABLED=true` 且配了 `RULE_SYNC_PEERS` 时，保存后在后台线程里推给对端。对端接口是 `POST /api/rule-sync`，**不走登录**，只认 `X-Mosdns-Sync-Token` 或 JSON 的 `token`，与 `RULE_SYNC_TOKEN` 做恒定时间比较。本机地址会从对端列表里去掉。推送进行中对端返回忙时，发起方会重试。
 
